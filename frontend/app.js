@@ -735,35 +735,9 @@ function applyRouteHighlight(selectedIdx, nActive) {
 }
 
 function renderMapLegend(routes) {
-  if (!routes.length) {
-    dom.mapLegend.classList.add('hidden');
-    if (dom.fitRoutesBtn) dom.fitRoutesBtn.disabled = true;
-    return;
-  }
-  if (isMobileLayout()) {
-    dom.mapLegend.classList.add('hidden');
-    dom.mapLegend.innerHTML = '';
-    if (dom.fitRoutesBtn) dom.fitRoutesBtn.disabled = false;
-    return;
-  }
-  dom.mapLegend.classList.remove('hidden');
-  if (dom.fitRoutesBtn) dom.fitRoutesBtn.disabled = false;
-  const sel = state.selectedVariantIndex;
-  const routeRows = routes.map((r, i) => {
-    const col = lineColorForMode(r.mode);
-    const name = escHtml(r.variant_label || r.mode);
-    const active = i === sel ? ' lg-row-active' : '';
-    const pill = i === sel ? ' <span class="lg-pill">на карте</span>' : '';
-    return `<div class="lg-row${active}"><span class="lg-swatch lg-swatch-route" style="background:${col}"></span><span class="lg-text">${name}${pill}</span></div>`;
-  }).join('');
-
-  dom.mapLegend.innerHTML = `
-    <div class="lg-section">
-      <div class="lg-section-title">Маршруты на карте</div>
-      <p class="lg-mini-hint">Все варианты на карте; выбранный — яркий и толще, остальные ~50% прозрачности. Первый в списке — кратчайший по длине.</p>
-      ${routeRows}
-    </div>
-  `;
+  dom.mapLegend.classList.add('hidden');
+  dom.mapLegend.innerHTML = '';
+  if (dom.fitRoutesBtn) dom.fitRoutesBtn.disabled = routes.length === 0;
 }
 
 function clearRoutes() {

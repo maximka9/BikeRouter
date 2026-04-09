@@ -118,6 +118,9 @@ class RouteEngine:
         engine = RouteEngine()
         engine.warmup()                       # один раз при старте
         result = engine.compute_route(...)     # многократно
+
+    Сборка/обновление тяжёлого графа коридора выполняется вне ``_graph_lock``; под lock —
+    только проверки и атомарная установка ``_graph`` (см. ``_ensure_graph_for_corridor``).
     """
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
@@ -135,7 +138,8 @@ class RouteEngine:
             enabled=s.corridor_graph_disk_cache,
         )
         self._graph_built_at_utc: Optional[str] = None
-        self._graph_lock = threading.RLock()
+        # Короткие критические секции: снимок/замена графа; тяжёлый OSM/спутник — вне lock.
+        self._graph_lock = threading.Lock()
         # Дедупликация одновременной сборки одного и того же ключа коридора (GraphML/OSM).
         self._corridor_gate_locks: Dict[str, threading.Lock] = {}
         self._corridor_gate_guard = threading.Lock()
@@ -235,10 +239,10 @@ class RouteEngine:
             G.number_of_nodes(), G.number_of_edges(), fp
         )
 
-    def _build_graph_from_bbox_shape(
+    def _build_graph_bundle_from_bbox(
         self, bbox: Any, *, skip_satellite_green: bool = False
-    ) -> None:
-        """Загрузить OSM, веса (спутник опционально), применить к графу."""
+    ) -> Tuple[nx.MultiDiGraph, bool]:
+        """Собрать граф по bbox без установки в движок (для смены под коротким lock)."""
         G = self._app.graph_builder.load(bbox)
         edges = self._app.graph_builder.to_geodataframe(G)
         edges = self._app.graph_builder.calculate_weights(
@@ -248,8 +252,45 @@ class RouteEngine:
         G.graph["bike_router_satellite_phase"] = (
             _SAT_PHASE_STUB if skip_satellite_green else _SAT_PHASE_FULL
         )
+        return G, skip_satellite_green
+
+    def _build_graph_from_bbox_shape(
+        self, bbox: Any, *, skip_satellite_green: bool = False
+    ) -> None:
+        """Загрузить OSM, веса (спутник опционально), применить к графу (фиксированная зона / warmup)."""
+        G, sk = self._build_graph_bundle_from_bbox(
+            bbox, skip_satellite_green=skip_satellite_green
+        )
         self._set_active_graph(G)
-        self._graph_built_skip_satellite = skip_satellite_green
+        self._graph_built_skip_satellite = sk
+
+    def _graph_satisfies_corridor_request(
+        self,
+        required_wgs84: Tuple[float, float, float, float],
+        need_satellite: bool,
+    ) -> bool:
+        """Проверка под активным lock: коридор покрывает запрос и фаза спутника достаточна."""
+        if not self._loaded or self._graph is None or self._corridor_wgs84 is None:
+            return False
+        if not self._wgs84_corridor_contains(
+            self._corridor_wgs84, required_wgs84
+        ):
+            return False
+        if not need_satellite:
+            return True
+        ph = self._graph.graph.get(
+            "bike_router_satellite_phase", _SAT_PHASE_STUB
+        )
+        return ph == _SAT_PHASE_FULL
+
+    def _upgrade_satellite_on_graph_copy(self, G: nx.MultiDiGraph) -> nx.MultiDiGraph:
+        """Доначитка зелени на копии графа (исходный объект не мутируем — безопасно вне lock)."""
+        G_work = G.copy()
+        edges = self._app.graph_builder.to_geodataframe(G_work)
+        edges = self._app.graph_builder.upgrade_edges_satellite_weights(edges)
+        G2 = self._app.graph_builder.apply_weights(G_work, edges)
+        G2.graph["bike_router_satellite_phase"] = _SAT_PHASE_FULL
+        return G2
 
     @staticmethod
     def _wgs84_corridor_contains(
@@ -306,17 +347,6 @@ class RouteEngine:
                 self._corridor_gate_locks[key_hash] = threading.Lock()
             return self._corridor_gate_locks[key_hash]
 
-    def _upgrade_corridor_graph_satellite(self) -> None:
-        """Спутник + пересчёт только weight_*_green; OSM и weight_*_full без изменений."""
-        if self._graph is None:
-            raise BikeRouterError("Граф не загружен.")
-        edges = self._app.graph_builder.to_geodataframe(self._graph)
-        edges = self._app.graph_builder.upgrade_edges_satellite_weights(edges)
-        G = self._app.graph_builder.apply_weights(self._graph, edges)
-        G.graph["bike_router_satellite_phase"] = _SAT_PHASE_FULL
-        self._set_active_graph(G)
-        self._graph_built_skip_satellite = False
-
     def _ensure_graph_for_corridor(
         self,
         start: Tuple[float, float],
@@ -325,7 +355,11 @@ class RouteEngine:
         skip_satellite_green: bool = False,
         corridor_buffer_meters: Optional[float] = None,
     ) -> None:
-        """Подгрузить/пересобрать граф по прямоугольнику start–end ± BUFFER."""
+        """Подгрузить/пересобрать граф по прямоугольнику start–end ± BUFFER.
+
+        Долгая работа (Overpass, веса, тайлы) выполняется **вне** ``_graph_lock``;
+        под lock только проверки и атомарная установка ``_graph`` / ``_corridor_wgs84``.
+        """
         s = self._app.settings
         if not s.use_dynamic_corridor_graph:
             return
@@ -350,35 +384,57 @@ class RouteEngine:
             s,
             skip_satellite_green=skip_satellite_green,
         )
+
+        with self._graph_lock:
+            if self._graph_satisfies_corridor_request(
+                required_wgs84, need_satellite
+            ):
+                return
+
         gate = self._corridor_gate(key_hash)
         with gate:
             with self._graph_lock:
-                covers = (
-                    self._loaded
-                    and self._graph is not None
-                    and self._corridor_wgs84 is not None
-                    and self._wgs84_corridor_contains(
-                        self._corridor_wgs84, required_wgs84
-                    )
-                )
-                if covers:
-                    phase = self._graph.graph.get(
-                        "bike_router_satellite_phase", _SAT_PHASE_STUB
-                    )
-                    if not need_satellite or phase == _SAT_PHASE_FULL:
-                        return
-                    logger.info(
-                        "Коридор: доначитка спутниковой зелени без повторной загрузки OSM…"
-                    )
-                    self._app.elevation.init(
-                        test_lat=start[0], test_lon=start[1]
-                    )
-                    self._upgrade_corridor_graph_satellite()
-                    if self._graph is not None:
-                        self._corridor_graph_cache.save(key_hash, self._graph)
+                if self._graph_satisfies_corridor_request(
+                    required_wgs84, need_satellite
+                ):
                     return
 
-                self._corridor_wgs84 = required_wgs84
+            covers = False
+            phase = _SAT_PHASE_STUB
+            g0: Optional[nx.MultiDiGraph] = None
+            with self._graph_lock:
+                g0 = self._graph
+                cw = self._corridor_wgs84
+                loaded = self._loaded
+                covers = bool(
+                    loaded
+                    and g0 is not None
+                    and cw is not None
+                    and self._wgs84_corridor_contains(cw, required_wgs84)
+                )
+                if g0 is not None:
+                    phase = g0.graph.get(
+                        "bike_router_satellite_phase", _SAT_PHASE_STUB
+                    )
+
+            G_result: Optional[nx.MultiDiGraph] = None
+            skip_res: Optional[bool] = None
+
+            if covers and g0 is not None and need_satellite and phase == _SAT_PHASE_STUB:
+                logger.info(
+                    "Коридор: доначитка спутниковой зелени без повторной загрузки OSM…"
+                )
+                self._app.elevation.init(test_lat=start[0], test_lon=start[1])
+                G_result = self._upgrade_satellite_on_graph_copy(g0)
+                skip_res = False
+            elif covers:
+                with self._graph_lock:
+                    if self._graph_satisfies_corridor_request(
+                        required_wgs84, need_satellite
+                    ):
+                        return
+                return
+            else:
                 log_buf = (
                     eff_buf_m
                     if eff_buf_m is not None
@@ -411,26 +467,39 @@ class RouteEngine:
                         "Коридор: граф из дискового кэша (%s…)",
                         key_hash[:16],
                     )
-                    self._set_active_graph(G_cached)
-                    phase = G_cached.graph.get(
+                    ph = G_cached.graph.get(
                         "bike_router_satellite_phase", _SAT_PHASE_STUB
                     )
-                    self._graph_built_skip_satellite = phase == _SAT_PHASE_STUB
-                    if not need_satellite or phase == _SAT_PHASE_FULL:
-                        return
-                    logger.info(
-                        "Коридор: в кэше phase1 — доначитка зелени без повторной OSM…"
-                    )
-                    self._upgrade_corridor_graph_satellite()
-                    if self._graph is not None:
-                        self._corridor_graph_cache.save(key_hash, self._graph)
-                    return
+                    if not need_satellite or ph == _SAT_PHASE_FULL:
+                        G_result = G_cached
+                        skip_res = ph == _SAT_PHASE_STUB
+                    else:
+                        logger.info(
+                            "Коридор: в кэше phase1 — доначитка зелени без повторной OSM…"
+                        )
+                        G_result = self._upgrade_satellite_on_graph_copy(G_cached)
+                        skip_res = False
 
-                self._build_graph_from_bbox_shape(
-                    bbox, skip_satellite_green=skip_satellite_green
+                if G_result is None:
+                    G_result, skip_res = self._build_graph_bundle_from_bbox(
+                        bbox, skip_satellite_green=skip_satellite_green
+                    )
+
+            if G_result is None or skip_res is None:
+                raise BikeRouterError(
+                    "Внутренняя ошибка: не удалось подготовить граф коридора."
                 )
-                if self._graph is not None:
-                    self._corridor_graph_cache.save(key_hash, self._graph)
+
+            with self._graph_lock:
+                if self._graph_satisfies_corridor_request(
+                    required_wgs84, need_satellite
+                ):
+                    return
+                if not covers:
+                    self._corridor_wgs84 = required_wgs84
+                self._set_active_graph(G_result)
+                self._graph_built_skip_satellite = skip_res
+                self._corridor_graph_cache.save(key_hash, self._graph)
 
     def warmup(self) -> None:
         """Предзагрузка графа и расчёт весов. Вызвать один раз.
@@ -742,8 +811,8 @@ class RouteEngine:
                 f"Неизвестный режим: {mode!r}. Допустимые: full, green, shortest"
             )
 
+        self._ensure_graph_for_corridor(start, end)
         with self._graph_lock:
-            self._ensure_graph_for_corridor(start, end)
             if not self._loaded or self._graph is None:
                 raise BikeRouterError("Граф не загружен. Вызовите warmup().")
             G = self._graph
@@ -895,13 +964,13 @@ class RouteEngine:
         skip_satellite_green: bool,
         corridor_buffer_meters: Optional[float],
     ) -> List[RouteResponse]:
+        self._ensure_graph_for_corridor(
+            start,
+            end,
+            skip_satellite_green=skip_satellite_green,
+            corridor_buffer_meters=corridor_buffer_meters,
+        )
         with self._graph_lock:
-            self._ensure_graph_for_corridor(
-                start,
-                end,
-                skip_satellite_green=skip_satellite_green,
-                corridor_buffer_meters=corridor_buffer_meters,
-            )
             if not self._loaded or self._graph is None:
                 raise BikeRouterError("Граф не загружен. Вызовите warmup().")
             G = self._graph
@@ -927,10 +996,8 @@ class RouteEngine:
         profile = _PROFILE_MAP.get(profile_key)
         if profile is None:
             raise ValueError(f"Неизвестный профиль: {profile_key!r}")
+        self._ensure_graph_for_corridor(start, end, skip_satellite_green=False)
         with self._graph_lock:
-            self._ensure_graph_for_corridor(
-                start, end, skip_satellite_green=False
-            )
             if not self._loaded or self._graph is None:
                 raise BikeRouterError("Граф не загружен.")
             G = self._graph
@@ -986,105 +1053,104 @@ class RouteEngine:
             except Exception:
                 logger.debug("Route disk cache invalid, recalculating")
 
-        with self._graph_lock:
-            cached = self._route_disk_cache.get(
-                start, end, profile_key, green_enabled=green_enabled
-            )
-            if cached is not None:
-                try:
-                    inc_route_disk_hit()
-                    return AlternativesResponse.model_validate(cached)
-                except Exception:
-                    pass
-
-            inc_route_disk_miss()
-            logger.info(
-                "Alternatives: расчёт профиль=%s green_enabled=%s",
-                profile_key,
-                green_enabled,
-            )
-
-            s = self._app.settings
-            routes_out: List[RouteResponse]
-
-            if not s.use_dynamic_corridor_graph or s.corridor_buffer_meters <= 0:
-                routes_out = self._compute_alternatives_once(
-                    start,
-                    end,
-                    profile_key,
-                    include_green_route=include_green,
-                    skip_satellite_green=skip_sat,
-                    corridor_buffer_meters=None,
-                )
-            else:
-                base = float(s.corridor_buffer_meters)
-                extra = 0.0
-                attempt = 0
-                step = max(1.0, float(s.auto_expand_step_meters))
-                max_extra = max(0.0, float(s.auto_expand_max_meters))
-                max_attempts = max(1, int(s.auto_expand_max_attempts))
-                while True:
-                    attempt += 1
-                    eff = base + extra
-                    try:
-                        routes_out = self._compute_alternatives_once(
-                            start,
-                            end,
-                            profile_key,
-                            include_green_route=include_green,
-                            skip_satellite_green=skip_sat,
-                            corridor_buffer_meters=eff,
-                        )
-                        logger.info(
-                            "auto_expand_corridor attempt=%d corridor_m=%.0f "
-                            "result=ok routes=%d",
-                            attempt,
-                            eff,
-                            len(routes_out),
-                        )
-                        break
-                    except RouteNotFoundError as e:
-                        logger.warning(
-                            "auto_expand_corridor attempt=%d corridor_m=%.0f "
-                            "result=no_path code=%s",
-                            attempt,
-                            eff,
-                            e.code,
-                        )
-                        at_attempts = attempt >= max_attempts
-                        at_extra_cap = extra + step > max_extra + 1e-6
-                        if at_attempts or at_extra_cap:
-                            logger.warning(
-                                "auto_expand_corridor exhausted attempt=%d "
-                                "corridor_m=%.0f max_extra_m=%.0f max_attempts=%d",
-                                attempt,
-                                eff,
-                                max_extra,
-                                max_attempts,
-                            )
-                            _raise_route_not_found_after_corridor_expand(
-                                e,
-                                eff=eff,
-                                base=base,
-                                max_extra=max_extra,
-                                step=step,
-                                attempt=attempt,
-                                max_attempts=max_attempts,
-                            )
-                        extra += step
-
-            out = AlternativesResponse(routes=routes_out)
+        cached = self._route_disk_cache.get(
+            start, end, profile_key, green_enabled=green_enabled
+        )
+        if cached is not None:
             try:
-                self._route_disk_cache.put(
-                    start,
-                    end,
-                    profile_key,
-                    [r.model_dump(mode="json") for r in out.routes],
-                    green_enabled=green_enabled,
-                )
-            except Exception as exc:
-                logger.debug("Route cache store skipped: %s", exc)
-            return out
+                inc_route_disk_hit()
+                return AlternativesResponse.model_validate(cached)
+            except Exception:
+                pass
+
+        inc_route_disk_miss()
+        logger.info(
+            "Alternatives: расчёт профиль=%s green_enabled=%s",
+            profile_key,
+            green_enabled,
+        )
+
+        s = self._app.settings
+        routes_out: List[RouteResponse]
+
+        if not s.use_dynamic_corridor_graph or s.corridor_buffer_meters <= 0:
+            routes_out = self._compute_alternatives_once(
+                start,
+                end,
+                profile_key,
+                include_green_route=include_green,
+                skip_satellite_green=skip_sat,
+                corridor_buffer_meters=None,
+            )
+        else:
+            base = float(s.corridor_buffer_meters)
+            extra = 0.0
+            attempt = 0
+            step = max(1.0, float(s.auto_expand_step_meters))
+            max_extra = max(0.0, float(s.auto_expand_max_meters))
+            max_attempts = max(1, int(s.auto_expand_max_attempts))
+            while True:
+                attempt += 1
+                eff = base + extra
+                try:
+                    routes_out = self._compute_alternatives_once(
+                        start,
+                        end,
+                        profile_key,
+                        include_green_route=include_green,
+                        skip_satellite_green=skip_sat,
+                        corridor_buffer_meters=eff,
+                    )
+                    logger.info(
+                        "auto_expand_corridor attempt=%d corridor_m=%.0f "
+                        "result=ok routes=%d",
+                        attempt,
+                        eff,
+                        len(routes_out),
+                    )
+                    break
+                except RouteNotFoundError as e:
+                    logger.warning(
+                        "auto_expand_corridor attempt=%d corridor_m=%.0f "
+                        "result=no_path code=%s",
+                        attempt,
+                        eff,
+                        e.code,
+                    )
+                    at_attempts = attempt >= max_attempts
+                    at_extra_cap = extra + step > max_extra + 1e-6
+                    if at_attempts or at_extra_cap:
+                        logger.warning(
+                            "auto_expand_corridor exhausted attempt=%d "
+                            "corridor_m=%.0f max_extra_m=%.0f max_attempts=%d",
+                            attempt,
+                            eff,
+                            max_extra,
+                            max_attempts,
+                        )
+                        _raise_route_not_found_after_corridor_expand(
+                            e,
+                            eff=eff,
+                            base=base,
+                            max_extra=max_extra,
+                            step=step,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                        )
+                    extra += step
+
+        out = AlternativesResponse(routes=routes_out)
+        try:
+            self._route_disk_cache.put(
+                start,
+                end,
+                profile_key,
+                [r.model_dump(mode="json") for r in out.routes],
+                green_enabled=green_enabled,
+            )
+        except Exception as exc:
+            logger.debug("Route cache store skipped: %s", exc)
+        return out
 
     def compute_alternatives_phase1_two_routes(
         self,

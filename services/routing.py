@@ -9,10 +9,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import networkx as nx
 import osmnx as ox
 
-from ..config import ModeProfile
+from ..config import MAX_ROUTE_GRADIENT_DISPLAY, ModeProfile
 from ..exceptions import RouteNotFoundError
 
 logger = logging.getLogger(__name__)
+
+
+def _edge_gradient_abs_for_display(edge_data: dict) -> float:
+    """Физический уклон ребра для UI: ``gradient_raw``, иначе ``gradient``; не выше порога."""
+    raw = edge_data.get("gradient_raw")
+    if raw is None:
+        raw = edge_data.get("gradient", 0.0)
+    g = abs(float(raw or 0.0))
+    return min(g, MAX_ROUTE_GRADIENT_DISPLAY)
 
 
 def coerce_edge_weight_numeric(val: Any, *, fallback: float = float("inf")) -> float:
@@ -44,6 +53,7 @@ def coerce_edge_weight_numeric(val: Any, *, fallback: float = float("inf")) -> f
 _GRAPHML_NUMERIC_EDGE_ATTRS = frozenset(
     {
         "gradient",
+        "gradient_raw",
         "elevation_diff",
         "edge_climb",
         "edge_descent",
@@ -432,11 +442,11 @@ class RouteService:
 
         for i in range(route.edge_count):
             d = G.edges[route.edges[i]]
-            g = d.get("gradient", 0.0)
-            grads.append(abs(g))
+            g = _edge_gradient_abs_for_display(d)
+            grads.append(g)
             climb += d.get("edge_climb", 0.0)
             descent += d.get("edge_descent", 0.0)
-            max_g = max(max_g, abs(g))
+            max_g = max(max_g, g)
 
         return {
             "climb": climb,
@@ -696,13 +706,17 @@ class RouteService:
             gt = str(d.get("green_type", "none") or "none").lower()
             trees = float(d.get("trees_percent", 0.0) or 0.0)
             grass = float(d.get("grass_percent", 0.0) or 0.0)
-            grad = float(d.get("gradient", 0.0) or 0.0)
+            grad_disp = _edge_gradient_abs_for_display(d)
+            gr = d.get("gradient_raw")
+            if gr is None:
+                gr = d.get("gradient", 0.0)
+            grad_phys = float(gr or 0.0)
             ln = float(d.get("length", 0.0) or 0.0)
 
             base = {
                 "highway": hw,
                 "length_m": round(ln, 1),
-                "gradient_pct": round(abs(grad) * 100, 1),
+                "gradient_pct": round(grad_disp * 100, 1),
             }
 
             if gt != "none" or trees >= 2.0 or grass >= 2.0:
@@ -725,7 +739,7 @@ class RouteService:
 
             if hw != "steps":
                 reasons: List[str] = []
-                if abs(grad) >= RouteService.STEEP_GRADIENT_ABS:
+                if abs(grad_phys) >= RouteService.STEEP_GRADIENT_ABS:
                     reasons.append("steep")
                 if hw in RouteService.PROBLEMATIC_HIGHWAYS:
                     reasons.append("traffic_class")

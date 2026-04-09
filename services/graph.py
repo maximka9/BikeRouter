@@ -320,6 +320,7 @@ class GraphBuilder:
         length = edges_gdf["length"].values
         elev = edges_gdf["elevation_diff"].values
         raw_gradient = np.where(length > 0, elev / length, 0)
+        edges_gdf["gradient_raw"] = raw_gradient
         display_max = max(p.max_gradient for p in PROFILES)
         clipped_gradient = np.clip(raw_gradient, -display_max, display_max)
         edges_gdf["gradient"] = clipped_gradient
@@ -532,6 +533,7 @@ class GraphBuilder:
             "green_coeff",
             "green_type",
             "gradient",
+            "gradient_raw",
             "trees_percent",
             "grass_percent",
             "green_percent",

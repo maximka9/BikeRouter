@@ -294,18 +294,32 @@ body {
   color: #991b1b;
 }
 
-/* ═══════════ Results toolbar ═══════════ */
-.results-toolbar {
-  margin-bottom: 10px;
+/* ═══════════ Построить + сброс маршрута ═══════════ */
+.build-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 10px;
+  margin: 16px 20px;
+  flex-wrap: nowrap;
+}
+.build-actions .build-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+.build-actions-reset {
+  flex: 0 0 auto;
+  align-self: stretch;
+  white-space: nowrap;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 /* ═══════════ Build button ═══════════ */
 .build-btn {
-  margin: 16px 20px;
+  margin: 0;
   padding: 12px;
   border: none;
   border-radius: var(--radius);
@@ -1292,13 +1306,15 @@ div.desktop-only { display: block; }
   .mobile-step-plan {
     padding-bottom: 0;
   }
-  .mobile-step-plan .build-btn {
+  .mobile-step-plan .build-actions {
     position: relative;
     flex-shrink: 0;
     margin: 8px 16px 12px;
     z-index: 6;
-    /* Не переопределять фон/цвет текста: базовый .build-btn — accent + белый текст */
     box-shadow: 0 -3px 14px rgba(15, 23, 42, 0.07);
+  }
+  .mobile-step-plan .build-actions .build-btn {
+    box-shadow: none;
   }
 
   body.mobile-sheet-phase-detail .mobile-variant-list-label {
@@ -1606,20 +1622,6 @@ div.desktop-only { display: block; }
     max-width: 100%;
   }
 
-  .results-toolbar {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    gap: 8px;
-    padding-bottom: 4px;
-    -webkit-overflow-scrolling: touch;
-  }
-  .results-toolbar .toolbar-btn {
-    flex-shrink: 0;
-    font-size: 12px;
-    padding-left: 12px;
-    padding-right: 12px;
-    min-height: 40px;
-  }
 }
 
 @media (min-width: 769px) {

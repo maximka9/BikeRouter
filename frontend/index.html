@@ -7,7 +7,7 @@
 
   <!-- MapLibre и шрифты с того же origin — иначе на LAN/мобильной сети вкладка может «вечно» ждать unpkg/Google Fonts -->
   <link href="/static/vendor/maplibre/maplibre-gl.css?v=20260430-1" rel="stylesheet">
-  <link href="/static/style.css?v=20260430-10" rel="stylesheet">
+  <link href="/static/style.css?v=20260430-11" rel="stylesheet">
 </head>
 <body>
 
@@ -99,11 +99,14 @@
   </section>
   </div><!-- .mobile-step-scroll -->
 
-  <!-- Кнопка всегда внизу блока плана (не в прокрутке — видна на iOS) -->
-  <button id="build-btn" class="build-btn" disabled>
-    <span class="build-text">Построить маршрут</span>
-    <span class="spinner hidden"></span>
-  </button>
+  <!-- Построить + сброс маршрута (сброс виден только после успешного расчёта) -->
+  <div class="build-actions" id="build-actions">
+    <button id="build-btn" class="build-btn" type="button" disabled>
+      <span class="build-text">Построить маршрут</span>
+      <span class="spinner hidden"></span>
+    </button>
+    <button type="button" id="reset-route-btn" class="toolbar-btn toolbar-btn-danger build-actions-reset hidden" title="Убрать линии и карточки, точки останутся" aria-hidden="true">Сбросить маршрут</button>
+  </div>
   </div><!-- /mobile-step-plan -->
 
   <!-- Краткий маршрут A→B в фазах variants/detail (без полной формы) -->
@@ -114,10 +117,6 @@
     <div id="results-empty" class="results-empty hidden" aria-hidden="true"></div>
     <div class="mobile-results-nav mobile-only">
       <button type="button" id="mobile-edit-points-btn" class="mobile-text-btn">Точки</button>
-    </div>
-    <div class="results-toolbar">
-      <button type="button" id="copy-share-btn" class="toolbar-btn" title="Скопировать ссылку с точками, профилем и выбранным вариантом">Скопировать ссылку</button>
-      <button type="button" id="reset-route-btn" class="toolbar-btn toolbar-btn-danger" title="Убрать линии и карточки, точки останутся">Сбросить маршрут</button>
     </div>
     <div class="desktop-only">
       <label class="panel-label">Варианты на карте</label>
@@ -168,6 +167,6 @@
 </div>
 
 <script src="/static/vendor/maplibre/maplibre-gl.js?v=20260430-1"></script>
-<script src="/static/app.js?v=20260430-10"></script>
+<script src="/static/app.js?v=20260430-11"></script>
 </body>
 </html>

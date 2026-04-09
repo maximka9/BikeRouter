@@ -133,7 +133,6 @@ const dom = {
   tripStatus:   $('#trip-status'),
   routeProgress: $('#route-progress'),
   routeProgressFill: $('#route-progress-fill'),
-  copyShareBtn: $('#copy-share-btn'),
   resultsEmpty: $('#results-empty'),
   mobileLocateBtn: $('#mobile-locate-btn'),
   mapHintToggle: $('#map-hint-toggle'),
@@ -719,6 +718,7 @@ function displayRoutes(data) {
     const pad = getMapFitPadding();
     map.fitBounds(bounds, { padding: pad, duration: 900 });
   }
+  updateResetRouteBtnVisibility();
 }
 
 function applyRouteHighlight(selectedIdx, nActive) {
@@ -801,6 +801,7 @@ function clearRoutes() {
   }
   syncMobileSheetUi();
   updateTripStatus();
+  updateResetRouteBtnVisibility();
 }
 
 /* ═══════════ URL share (query: slat, slon, elat, elon, p, v, sa, ea) ═══════════ */
@@ -984,7 +985,7 @@ function updateTripStatus() {
       } else {
         dom.tripStatus.textContent = m
           ? 'Готово. Ниже варианты — тап для деталей.'
-          : 'Маршрут построен. Первый вариант — кратчайший; вкладки и ссылка сохраняют выбор.';
+          : 'Маршрут построен.';
       }
       dom.tripStatus.className = 'trip-status trip-status-done';
       return;
@@ -1630,35 +1631,6 @@ function buildVariantTabs(routes) {
   });
 }
 
-/** Доли fallback по сумме длин рёбер (как на backend в quality_hints). */
-function renderQualitySection(qh, compact) {
-  const naS = ((qh?.na_surface_fraction ?? 0) * 100).toFixed(0);
-  const infS = ((qh?.inferred_surface_fraction ?? 0) * 100).toFixed(0);
-  const infH = ((qh?.inferred_highway_fraction ?? 0) * 100).toFixed(0);
-  const warns = qh?.warnings || [];
-  if (compact) {
-    const wShort = warns.length
-      ? ` · ⚠ ${warns.length}`
-      : '';
-    return `
-      <div class="quality-block span-2">
-        <span class="d-label">OSM</span>
-        <p class="quality-metrics-line">Без surface ~${naS}% · surface ~${infS}% · highway ~${infH}%${wShort}</p>
-      </div>
-    `;
-  }
-  const warnBlock = warns.length
-    ? `<div class="quality-warn-title">Предупреждения</div><ul class="quality-warn-list">${warns.map((w) => `<li>${escHtml(w)}</li>`).join('')}</ul>`
-    : '<p class="quality-ok-note">Критичных предупреждений по порогам нет.</p>';
-  return `
-    <div class="quality-block span-2">
-      <span class="d-label">Качество данных (OSM)</span>
-      <p class="quality-metrics-line">Оценка неизвестных тегов — по <strong>сумме длин рёбер</strong> (совпадает с длиной маршрута в карточке): без surface ~${naS}% · коэфф. 1.0 по surface ~${infS}% · по highway ~${infH}%.</p>
-      ${warnBlock}
-    </div>
-  `;
-}
-
 function renderVariantDiffMobile(route, routes, idx) {
   const base = routes[0];
   if (!base || routes.length < 2) return '';
@@ -1715,10 +1687,6 @@ function renderVariantDiff(route, routes, idx) {
       parts.push(dg > 0 ? `озеленение выше на ${dg.toFixed(1)} п.п.` : `озеленение ниже на ${(-dg).toFixed(1)} п.п.`);
     }
   }
-  const ds = route.stairs.count - base.stairs.count;
-  if (ds !== 0) {
-    parts.push(ds > 0 ? `на ${ds} участ. лестниц больше` : `на ${-ds} участ. лестниц меньше`);
-  }
   const text = parts.length
     ? parts.join('; ') + '.'
     : 'По ключевым метрикам близок к кратчайшему варианту; подробности — в таблице сравнения и карточке.';
@@ -1728,16 +1696,12 @@ function renderVariantDiff(route, routes, idx) {
 function renderRouteDetailCard(route, routes, idx) {
   const e = route.elevation;
   const g = route.green;
-  const s = route.stairs;
-  const na = route.surfaces.na_fraction;
   const title = escHtml(route.variant_label || route.mode);
   const compact = isMobileLayout();
   const greenOff = !state.greenEnabled;
   const diffBlock = Array.isArray(routes)
     ? (compact ? renderVariantDiffMobile(route, routes, idx) : renderVariantDiff(route, routes, idx))
     : '';
-  const qSection = renderQualitySection(route.quality_hints || {}, compact);
-  const qFull = renderQualitySection(route.quality_hints || {}, false);
   const greenSrvNote = greenOff
     ? `<div class="detail-row span-2 green-satellite-off">
         <p class="green-satellite-off-text">Учёт озеленения отключён — метрики зелени по снимкам для этого запроса не использовались.</p>
@@ -1758,13 +1722,7 @@ function renderRouteDetailCard(route, routes, idx) {
           <span class="d-val">${greenOff ? '—' : `${g.avg_trees_pct.toFixed(1)}%`}</span>
           ${!greenOff && !serverSatelliteGreenEnabled ? '<span class="d-note">снимки выкл.</span>' : ''}
         </div>
-        <div class="detail-row span-2">
-          <span class="d-label">Нет surface в OSM</span>
-          <span class="d-val small">${(na * 100).toFixed(1)}%</span>
-          <span class="d-note">доля длины маршрута без тега surface в OSM</span>
-        </div>
       </div>
-      ${qFull}
     `;
     dom.routeDetailCard.innerHTML = `
       <h3 class="route-detail-title-fallback">${title}</h3>
@@ -1789,10 +1747,6 @@ function renderRouteDetailCard(route, routes, idx) {
         <div class="detail-row">
           <span class="d-label">Зелень</span>
           <span class="d-val" style="color:var(--green)">${greenOff ? '—' : `${g.percent.toFixed(1)}%`}</span>
-        </div>
-        <div class="detail-row span-2">
-          <span class="d-label">Лестницы</span>
-          <span class="d-val small">${s.count} шт · ${s.total_length_m.toFixed(0)} м</span>
         </div>
       </div>
       <details class="mobile-route-more">
@@ -1833,16 +1787,6 @@ function renderRouteDetailCard(route, routes, idx) {
         <span class="d-val">${greenOff ? '—' : `${g.avg_trees_pct.toFixed(1)}%`}</span>
         ${!greenOff && !serverSatelliteGreenEnabled ? '<span class="d-note">анализ спутниковых тайлов отключён на сервере</span>' : ''}
       </div>
-      <div class="detail-row span-2">
-        <span class="d-label">Лестницы</span>
-        <span class="d-val small">${s.count} шт · ${s.total_length_m.toFixed(0)} м суммарно по рёбрам</span>
-      </div>
-      <div class="detail-row span-2">
-        <span class="d-label">Нет surface в OSM</span>
-        <span class="d-val small">${(na * 100).toFixed(1)}%</span>
-        <span class="d-note">доля длины маршрута без тега surface в OSM; см. блок «Качество данных» выше</span>
-      </div>
-      ${qSection}
     </div>
   `;
   }
@@ -1897,6 +1841,14 @@ function updateBuildBtn() {
   dom.buildBtn.disabled = !(state.startCoords && state.endCoords);
 }
 
+/** Кнопка «Сбросить маршрут» — только если маршрут уже на карте. */
+function updateResetRouteBtnVisibility() {
+  if (!dom.resetRouteBtn) return;
+  const has = !!(state.routeList && state.routeList.length);
+  dom.resetRouteBtn.classList.toggle('hidden', !has);
+  dom.resetRouteBtn.setAttribute('aria-hidden', has ? 'false' : 'true');
+}
+
 function setToolbarDisabled(on) {
   if (dom.locateStartBtn) dom.locateStartBtn.disabled = on;
   if (dom.clearPointsBtn) dom.clearPointsBtn.disabled = on;
@@ -1914,6 +1866,7 @@ function setLoading(on) {
   }
   setToolbarDisabled(on);
   updateTripStatus();
+  updateResetRouteBtnVisibility();
 }
 
 function showToast(msg, variant = 'error', durationMs = 8000) {
@@ -2044,19 +1997,6 @@ function setupEvents() {
     dom.greenEnabledCheckbox.addEventListener('change', () => {
       state.greenEnabled = dom.greenEnabledCheckbox.checked;
       syncUrlFromState();
-    });
-  }
-
-  if (dom.copyShareBtn) {
-    dom.copyShareBtn.addEventListener('click', async () => {
-      syncUrlFromState();
-      const url = window.location.href;
-      try {
-        await navigator.clipboard.writeText(url);
-        showToast('Ссылка скопирована в буфер обмена', 'info', 3500);
-      } catch {
-        showToast(`Не удалось скопировать автоматически. Адрес страницы:\n${url}`, 'warn', 12000);
-      }
     });
   }
 

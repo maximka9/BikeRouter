@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>О системе — Bike Router</title>
+  <link href="/static/style.css?v=20260402-3" rel="stylesheet">
+  <link href="/static/about.css?v=20260402-3" rel="stylesheet">
+</head>
+<body class="about-body">
+
+<header class="about-header">
+  <a href="/" class="about-back">← К карте</a>
+  <h1>О системе</h1>
+  <p class="about-lead">Bike Router — веб-сервис построения и сравнения вариантов маршрутов для велосипедистов и пешеходов с учётом рельефа (SRTM), тегов дороги и покрытия в OpenStreetMap, а также оценки озеленения вдоль рёбер графа. Результаты носят информационный характер и не заменяют соблюдение ПДД и оценку безопасности в реальных условиях.</p>
+</header>
+
+<main class="about-main">
+
+  <section class="about-section" id="meta-live">
+    <h2>Состояние сервера</h2>
+    <p class="about-note">Актуальные значения подставляются при открытии страницы.</p>
+    <ul class="about-kv">
+      <li><span>Граф загружен</span> <code id="meta-loaded">—</code></li>
+      <li><span>Узлов / рёбер</span> <code id="meta-graph-size">—</code></li>
+      <li><span>Сборка графа (UTC)</span> <code id="meta-built">—</code></li>
+      <li><span>Версия API</span> <code id="meta-version">—</code></li>
+      <li><span>Версия логики весов</span> <code id="meta-algo">—</code></li>
+      <li><span>Отпечаток весов (SHA-256, начало)</span> <code id="meta-fp" class="mono-long">—</code></li>
+    </ul>
+    <p class="about-fine">«Сборка графа» — момент последнего запуска загрузки OSM и пересчёта весов на этом сервере. Это не дата релиза данных на openstreetmap.org: фактическое состояние карты соответствует тому снимку, который вернул Overpass API в момент загрузки (с учётом кэша OSMnx).</p>
+  </section>
+
+  <section class="about-section">
+    <h2>Источники данных</h2>
+    <ul>
+      <li><strong>OpenStreetMap</strong> — геометрия дорог, теги <code>highway</code>, <code>surface</code>, <code>steps</code> и др. Загрузка через <a href="https://osmnx.readthedocs.io/" rel="noopener noreferrer" target="_blank">OSMnx</a> по полигону области.</li>
+      <li><strong>Рельеф</strong> — цифровая модель высот для оценки уклонов вдоль рёбер (сервис в проекте; при отсутствии данных возможны упрощения).</li>
+      <li><strong>Озеленение</strong> — при включённом анализе: спутниковые тайлы (конфигурация TMS) и оценка доли деревьев/травы в коридоре ребра. При недоступности PIL/тайлов используются заглушки.</li>
+      <li><strong>Геокодирование</strong> — <a href="https://nominatim.org/" rel="noopener noreferrer" target="_blank">Nominatim</a> (публичный сервис OSM Foundation) с ограничениями по частоте запросов; в интерфейсе поиск только по явному действию пользователя.</li>
+    </ul>
+  </section>
+
+  <section class="about-section">
+    <h2>Как считаются веса</h2>
+    <p>Для каждого ребра графа задаётся длина и перепад высоты. Базовый «физический» вес имеет вид <em>base = mg × длина × (ν + эффективный уклон)</em> с ограничением крутизны и отдельной обработкой длинных рёбер (интерполяция высот по сегментам ~30&nbsp;м).</p>
+    <p>Затем вес умножается на коэффициенты по типу дороги (<code>highway</code>) и покрытию (<code>surface</code>) из справочника профиля. Если тега нет или значение неизвестно таблице, используется коэффициент <strong>1.0</strong> (нейтральная оценка).</p>
+    <p>Режим «с учётом озеленения» дополнительно умножает вес на функцию от спутниковой оценки зелёности ребра (чем выше зелёность, тем ниже вес в этом режиме).</p>
+    <p>Кратчайший вариант на карте строится по минимальной сумме длин рёбер OSM (<code>length</code>), а не по энергетическому весу.</p>
+  </section>
+
+  <section class="about-section">
+    <h2>Профили</h2>
+    <table class="about-table">
+      <thead>
+        <tr><th></th><th>Велосипедист</th><th>Пешеход</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Идея</td><td>Меньше трафика, избегать лестниц</td><td>Комфорт тротуаров и зелени</td></tr>
+        <tr><td>Лестницы (<code>steps</code>)</td><td>Очень высокий штраф</td><td>Умеренный штраф (проходимо)</td></tr>
+        <tr><td>Озеленение</td><td>Стандартная чувствительность</td><td>Повышенная (<code>green_sensitivity</code> выше)</td></tr>
+        <tr><td>Скорость (оценка времени)</td><td>~18 км/ч по ровному асфальту</td><td>~5 км/ч</td></tr>
+      </tbody>
+    </table>
+    <p class="about-fine">Точные коэффициенты задаются в коде (<code>config.py</code>, класс <code>ModeProfile</code>).</p>
+  </section>
+
+  <section class="about-section">
+    <h2>Ограничения качества данных</h2>
+    <ul>
+      <li>OSM заполняется сообществом: в одних районах подробные <code>surface</code> и <code>highway</code>, в других — нет. Это влияет на достоверность «комфорта» и времени.</li>
+      <li>Отсутствие <code>surface</code> не означает плохую дорогу — в расчёте используется нейтральный коэффициент, но интерпретация для пользователя неоднозначна.</li>
+      <li>Рельеф и спутниковый анализ — модели с погрешностью; на коротких рёбрах возможны упрощения.</li>
+      <li>Маршрут оптимален относительно <em>этой</em> модели и <em>этого</em> графа, а не «истинной» дорожной ситуации в реальном времени.</li>
+    </ul>
+    <p>Сервис показывает <strong>предупреждения</strong>, если по <em>длине маршрута</em> (сумма длин рёбер OSM) велика доля участков без surface, с коэффициентом покрытия или highway по умолчанию, а также при большом числе или суммарной длине лестниц.</p>
+  </section>
+
+  <section class="about-section">
+    <h2>Базовая карта и клиент</h2>
+    <p>Подложка карты — растровые тайлы <strong>CARTO Voyager</strong> (сеть доставки CARTO, cartocdn.com). Атрибуция: © <a href="https://carto.com/" rel="noopener noreferrer" target="_blank">CARTO</a> и © <a href="https://www.openstreetmap.org/copyright" rel="noopener noreferrer" target="_blank">OpenStreetMap</a> (данные OSM распространяются на условиях <a href="https://opendatacommons.org/licenses/odbl/" rel="noopener noreferrer" target="_blank">ODbL</a>).</p>
+    <p>Отрисовка карты и взаимодействие — <a href="https://maplibre.org/" rel="noopener noreferrer" target="_blank">MapLibre GL JS</a> (лицензия BSD-3-Clause); в этом проекте библиотека отдаётся с того же origin, что и страница (<code>/static/vendor/maplibre/</code>), без внешнего CDN на странице карты.</p>
+    <p>Публичный сервер <strong>tile.openstreetmap.org</strong> рассчитан на ограниченную нагрузку; для высоконагруженного продакшена рекомендуется собственный тайловый кэш, коммерческий провайдер или иная схема с явным соглашением об использовании — без массовой предзагрузки тайлов с инфраструктуры OSMF.</p>
+  </section>
+
+  <section class="about-section" id="legal">
+    <h2>Атрибуция и условия использования внешних сервисов</h2>
+    <ul>
+      <li><strong>OpenStreetMap</strong> — данные © участники OSM, ODbL; при отображении карты необходима заметная атрибуция OSM.</li>
+      <li><strong>Nominatim</strong> (геокодирование) — сервис OSM Foundation; действуют <a href="https://operations.osmfoundation.org/policies/nominatim/" rel="noopener noreferrer" target="_blank">политика использования</a> (в т.ч. ограничение частоты запросов). В интерфейсе поиск выполняется только по явному действию пользователя (кнопка или Enter), без автодополнения на каждый символ.</li>
+      <li><strong>CARTO</strong> — тайлы используются в соответствии с типовой атрибуцией поставщика; при смене подложки проверьте условия нового провайдера.</li>
+    </ul>
+    <p class="about-fine">Проект не гарантирует актуальность данных OSM, точность рельефа и спутниковых оценок, бесперебойность публичных API и пригодность маршрутов для конкретного пользователя. Ответственность за выбор дороги и безопасность лежит на пользователе.</p>
+  </section>
+
+</main>
+
+<footer class="about-footer">
+  <a href="/">На главную</a>
+  ·
+  <a href="/docs" target="_blank" rel="noopener noreferrer">OpenAPI</a>
+</footer>
+
+<script>
+(async function () {
+  try {
+    const r = await fetch('/health');
+    const d = await r.json();
+    document.getElementById('meta-loaded').textContent = d.graph_loaded ? 'да' : 'нет';
+    document.getElementById('meta-graph-size').textContent =
+      (d.nodes != null && d.edges != null) ? d.nodes + ' / ' + d.edges : '—';
+    document.getElementById('meta-built').textContent = d.graph_built_at_utc || '—';
+    document.getElementById('meta-version').textContent = d.version || '—';
+    document.getElementById('meta-algo').textContent = d.routing_algo_version || '—';
+    const fp = d.routing_engine_fingerprint || '';
+    document.getElementById('meta-fp').textContent = fp ? fp.slice(0, 18) + '…' : '—';
+  } catch (e) {
+    document.getElementById('meta-loaded').textContent = 'ошибка запроса';
+  }
+})();
+</script>
+</body>
+</html>

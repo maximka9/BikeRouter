@@ -1,0 +1,31 @@
+# Запуск из каталога bike_router:
+#   docker compose up --build
+#
+# Скопируйте .env.example → .env и при необходимости поправьте AREA_* и порты.
+#
+services:
+  bike-router:
+    build: .
+    image: bike-router:local
+    ports:
+      - "${BIKE_ROUTER_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /app
+      BIKE_ROUTER_BASE_DIR: /data
+      # Зелень и тайлы управляются через .env (см. .env.example: компактный AREA_*, SATELLITE_ZOOM, DISABLE_*).
+      # Для «быстрого Docker без тайлов» раскомментируйте:
+      # DISABLE_SATELLITE_GREEN: "true"
+    volumes:
+      - bike_router_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 180s
+
+volumes:
+  bike_router_data:

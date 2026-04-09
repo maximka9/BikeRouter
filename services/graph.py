@@ -3,9 +3,10 @@
 import logging
 import math
 import os
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import geopandas as gpd
+import pandas as pd
 import requests
 import networkx as nx
 import numpy as np
@@ -28,6 +29,28 @@ def _first_value(val: Any) -> Any:
     if isinstance(val, list):
         return val[0] if val else None
     return val
+
+
+def _segmented_base_weight_long_edge(
+    profile: Any,
+    elevs: Sequence[float],
+    edge_len: float,
+) -> float:
+    """Сумма базового веса по подсегментам длинного ребра (та же формула, что в цикле)."""
+    n_pts = len(elevs)
+    if n_pts < 2 or edge_len <= 0:
+        return float("nan")
+    sub_len = edge_len / (n_pts - 1)
+    seg_base = 0.0
+    for j in range(n_pts - 1):
+        g = (elevs[j + 1] - elevs[j]) / sub_len
+        g = max(-profile.max_gradient, min(profile.max_gradient, g))
+        if g >= 0:
+            seg_eff = profile.nu + g
+        else:
+            seg_eff = max(profile.nu - abs(g), profile.min_descent_coeff)
+        seg_base += profile.mg * sub_len * seg_eff
+    return seg_base
 
 
 class GraphBuilder:
@@ -270,50 +293,39 @@ class GraphBuilder:
     # Расчёт весов
     # ------------------------------------------------------------------
 
-    def enrich_edges_physical(
-        self,
-        edges_gdf: gpd.GeoDataFrame,
-        *,
-        skip_satellite_green: bool = False,
+    def enrich_edges_base_physical(
+        self, edges_gdf: gpd.GeoDataFrame
     ) -> Tuple[gpd.GeoDataFrame, Any]:
-        """Высоты, спутник или заглушки зелени, surface_effective, градиенты."""
-        elev_tuples = edges_gdf.apply(
-            lambda r: self._elevation.get_edge_elevation(
-                r.geometry, r["length"]
-            ),
-            axis=1,
-        )
-        edges_gdf["elevation_diff"] = elev_tuples.apply(lambda t: t[0])
-        edges_gdf["edge_climb"] = elev_tuples.apply(lambda t: t[1])
-        edges_gdf["edge_descent"] = elev_tuples.apply(lambda t: t[2])
-        elev_profiles = elev_tuples.apply(lambda t: t[3]).values
+        """Базовое обогащение: длина (OSM), высоты, surface_effective, градиенты.
 
-        long_mask = edges_gdf["length"].values > 30 * 1.5
+        Без спутниковой зелени — она добавляется в :meth:`_apply_green_enrichment`.
+        """
+        n = len(edges_gdf)
+        geom_arr = edges_gdf.geometry.values
+        len_arr = edges_gdf["length"].values.astype(np.float64, copy=False)
+        ediff = np.empty(n, dtype=np.float64)
+        eclimb = np.empty(n, dtype=np.float64)
+        edesc = np.empty(n, dtype=np.float64)
+        elev_profiles = np.empty(n, dtype=object)
+        for i in range(n):
+            t = self._elevation.get_edge_elevation(geom_arr[i], float(len_arr[i]))
+            ediff[i] = t[0]
+            eclimb[i] = t[1]
+            edesc[i] = t[2]
+            elev_profiles[i] = t[3]
+
+        edges_gdf["elevation_diff"] = ediff
+        edges_gdf["edge_climb"] = eclimb
+        edges_gdf["edge_descent"] = edesc
+
+        long_mask = len_arr > 30 * 1.5
         n_long = int(long_mask.sum())
         logger.info(
             "Высоты: %d рёбер интерполировано (~30м шаг), "
             "%d коротких (только нач/кон)",
             n_long,
-            len(edges_gdf) - n_long,
+            n - n_long,
         )
-
-        use_satellite = (
-            self._green._tiles.pil_available
-            and not self._settings.disable_satellite_green
-            and not skip_satellite_green
-        )
-        if use_satellite:
-            edges_gdf = self._green.calculate_satellite_batch(edges_gdf)
-        else:
-            if skip_satellite_green:
-                logger.info(
-                    "Запрос без спутниковой зелени — тайлы не загружаются, заглушки."
-                )
-            elif self._settings.disable_satellite_green:
-                logger.info(
-                    "DISABLE_SATELLITE_GREEN=true — озеленение по снимкам отключено, заглушки."
-                )
-            edges_gdf = self._green._fill_empty_green(edges_gdf)
 
         edges_gdf = apply_surface_resolution(edges_gdf)
 
@@ -328,60 +340,94 @@ class GraphBuilder:
 
         return edges_gdf, elev_profiles
 
-    def _compute_all_profile_weights(
+    def _apply_green_enrichment(
+        self,
+        edges_gdf: gpd.GeoDataFrame,
+        *,
+        skip_satellite_green: bool,
+    ) -> gpd.GeoDataFrame:
+        """Спутник или заглушки: ``trees_*``, ``grass_*``, ``green_coeff``, ``green_type``."""
+        use_satellite = (
+            self._green._tiles.pil_available
+            and not self._settings.disable_satellite_green
+            and not skip_satellite_green
+        )
+        if use_satellite:
+            return self._green.calculate_satellite_batch(edges_gdf)
+        if skip_satellite_green:
+            logger.info(
+                "Запрос без спутниковой зелени — тайлы не загружаются, заглушки."
+            )
+        elif self._settings.disable_satellite_green:
+            logger.info(
+                "DISABLE_SATELLITE_GREEN=true — озеленение по снимкам отключено, заглушки."
+            )
+        return self._green._fill_empty_green(edges_gdf)
+
+    def _compute_profile_weights_full(
         self,
         edges_gdf: gpd.GeoDataFrame,
         elev_profiles: Any,
-        *,
-        t0: float,
-    ) -> gpd.GeoDataFrame:
-        """Полный расчёт ``weight_*_full`` и ``weight_*_green`` (после enrich)."""
-        import time as _time
-
+    ) -> None:
+        """Только ``weight_*_full`` (энергетическая модель без озеленения)."""
         length = edges_gdf["length"].values
-        elev = edges_gdf["elevation_diff"].values
-        green = edges_gdf["green_coeff"].values
-        raw_gradient = np.where(length > 0, elev / length, 0)
+        raw_gradient = np.where(
+            length > 0,
+            edges_gdf["elevation_diff"].values / length,
+            0.0,
+        )
         clipped_gradient = edges_gdf["gradient"].values
         long_mask = edges_gdf["length"].values > 30 * 1.5
         long_indices = np.where(long_mask)[0]
+
+        n_edges = len(edges_gdf)
+        surf_base = None
+        surf_first = None
+        if "surface_effective" in edges_gdf.columns:
+            surf_base = (
+                edges_gdf["surface_effective"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+            )
+        elif "surface" in edges_gdf.columns:
+            surf_first = [_first_value(x) for x in edges_gdf["surface"].values]
+
+        if "highway" in edges_gdf.columns:
+            hw_first = [_first_value(x) for x in edges_gdf["highway"].values]
+        else:
+            hw_first = None
 
         for profile in PROFILES:
             gradient = np.clip(
                 raw_gradient, -profile.max_gradient, profile.max_gradient
             )
 
-            if "surface_effective" in edges_gdf.columns:
+            if surf_base is not None:
                 surf = (
-                    edges_gdf["surface_effective"]
-                    .astype(str)
-                    .str.strip()
-                    .str.lower()
-                    .map(profile.surface)
+                    surf_base.map(profile.surface)
                     .fillna(DEFAULT_COEFFICIENT)
-                    .values
+                    .values.astype(np.float64, copy=False)
                 )
-            elif "surface" in edges_gdf.columns:
+            elif surf_first is not None:
                 surf = (
-                    edges_gdf["surface"]
-                    .apply(_first_value)
+                    pd.Series(surf_first)
                     .map(profile.surface)
                     .fillna(DEFAULT_COEFFICIENT)
-                    .values
+                    .values.astype(np.float64, copy=False)
                 )
             else:
-                surf = np.full(len(edges_gdf), DEFAULT_COEFFICIENT)
+                surf = np.full(n_edges, DEFAULT_COEFFICIENT)
 
-            if "highway" in edges_gdf.columns:
+            if hw_first is not None:
                 hway = (
-                    edges_gdf["highway"]
-                    .apply(_first_value)
+                    pd.Series(hw_first)
                     .map(profile.highway)
                     .fillna(DEFAULT_COEFFICIENT)
-                    .values
+                    .values.astype(np.float64, copy=False)
                 )
             else:
-                hway = np.full(len(edges_gdf), DEFAULT_COEFFICIENT)
+                hway = np.full(n_edges, DEFAULT_COEFFICIENT)
 
             eff = np.where(
                 gradient >= 0,
@@ -394,64 +440,40 @@ class GraphBuilder:
 
             for idx in long_indices:
                 elevs = elev_profiles[idx]
-                edge_len = length[idx]
-                n_pts = len(elevs)
-                if n_pts < 2 or edge_len <= 0:
+                edge_len = float(length[idx])
+                if elevs is None or edge_len <= 0:
                     continue
-                sub_len = edge_len / (n_pts - 1)
-                seg_base = 0.0
-                for j in range(n_pts - 1):
-                    g = (elevs[j + 1] - elevs[j]) / sub_len
-                    g = max(
-                        -profile.max_gradient,
-                        min(profile.max_gradient, g),
-                    )
-                    if g >= 0:
-                        seg_eff = profile.nu + g
-                    else:
-                        seg_eff = max(
-                            profile.nu - abs(g),
-                            profile.min_descent_coeff,
-                        )
-                    seg_base += profile.mg * sub_len * seg_eff
-                base[idx] = seg_base
+                seg = _segmented_base_weight_long_edge(profile, elevs, edge_len)
+                if not np.isnan(seg):
+                    base[idx] = seg
 
             w_full = np.maximum(base * surf * hway, 0)
-
-            eff_green = np.clip(
-                1.0 + (green - 1.0) * profile.green_sensitivity, 0.2, 1.5
-            )
-            w_green = np.maximum(w_full * eff_green, 0)
-
             edges_gdf[f"weight_{profile.key}_full"] = w_full
-            edges_gdf[f"weight_{profile.key}_green"] = w_green
 
             logger.info(
-                "  %s %s: вес full=%.1f, green=%.1f (средний по ребру)",
+                "  %s %s: вес full=%.1f (средний по ребру)",
                 profile.icon,
                 profile.label,
                 w_full.mean(),
-                w_green.mean(),
             )
 
-        gc = (edges_gdf["green_type"] != "none").sum()
         logger.info(
             "Уклоны: средний %.1f%%, макс %.1f%%",
             np.abs(clipped_gradient).mean() * 100,
             np.abs(clipped_gradient).max() * 100,
         )
+
+    @staticmethod
+    def _log_green_edge_stats(edges_gdf: gpd.GeoDataFrame) -> None:
+        if "green_type" not in edges_gdf.columns:
+            return
+        gc = (edges_gdf["green_type"] != "none").sum()
         logger.info(
             "Озеленённых рёбер: %d / %d (%.1f%%)",
             gc,
             len(edges_gdf),
             100 * gc / max(len(edges_gdf), 1),
         )
-        logger.info(
-            "calculate_weights: готово за %.2f с (рёбер=%d)",
-            _time.perf_counter() - t0,
-            len(edges_gdf),
-        )
-        return edges_gdf
 
     def recompute_green_weights_only(self, edges_gdf: gpd.GeoDataFrame) -> None:
         """Пересчитать только ``weight_*_green`` при неизменных ``weight_*_full``."""
@@ -468,12 +490,12 @@ class GraphBuilder:
     def upgrade_edges_satellite_weights(
         self, edges_gdf: gpd.GeoDataFrame
     ) -> gpd.GeoDataFrame:
-        """После phase1: тайлы и коэффициенты зелени без повторного расчёта высот/surface."""
+        """Green-addon: только спутник + ``weight_*_green``; база и ``weight_*_full`` без изменений."""
         import time as _time
 
         t0 = _time.perf_counter()
         logger.info(
-            "Доначитка зелени: спутник и пересчёт weight_*_green (рёбер=%d)",
+            "Green-addon (без OSM/высот/surface/full): спутник и weight_*_green, рёбер=%d",
             len(edges_gdf),
         )
         use_satellite = (
@@ -499,21 +521,45 @@ class GraphBuilder:
     ) -> gpd.GeoDataFrame:
         """Рассчитать веса рёбер для всех профилей (велосипедист / пешеход).
 
-        Общие данные (высота, озеленение) считаются один раз,
-        профильные веса — в цикле по профилям.
+        Pipeline: база (высоты, surface, ``weight_*_full``) → зелёное обогащение →
+        ``weight_*_green``. Так green-addon при phase1→full не трогает базу.
 
         skip_satellite_green: не грузить тайлы — заглушки зелени (запрос без «зелёного» маршрута).
         """
         import time as _time
 
-        _t0 = _time.perf_counter()
-        logger.info("Расчёт весов рёбер...")
-        edges_gdf, elev_profiles = self.enrich_edges_physical(
+        t_all = _time.perf_counter()
+        logger.info("Расчёт весов рёбер (базовая фаза + зелёная фаза)...")
+        t0 = _time.perf_counter()
+        edges_gdf, elev_profiles = self.enrich_edges_base_physical(edges_gdf)
+        t1 = _time.perf_counter()
+        self._compute_profile_weights_full(edges_gdf, elev_profiles)
+        t2 = _time.perf_counter()
+        edges_gdf = self._apply_green_enrichment(
             edges_gdf, skip_satellite_green=skip_satellite_green
         )
-        return self._compute_all_profile_weights(
-            edges_gdf, elev_profiles, t0=_t0
+        t3 = _time.perf_counter()
+        self.recompute_green_weights_only(edges_gdf)
+        t4 = _time.perf_counter()
+        for profile in PROFILES:
+            logger.info(
+                "  %s %s: green=%.1f (среднее по ребру)",
+                profile.icon,
+                profile.label,
+                edges_gdf[f"weight_{profile.key}_green"].values.mean(),
+            )
+        self._log_green_edge_stats(edges_gdf)
+        logger.info(
+            "Расчёт весов: elev+surface %.2fs | weight_*_full %.2fs | "
+            "зелёные данные %.2fs | weight_*_green %.2fs | всего %.2fs (рёбер=%d)",
+            t1 - t0,
+            t2 - t1,
+            t3 - t2,
+            t4 - t3,
+            t4 - t_all,
+            len(edges_gdf),
         )
+        return edges_gdf
 
     # ------------------------------------------------------------------
     # Применение весов к графу

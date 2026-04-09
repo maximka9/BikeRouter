@@ -198,9 +198,13 @@ class GreenAnalyzer:
             return self._fill_empty_green(edges_gdf)
 
         edge_tiles: dict = {}
+        n_edges = len(edges_gdf)
+        index_arr = edges_gdf.index.values
+        geoms = edges_gdf.geometry.values
 
-        for idx, row in edges_gdf.iterrows():
-            geom = row.geometry
+        for pos in range(n_edges):
+            idx = index_arr[pos]
+            geom = geoms[pos]
             if geom is None:
                 continue
             b = geom.bounds
@@ -218,7 +222,8 @@ class GreenAnalyzer:
         edge_cache = self._load_edge_cache(edges_gdf, zoom, buf_m)
 
         tiles_needed: Set[Tuple[int, int]] = set()
-        for idx in edges_gdf.index:
+        for pos in range(n_edges):
+            idx = index_arr[pos]
             if idx in edge_cache:
                 continue
             tl = edge_tiles.get(idx)
@@ -258,7 +263,8 @@ class GreenAnalyzer:
 
         trees_l, grass_l, total_l = [], [], []
 
-        for idx in edges_gdf.index:
+        for pos in range(n_edges):
+            idx = index_arr[pos]
             if idx in edge_cache:
                 r = edge_cache[idx]
                 trees_l.append(r["trees"])
@@ -266,7 +272,7 @@ class GreenAnalyzer:
                 total_l.append(r["total"])
                 continue
 
-            geom = edges_gdf.loc[idx].geometry
+            geom = geoms[pos]
             if idx not in edge_tiles or geom is None:
                 trees_l.append(0.0)
                 grass_l.append(0.0)
@@ -480,18 +486,17 @@ class GreenAnalyzer:
             1.2,
         )
 
-        def _cat(row):
-            if row["trees_percent"] >= 15:
-                return "trees"
-            if row["trees_percent"] + row["grass_percent"] >= 25:
-                return "park"
-            if row["grass_percent"] >= 10:
-                return "grass"
-            if row["trees_percent"] + row["grass_percent"] >= 3:
-                return "sparse"
-            return "none"
-
-        gdf["green_type"] = gdf.apply(_cat, axis=1)
+        n = len(gdf)
+        tg = trees + grass
+        gt = np.full(n, "none", dtype=object)
+        gt[trees >= 15.0] = "trees"
+        sel = gt == "none"
+        gt[sel & (tg >= 25.0)] = "park"
+        sel = gt == "none"
+        gt[sel & (grass >= 10.0)] = "grass"
+        sel = gt == "none"
+        gt[sel & (tg >= 3.0)] = "sparse"
+        gdf["green_type"] = gt
 
     @staticmethod
     def _fill_empty_green(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:

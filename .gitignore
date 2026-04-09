@@ -16,7 +16,7 @@ venv/
 dist/
 build/
 
-# Caches / runtime (подставьте при необходимости локальные пути)
+# Caches / runtime
 .cache/
 
 # IDE

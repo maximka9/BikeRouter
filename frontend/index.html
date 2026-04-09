@@ -7,7 +7,7 @@
 
   <!-- MapLibre и шрифты с того же origin — иначе на LAN/мобильной сети вкладка может «вечно» ждать unpkg/Google Fonts -->
   <link href="/static/vendor/maplibre/maplibre-gl.css?v=20260430-1" rel="stylesheet">
-  <link href="/static/style.css?v=20260430-8" rel="stylesheet">
+  <link href="/static/style.css?v=20260430-10" rel="stylesheet">
 </head>
 <body>
 
@@ -16,7 +16,8 @@
   <button type="button" id="map-hint-toggle" class="mobile-hint-btn" aria-label="Подсказка по карте" title="Как выбрать точки на карте">?</button>
 </header>
 <div id="map-hint-tooltip" class="map-hint-tooltip hidden" role="tooltip">
-  Клик по карте: сначала старт, затем финиш. Точку в фокусе меняет поле ввода. Маркеры можно перетаскивать.
+  <span class="desktop-only">Правый клик по карте: «Точка отсюда» / «Точка сюда». Левый клик по подсветке сегментов — сведения об участке.</span>
+  <span class="mobile-only">Тап по карте: сначала старт, затем финиш. Точку в фокусе меняет поле ввода. Маркеры можно перетаскивать.</span>
 </div>
 
 <!-- ═══════════ Sidebar (desktop: колонка; mobile: bottom sheet) ═══════════ -->
@@ -147,8 +148,12 @@
 
 <!-- ═══════════ Map ═══════════ -->
 <div class="map-wrap">
-  <p id="map-click-hint" class="map-click-hint desktop-only" role="note">Клик по карте выбирает точку: сначала старт, затем финиш; дальше — в поле, которое в фокусе. Маркеры можно перетаскивать.</p>
+  <p id="map-click-hint" class="map-click-hint desktop-only" role="note">Правый клик по карте: «Точка отсюда» / «Точка сюда». Левый клик по цветным подсветкам маршрута — информация об участке. Маркеры можно перетаскивать.</p>
   <div id="map" class="map-view"></div>
+  <div id="map-context-menu" class="map-context-menu hidden" role="menu" aria-hidden="true">
+    <button type="button" class="map-context-menu-item" role="menuitem" data-which="start">Точка отсюда</button>
+    <button type="button" class="map-context-menu-item" role="menuitem" data-which="end">Точка сюда</button>
+  </div>
   <div class="map-overlay-ui">
     <button type="button" id="mobile-locate-btn" class="mobile-map-fab" title="Моё местоположение" aria-label="Поставить старт в текущие координаты">📍</button>
     <div id="map-legend" class="map-legend hidden" aria-hidden="true"></div>
@@ -163,6 +168,6 @@
 </div>
 
 <script src="/static/vendor/maplibre/maplibre-gl.js?v=20260430-1"></script>
-<script src="/static/app.js?v=20260430-9"></script>
+<script src="/static/app.js?v=20260430-10"></script>
 </body>
 </html>

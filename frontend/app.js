@@ -82,6 +82,8 @@ const N_ROUTE_LAYERS = 3;
 const markers = { start: null, end: null };
 let map;
 let overlayPopup = null;
+/** Координаты для пунктов ПКМ-меню (desktop) */
+let mapContextMenuLngLat = null;
 /** Подавляет replaceState при гидратации из URL */
 let urlSyncSuppressed = false;
 
@@ -122,6 +124,7 @@ const dom = {
   variantTabs:    $('#variant-tabs'),
   routeDetailCard: $('#route-detail-card'),
   mapLegend:      $('#map-legend'),
+  mapContextMenu: $('#map-context-menu'),
   fitRoutesBtn:   $('#fit-routes-btn'),
   elevChart:      $('#elev-chart'),
   errorToast:   $('#error-toast'),
@@ -407,6 +410,10 @@ function initMap() {
   });
 
   map.on('click', onMapClick);
+  map.on('contextmenu', onMapContextMenu);
+  map.on('movestart', () => {
+    closeMapContextMenu();
+  });
   map.on('mousemove', onMapMouseMove);
 }
 
@@ -472,6 +479,58 @@ function showOverlayPopup(feature, lngLat) {
     .addTo(map);
 }
 
+function closeMapContextMenu() {
+  if (!dom.mapContextMenu) return;
+  dom.mapContextMenu.classList.add('hidden');
+  dom.mapContextMenu.setAttribute('aria-hidden', 'true');
+  mapContextMenuLngLat = null;
+}
+
+function openMapContextMenu(clientX, clientY, lngLat) {
+  if (!dom.mapContextMenu) return;
+  mapContextMenuLngLat = { lat: lngLat.lat, lng: lngLat.lng };
+  const el = dom.mapContextMenu;
+  el.classList.remove('hidden');
+  el.setAttribute('aria-hidden', 'false');
+  const pad = 8;
+  el.style.left = `${clientX}px`;
+  el.style.top = `${clientY}px`;
+  requestAnimationFrame(() => {
+    const r = el.getBoundingClientRect();
+    let x = clientX;
+    let y = clientY;
+    if (r.right > window.innerWidth - pad) x = window.innerWidth - r.width - pad;
+    if (r.bottom > window.innerHeight - pad) y = window.innerHeight - r.height - pad;
+    if (x < pad) x = pad;
+    if (y < pad) y = pad;
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+  });
+}
+
+function onMapContextMenu(e) {
+  if (isMobileLayout()) return;
+  e.preventDefault();
+  if (e.originalEvent && typeof e.originalEvent.preventDefault === 'function') {
+    e.originalEvent.preventDefault();
+  }
+  removeOverlayPopup();
+  const oe = e.originalEvent;
+  const cx = oe && typeof oe.clientX === 'number' ? oe.clientX : 0;
+  const cy = oe && typeof oe.clientY === 'number' ? oe.clientY : 0;
+  openMapContextMenu(cx, cy, e.lngLat);
+}
+
+function applyMapContextMenuChoice(which) {
+  if (!mapContextMenuLngLat) return;
+  const { lat, lng } = mapContextMenuLngLat;
+  state.activeInput = which;
+  setPoint(which, lat, lng);
+  reverseGeocode(lat, lng, which);
+  closeMapContextMenu();
+  dismissMapHint();
+}
+
 function onMapClick(e) {
   dismissMapHint();
   const overlayIds = getVisibleOverlayLayerIds();
@@ -483,6 +542,10 @@ function onMapClick(e) {
     }
   }
   removeOverlayPopup();
+
+  if (!isMobileLayout()) {
+    return;
+  }
 
   const { lng, lat } = e.lngLat;
   let which;
@@ -2003,6 +2066,13 @@ function setupEvents() {
       closeSuggest(dom.endSuggest);
     }
     if (
+      dom.mapContextMenu
+      && !dom.mapContextMenu.classList.contains('hidden')
+      && !e.target.closest('#map-context-menu')
+    ) {
+      closeMapContextMenu();
+    }
+    if (
       dom.mapHintTooltip
       && !dom.mapHintTooltip.classList.contains('hidden')
       && !e.target.closest('#map-hint-toggle')
@@ -2011,6 +2081,32 @@ function setupEvents() {
       dom.mapHintTooltip.classList.add('hidden');
     }
   });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' || e.key === 'Esc') {
+      closeMapContextMenu();
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    closeMapContextMenu();
+  });
+
+  if (dom.mapContextMenu) {
+    dom.mapContextMenu.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+    });
+    dom.mapContextMenu.addEventListener('mousedown', (ev) => {
+      ev.stopPropagation();
+    });
+    dom.mapContextMenu.querySelectorAll('[data-which]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        const w = btn.getAttribute('data-which');
+        if (w === 'start' || w === 'end') applyMapContextMenuChoice(w);
+      });
+    });
+  }
 
   if (dom.mapHintToggle && dom.mapHintTooltip) {
     dom.mapHintToggle.addEventListener('click', (e) => {
@@ -2057,6 +2153,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadHealth();
   if (MQ_MOBILE) {
     MQ_MOBILE.addEventListener('change', () => {
+      closeMapContextMenu();
       syncMobileSheetUi();
       updateTripStatus();
       if (map && state.routeList && state.routeList.length) {

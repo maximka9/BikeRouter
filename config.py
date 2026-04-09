@@ -234,7 +234,7 @@ class Settings:
     graph_corridor_mode: bool = _env_bool("GRAPH_CORRIDOR_MODE", False)
 
     # --- Спутниковые снимки ---
-    satellite_zoom: int = _env("SATELLITE_ZOOM", 19, int)
+    satellite_zoom: int = _env("SATELLITE_ZOOM", 20, int)
     road_buffer_meters: int = _env("ROAD_BUFFER_METERS", 10, int)
     analyze_corridor: bool = _env_bool("ANALYZE_CORRIDOR", True)
     # True — не качать спутник и не считать зелень по тайлам (заглушки); быстрый старт Docker/CI

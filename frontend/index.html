@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bike Router — Оптимизация маршрутов</title>
+
+  <!-- MapLibre и шрифты с того же origin — иначе на LAN/мобильной сети вкладка может «вечно» ждать unpkg/Google Fonts -->
+  <link href="/static/vendor/maplibre/maplibre-gl.css?v=20260430-1" rel="stylesheet">
+  <link href="/static/style.css?v=20260430-11" rel="stylesheet">
+</head>
+<body>
+
+<header class="mobile-brand-bar" aria-label="Bike Router">
+  <span class="mobile-brand-title"><span class="mobile-brand-emoji" aria-hidden="true">🚴</span> Bike Router <span id="version-text-mobile" class="mobile-brand-ver"></span></span>
+  <button type="button" id="map-hint-toggle" class="mobile-hint-btn" aria-label="Подсказка по карте" title="Как выбрать точки на карте">?</button>
+</header>
+<div id="map-hint-tooltip" class="map-hint-tooltip hidden" role="tooltip">
+  <span class="desktop-only">Правый клик по карте: «Точка отсюда» / «Точка сюда». Левый клик по подсветке сегментов — сведения об участке.</span>
+  <span class="mobile-only">Тап по карте: сначала старт, затем финиш. Точку в фокусе меняет поле ввода. Маркеры можно перетаскивать.</span>
+</div>
+
+<!-- ═══════════ Sidebar (desktop: колонка; mobile: bottom sheet) ═══════════ -->
+<aside id="sidebar">
+  <button type="button" class="sheet-handle" id="sheet-handle" aria-label="Развернуть или свернуть панель маршрута" aria-expanded="true">
+    <span class="sheet-handle-bar" aria-hidden="true"></span>
+    <span class="sheet-handle-hint sheet-handle-hint--peek">Нажмите или потяните вверх — развернуть</span>
+    <span class="sheet-handle-hint sheet-handle-hint--open">Нажмите или потяните вниз — свернуть</span>
+  </button>
+
+  <header class="sidebar-header desktop-only">
+    <div class="logo">
+      <span class="logo-icon">🚴</span>
+      <div>
+        <h1>Bike Router</h1>
+        <p class="subtitle">Оптимизация маршрутов</p>
+      </div>
+    </div>
+  </header>
+
+  <div id="trip-status-block" class="trip-status-block">
+    <p id="trip-status" class="trip-status" role="status" aria-live="polite"></p>
+    <div id="route-progress" class="route-progress hidden" aria-hidden="true">
+      <div class="route-progress-track">
+        <div id="route-progress-fill" class="route-progress-fill"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="mobile-step-plan" class="mobile-step-plan">
+  <div class="mobile-step-scroll">
+  <!-- Адреса: поиск по кнопке / Enter (не автоподсказка при каждом символе — политика Nominatim) -->
+  <section class="panel">
+    <p class="geocode-hint desktop-only">Введите адрес и нажмите «Найти» или Enter — один запрос к геокодеру, без автодополнения при наборе.</p>
+    <p class="geocode-hint mobile-only mobile-geocode-short">Адрес — «Найти» или Enter. Точку на карте — тап.</p>
+    <div class="addr-group">
+      <div class="addr-row addr-row-ext">
+        <span class="addr-dot start"></span>
+        <div class="addr-input-wrap">
+          <input id="start-input" type="text" placeholder="Откуда" autocomplete="off">
+          <ul id="start-suggest" class="suggest-list"></ul>
+        </div>
+        <button type="button" class="addr-search-btn" data-field="start" title="Найти адрес" aria-label="Найти адрес откуда">Найти</button>
+      </div>
+
+      <button id="swap-btn" class="swap-btn" title="Поменять местами">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M5 1l-4 4h3v6h2V5h3L5 1zm6 4v6H8l4 4 4-4h-3V5h-2z"/>
+        </svg>
+      </button>
+
+      <div class="addr-row addr-row-ext">
+        <span class="addr-dot end"></span>
+        <div class="addr-input-wrap">
+          <input id="end-input" type="text" placeholder="Куда" autocomplete="off">
+          <ul id="end-suggest" class="suggest-list"></ul>
+        </div>
+        <button type="button" class="addr-search-btn" data-field="end" title="Найти адрес" aria-label="Найти адрес куда">Найти</button>
+      </div>
+      <div class="addr-toolbar">
+        <button type="button" id="locate-start-btn" class="toolbar-btn" title="Поставить старт в текущие координаты">Моё местоположение</button>
+        <button type="button" id="clear-points-btn" class="toolbar-btn toolbar-btn-muted" title="Убрать обе точки и начать заново">Очистить точки</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Профиль -->
+  <section class="panel">
+    <label class="panel-label">Профиль</label>
+    <div class="toggle-group" id="profile-toggle">
+      <button class="toggle-btn active" data-value="cyclist">🚴 Велосипедист</button>
+      <button class="toggle-btn" data-value="pedestrian">🚶 Пешеход</button>
+    </div>
+    <label class="green-enabled-label">
+      <input type="checkbox" id="green-enabled-checkbox" checked />
+      <span>Учитывать озеленение</span>
+    </label>
+    <p class="geocode-hint green-enabled-hint">Выключите, чтобы построить только два варианта (кратчайший и по энергии) без спутника и без маршрута «с учётом озеленения».</p>
+  </section>
+  </div><!-- .mobile-step-scroll -->
+
+  <!-- Построить + сброс маршрута (сброс виден только после успешного расчёта) -->
+  <div class="build-actions" id="build-actions">
+    <button id="build-btn" class="build-btn" type="button" disabled>
+      <span class="build-text">Построить маршрут</span>
+      <span class="spinner hidden"></span>
+    </button>
+    <button type="button" id="reset-route-btn" class="toolbar-btn toolbar-btn-danger build-actions-reset hidden" title="Убрать линии и карточки, точки останутся" aria-hidden="true">Сбросить маршрут</button>
+  </div>
+  </div><!-- /mobile-step-plan -->
+
+  <!-- Краткий маршрут A→B в фазах variants/detail (без полной формы) -->
+  <div id="mobile-route-compact" class="mobile-route-compact mobile-only" hidden></div>
+
+  <!-- Результаты: несколько вариантов маршрута -->
+  <section id="results" class="results hidden" aria-hidden="true">
+    <div id="results-empty" class="results-empty hidden" aria-hidden="true"></div>
+    <div class="mobile-results-nav mobile-only">
+      <button type="button" id="mobile-edit-points-btn" class="mobile-text-btn">Точки</button>
+    </div>
+    <label class="panel-label desktop-only">Варианты</label>
+    <label class="panel-label mobile-only mobile-variant-list-label">Варианты</label>
+    <div id="variant-tabs" class="variant-tabs" role="tablist"></div>
+    <div id="mobile-detail-sticky" class="mobile-detail-sticky mobile-only" hidden>
+      <button type="button" id="mobile-back-variants-btn" class="mobile-detail-back" aria-label="Назад к списку вариантов">← Варианты</button>
+      <h2 id="mobile-detail-title" class="mobile-detail-title"></h2>
+      <button type="button" id="mobile-detail-expand-btn" class="mobile-detail-expand mobile-only" hidden aria-expanded="false" aria-label="Развернуть панель деталей" title="Развернуть панель деталей">
+        <span class="mobile-detail-expand-icon" aria-hidden="true">▴</span>
+      </button>
+    </div>
+    <div id="route-detail-card" class="route-detail-card"></div>
+    <div id="elev-chart" class="elev-chart"></div>
+  </section>
+
+  <!-- Ошибки -->
+  <div id="error-toast" class="toast hidden"></div>
+
+  <footer class="sidebar-footer desktop-only">
+    <span id="version-text">v3.0.0</span>
+    <a href="/about">О системе</a>
+    <a href="/docs" target="_blank" rel="noopener noreferrer">API docs</a>
+  </footer>
+</aside>
+
+<!-- ═══════════ Map ═══════════ -->
+<div class="map-wrap">
+  <p id="map-click-hint" class="map-click-hint desktop-only" role="note">Правый клик по карте: «Точка отсюда» / «Точка сюда». Левый клик по цветным подсветкам маршрута — информация об участке. Маркеры можно перетаскивать.</p>
+  <div id="map" class="map-view"></div>
+  <div id="map-context-menu" class="map-context-menu hidden" role="menu" aria-hidden="true">
+    <button type="button" class="map-context-menu-item" role="menuitem" data-which="start">Точка отсюда</button>
+    <button type="button" class="map-context-menu-item" role="menuitem" data-which="end">Точка сюда</button>
+  </div>
+  <div class="map-overlay-ui">
+    <button type="button" id="mobile-locate-btn" class="mobile-map-fab" title="Моё местоположение" aria-label="Поставить старт в текущие координаты">📍</button>
+    <div id="map-legend" class="map-legend hidden" aria-hidden="true"></div>
+    <button type="button" id="fit-routes-btn" class="map-fit-btn" disabled title="Показать все построенные варианты в кадре">Показать весь маршрут</button>
+  </div>
+  <p class="map-attribution" role="contentinfo">
+    Карта: © <a href="https://carto.com/" target="_blank" rel="noopener noreferrer">CARTO</a>,
+    © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>.
+    Картографическая библиотека: <a href="https://maplibre.org/" target="_blank" rel="noopener noreferrer">MapLibre GL</a> (BSD-3-Clause).
+    Поиск адреса: <a href="https://nominatim.org/" target="_blank" rel="noopener noreferrer">Nominatim</a> / данные OSM — см. <a href="/about">«О системе»</a>.
+  </p>
+</div>
+
+<script src="/static/vendor/maplibre/maplibre-gl.js?v=20260430-1"></script>
+<script src="/static/app.js?v=20260430-12"></script>
+</body>
+</html>

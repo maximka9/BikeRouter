@@ -1,0 +1,10 @@
+__pycache__
+*.py[cod]
+.git
+.gitignore
+.env
+*.md
+.pytest_cache
+.mypy_cache
+.cache
+deploy

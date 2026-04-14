@@ -345,9 +345,24 @@ class GreenAnalyzer:
                 n_tg_fail,
             )
 
+        # После тайлов/масок — долгий CPU-проход по рёбрам (коридор ∩ T/G); без логов кажется,
+        # что «зелень перестала грузиться», хотя сеть уже не нужна.
+        _agg_log_step = max(2500, min(10000, max(1, n_edges // 15)))
+        logger.info(
+            "Спутник: агрегация зелени по рёбрам коридора (%d шт.), прогресс каждые ~%d…",
+            n_edges,
+            _agg_log_step,
+        )
+
         trees_l, grass_l, total_l = [], [], []
 
         for pos in range(n_edges):
+            if pos > 0 and pos % _agg_log_step == 0:
+                logger.info(
+                    "Спутник: рёбра коридора %d / %d",
+                    pos,
+                    n_edges,
+                )
             idx = index_arr[pos]
             if idx in edge_cache:
                 r = edge_cache[idx]
@@ -403,6 +418,8 @@ class GreenAnalyzer:
             grass_l.append(gp)
             total_l.append(top)
             edge_cache[idx] = {"trees": tp, "grass": gp, "total": top}
+
+        logger.info("Спутник: агрегация по рёбрам коридора завершена (%d шт.)", n_edges)
 
         skip_edge_persist = (
             self._satellite_warning is not None

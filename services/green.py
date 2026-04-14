@@ -87,7 +87,14 @@ class GreenAnalyzer:
         return w
 
     def green_analysis_is_acceptable(self) -> bool:
-        """True, если последний спутниковый проход можно считать завершённым и без отравления кэша."""
+        """True, если последний спутниковый проход можно считать завершённым и без отравления кэша.
+
+        Политика **консервативная**: ``persistable_for_cache`` ложен при любых
+        ``invalid_tiles_total``/сбоях масок/предупреждении — дисковый edge-cache и
+        ``graph_green`` не помечаются как полные. Это снижает переиспользование при
+        частично плохих тайлах; ослабление — отдельная настройка (см. агрегацию в
+        ``calculate_satellite_batch``).
+        """
         q = self._last_satellite_quality
         if not q:
             return False
@@ -494,6 +501,7 @@ class GreenAnalyzer:
 
         logger.info("Спутник: агрегация по рёбрам коридора завершена (%d шт.)", n_edges)
 
+        # Строгость: любой сбой тайла/маски или warning → не сохраняем «полный» кэш (см. docstring).
         skip_edge_persist = (
             self._satellite_warning is not None
             or n_tg_fail_total > 0

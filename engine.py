@@ -654,46 +654,16 @@ class RouteEngine:
             fp = routing_engine_cache_fingerprint()
             self._route_disk_cache.set_cache_context(0, 0, fp)
 
-            # 1) Предзагрузка арены в память — без второго запроса к Overpass на старте.
-            area_preloaded = False
+            # Предзагрузка area precache в память — без второго запроса к Overpass на первом POST.
             if s.precache_area_enabled and s.has_precache_area_polygon:
                 try:
-                    area_preloaded = self._warmup_preload_area_precache()
+                    self._warmup_preload_area_precache()
                 except Exception as exc:
                     logger.warning(
                         "Warmup: предзагрузка area_precache в память не удалась: %s",
                         exc,
                     )
 
-            # 2) Опционально: коридор START/END из .env (CORRIDOR_WARMUP_PREBUILD) — не основной режим.
-            if s.corridor_warmup_prebuild and not area_preloaded:
-                try:
-                    eff_buf: Optional[float] = (
-                        float(s.corridor_buffer_meters)
-                        if s.corridor_buffer_meters > 0
-                        else None
-                    )
-                    self._ensure_graph_for_corridor(
-                        s.start_coords,
-                        s.end_coords,
-                        skip_satellite_green=True,
-                        corridor_buffer_meters=eff_buf,
-                    )
-                    logger.info(
-                        "Warmup: коридор по START/END из .env предзагружен "
-                        "(phase1, OSM/OSMnx cache; зелёная фаза — по запросу)."
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Warmup: предзагрузка коридора не удалась (первый POST "
-                        "всё равно построит граф): %s",
-                        exc,
-                    )
-            elif s.corridor_warmup_prebuild and area_preloaded:
-                logger.info(
-                    "Warmup: CORRIDOR_WARMUP_PREBUILD пропущен — уже в памяти граф "
-                    "area_precache (маршруты вне арены при необходимости догрузят коридор)."
-                )
             return
 
         self._app.elevation.init(test_lat=s.start_lat, test_lon=s.start_lon)

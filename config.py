@@ -280,8 +280,6 @@ class Settings:
     # Шаг сетки (градусы) для расширения bbox коридора и ключа дискового кэша; 0 — только round(..., 6).
     # По умолчанию ~0.001° ≈ 111 м по широте — чаще попадание в один .graphml для близких POST.
     corridor_cache_grid_step_deg: float = _env("CORRIDOR_CACHE_GRID_STEP_DEG", 0.001, float)
-    # При GRAPH_CORRIDOR_MODE: при старте API один раз построить граф по START/END ± BUFFER (phase1 без тайлов).
-    corridor_warmup_prebuild: bool = _env_bool("CORRIDOR_WARMUP_PREBUILD", False)
 
     # --- Предкэш арены (не заменяет GRAPH_CORRIDOR_MODE / AREA_POLYGON_WKT; только дисковый граф для ускорения) ---
     precache_area_enabled: bool = _env_bool("PRECACHE_AREA_ENABLED", False)
@@ -291,10 +289,6 @@ class Settings:
     )
     precache_area_name: str = field(
         default_factory=lambda: _env("PRECACHE_AREA_NAME", "default", str)
-    )
-    # Устарело для эксплуатации: предсборка полигона только офлайн (precache_area). Не включайте в production.
-    precache_area_build_on_startup: bool = _env_bool(
-        "PRECACHE_AREA_BUILD_ON_STARTUP", False
     )
     # Сохранять/ожидать graph_green.graphml (со спутником); иначе только phase1 base.
     precache_area_use_green_graph: bool = _env_bool(

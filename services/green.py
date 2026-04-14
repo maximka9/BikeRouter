@@ -494,6 +494,8 @@ class GreenAnalyzer:
 
         logger.info("Спутник: агрегация по рёбрам коридора завершена (%d шт.)", n_edges)
 
+        logger.info("Спутник: агрегация по рёбрам коридора завершена (%d шт.)", n_edges)
+
         skip_edge_persist = (
             self._satellite_warning is not None
             or n_tg_fail_total > 0

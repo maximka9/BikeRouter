@@ -8,3 +8,9 @@ __pycache__
 .mypy_cache
 .cache
 deploy
+# Кэш и тяжёлые артефакты на хосте — не тащить в контекст сборки (иначе COPY десятки/сотни МБ)
+data
+*.npz
+*.pkl
+*.graphml
+*.hgt

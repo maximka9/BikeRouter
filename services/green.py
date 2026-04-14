@@ -18,7 +18,10 @@ from .tiles import TileService
 logger = logging.getLogger(__name__)
 
 # Пороги NDI/ExG в compute_vegetation_masks; при изменении — увеличить для сброса кэша .npz
-TILE_VEG_MASK_VERSION = "ndisexg_v1"
+# v2: после валидации тайлов в tiles.py (серые placeholder не кэшируются)
+TILE_VEG_MASK_VERSION = "ndisexg_v2_tileval"
+# Версия pickle green_edges: смена инвалидирует старые файлы (в т.ч. «залипшие» нули).
+GREEN_EDGES_CACHE_SCHEMA = "green_edges_v5"
 
 try:
     from PIL import Image, ImageDraw
@@ -151,27 +154,32 @@ class GreenAnalyzer:
         mask_img = Image.new("L", (w, h), 0)
         draw = ImageDraw.Draw(mask_img)
 
-        if edge_geom.geom_type == "LineString":
-            coords = list(edge_geom.coords)
-            if len(coords) >= 2:
-                pixels = [_to_pixel(lon, lat) for lon, lat in coords]
+        lat_c = (min_lat + max_lat) / 2
+        m_per_deg = 111_000 * np.cos(np.radians(lat_c))
+        tw = (max_lon - min_lon) * m_per_deg
+        th = (max_lat - min_lat) * 111_000
+        if tw > 0 and th > 0:
+            mpp = max(tw / w, th / h)
+            lw = int((buffer_meters * 2) / mpp)
+            lw = max(5, min(lw, min(w, h) // 3))
+        else:
+            lw = 20
 
-                lat_c = (min_lat + max_lat) / 2
-                m_per_deg = 111_000 * np.cos(np.radians(lat_c))
-                tw = (max_lon - min_lon) * m_per_deg
-                th = (max_lat - min_lat) * 111_000
+        def _draw_line_coords(coords: list) -> None:
+            if len(coords) < 2:
+                return
+            pixels = [_to_pixel(lon, lat) for lon, lat in coords]
+            for i in range(len(pixels) - 1):
+                draw.line(
+                    [pixels[i], pixels[i + 1]], fill=255, width=lw
+                )
 
-                if tw > 0 and th > 0:
-                    mpp = max(tw / w, th / h)
-                    lw = int((buffer_meters * 2) / mpp)
-                    lw = max(5, min(lw, min(w, h) // 3))
-                else:
-                    lw = 20
-
-                for i in range(len(pixels) - 1):
-                    draw.line(
-                        [pixels[i], pixels[i + 1]], fill=255, width=lw
-                    )
+        gt = getattr(edge_geom, "geom_type", None)
+        if gt == "LineString":
+            _draw_line_coords(list(edge_geom.coords))
+        elif gt == "MultiLineString":
+            for part in edge_geom.geoms:
+                _draw_line_coords(list(part.coords))
 
         return np.array(mask_img)
 
@@ -226,6 +234,8 @@ class GreenAnalyzer:
             edge_tiles[idx] = tiles
 
         edge_cache = self._load_edge_cache(edges_gdf, zoom, buf_m)
+        n_tg_fail_total = 0
+        invalid_tiles_total = 0
 
         tiles_needed: Set[Tuple[int, int]] = set()
         for pos in range(n_edges):
@@ -277,7 +287,8 @@ class GreenAnalyzer:
                         min(start + batch_cap, n_need),
                         n_need,
                     )
-                tile_images = self._tiles.download_batch(chunk_set, zoom)
+                tile_images, tstats = self._tiles.download_batch(chunk_set, zoom)
+                invalid_tiles_total += tstats.invalid_rejected
                 n_ok = len(tile_images)
                 n_ok_total += n_ok
                 if n_ok < len(chunk_set):
@@ -297,6 +308,7 @@ class GreenAnalyzer:
                 n_tg_cache += nc
                 n_tg_compute += ncm
                 n_tg_fail += nf
+                n_tg_fail_total += nf
                 del tile_images
                 del part_masks
 
@@ -306,6 +318,17 @@ class GreenAnalyzer:
                     "оценка озеленения по снимку может быть неполной."
                 )
                 logger.warning("%s", self._satellite_warning)
+
+            if invalid_tiles_total > 0:
+                msg = (
+                    f"Отклонено {invalid_tiles_total} тайлов как серые/плоские "
+                    "(не годятся для цветового анализа зелени); edge-кэш не сохраняем."
+                )
+                if self._satellite_warning:
+                    self._satellite_warning = f"{self._satellite_warning} {msg}"
+                else:
+                    self._satellite_warning = msg
+                logger.warning("tiles: %s", msg)
 
             masks_done = (
                 len(tile_masks)
@@ -381,7 +404,18 @@ class GreenAnalyzer:
             total_l.append(top)
             edge_cache[idx] = {"trees": tp, "grass": gp, "total": top}
 
-        self._save_edge_cache(edge_cache, edges_gdf, zoom, buf_m)
+        skip_edge_persist = (
+            self._satellite_warning is not None
+            or n_tg_fail_total > 0
+            or invalid_tiles_total > 0
+        )
+        self._save_edge_cache(
+            edge_cache,
+            edges_gdf,
+            zoom,
+            buf_m,
+            skip_disk=skip_edge_persist,
+        )
 
         edges_gdf["trees_percent"] = trees_l
         edges_gdf["grass_percent"] = grass_l
@@ -532,7 +566,7 @@ class GreenAnalyzer:
             "buf_m": int(buf_m),
             "disable_satellite_green": self._settings.disable_satellite_green,
             "routing_algo_version": str(ROUTING_ALGO_VERSION),
-            "schema": "green_edges_v4_pixel",
+            "schema": GREEN_EDGES_CACHE_SCHEMA,
             "tile_mask_ver": TILE_VEG_MASK_VERSION,
             "tms_server": self._settings.tms_server,
             "zoom": int(zoom),
@@ -545,6 +579,27 @@ class GreenAnalyzer:
         sub = os.path.join(self._cache.cache_dir, "green_edges")
         os.makedirs(sub, exist_ok=True)
         return os.path.join(sub, f"{h}.pkl")
+
+    @staticmethod
+    def _edge_cache_is_degenerate_all_zeros(
+        cached: Dict[Any, Any], n_edges: int
+    ) -> bool:
+        """Полный кэш, где у каждого ребра trees=grass=total=0 — часто артефакт сбоя тайлов/TMS.
+
+        Не трогаем совсем маленькие графы: там нули могут быть осмысленны.
+        """
+        if n_edges < 100 or len(cached) < n_edges:
+            return False
+        for r in cached.values():
+            if not isinstance(r, dict):
+                return False
+            if (
+                float(r.get("trees", 0) or 0) != 0.0
+                or float(r.get("grass", 0) or 0) != 0.0
+                or float(r.get("total", 0) or 0) != 0.0
+            ):
+                return False
+        return True
 
     def _load_edge_cache(
         self, edges_gdf: gpd.GeoDataFrame, zoom: int, buf_m: int
@@ -562,12 +617,36 @@ class GreenAnalyzer:
                 os.path.basename(path)[:16],
                 len(cached),
             )
+            n_edges = len(edges_gdf)
+            if self._settings.green_edge_reject_all_zero_cache and self._edge_cache_is_degenerate_all_zeros(
+                cached, n_edges
+            ):
+                logger.warning(
+                    "green_edges: игнорируем pickle — полный кэш только из нулей "
+                    "(вероятен старый сбой тайлов/TMS). Будет пересчёт; при необходимости "
+                    "смените TMS_SERVER или удалите %s вручную",
+                    os.path.dirname(path),
+                )
+                return {}
         return cached or {}
 
     def _save_edge_cache(
-        self, cache: dict, edges_gdf: gpd.GeoDataFrame, zoom: int, buf_m: int
+        self,
+        cache: dict,
+        edges_gdf: gpd.GeoDataFrame,
+        zoom: int,
+        buf_m: int,
+        *,
+        skip_disk: bool = False,
     ) -> None:
         if not self._settings.cache_tile_analysis:
+            return
+        if skip_disk:
+            logger.warning(
+                "green_edges: pickle на диск не пишем (неполные тайлы / fail масок — "
+                "иначе нули закрепились бы как «готовый» кэш). Повторите запрос после "
+                "исправления сети или TMS."
+            )
             return
         path = self._edge_cache_path(edges_gdf, zoom, buf_m)
         self._cache.save(path, cache)

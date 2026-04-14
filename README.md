@@ -137,9 +137,9 @@ bike_router/
 
 | Путь на диске | Откуда в коде | Содержимое |
 |---------------|----------------|------------|
-| `{BASE}/cache/tiles/` | `services/cache.py` → `tile_dir()` | JPEG спутниковых тайлов (`{server}_{z}_{x}_{y}.jpg`) |
+| `{BASE}/cache/tiles/` | `services/cache.py` → `tile_dir()` | JPEG спутниковых тайлов (`{server}_{z}_{x}_{y}.jpg`). При ``TILE_VALIDATE_FOR_GREEN=true`` однотонные/серые ответы не сохраняются (`tiles.py`) |
 | `{BASE}/cache/tile_green_masks/` | `services/green.py` | Маски деревьев/травы по тайлу (`*.npz`) |
-| `{BASE}/cache/green_edges/` | `services/green.py` | Pickle кэш анализа рёбер по bbox |
+| `{BASE}/cache/green_edges/` | `services/green.py` | Pickle кэш анализа рёбер по bbox (ключ включает TMS/zoom; схема `green_edges_v5`). Полностью нулевой кэш при большом графе при загрузке отбрасывается — см. `GREEN_EDGE_REJECT_ALL_ZERO_CACHE` |
 | `{BASE}/cache/corridor_graphs/` | `services/corridor_graph_cache.py` | GraphML взвешенных графов коридора |
 | `{BASE}/cache/route_alternatives_cache/` | `services/route_cache.py` | JSON кэш `POST /alternatives` |
 | `{BASE}/cache/*.pkl` (прочие) | `cache.py` → `get_path()` | Прочие pickle по старым ключам bbox |
@@ -152,7 +152,7 @@ bike_router/
 1. **Area precache** — один раз по **полигону** (`PRECACHE_AREA_*`): быстрый разбор маршрутов, если коридор запроса целиком **внутри** этой арены. Файлы — в **`cache/area_precache/`** (см. таблицу выше).
 2. **Corridor cache** — при **`GRAPH_CORRIDOR_MODE=true`** и точках **вне** арены (или если bbox не помещается в полигон): граф строится по **прямоугольнику между точками** и кладётся в **`cache/corridor_graphs/*.graphml`** (`corridor_graph_cache.py`). Это другой ключ и другая семантика, чем area precache.
 
-Локально, если **`BIKE_ROUTER_BASE_DIR`** не задан, корень по умолчанию — **родительский каталог** папки `bike_router` (см. `config.py`), то есть кэши окажутся рядом с `bike_router`, а не внутри неё.
+Локально, если **`BIKE_ROUTER_BASE_DIR`** не задан, корень по умолчанию — **`bike_router/data`** (см. `config.py`).
 
 ## Быстрый старт (разработка)
 

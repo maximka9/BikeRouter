@@ -228,7 +228,11 @@ def cleanup_stale_precache_tmp_files(settings: Settings) -> None:
 
 
 def precache_area_is_complete(settings: Settings) -> bool:
-    """True, если ``graph_base`` есть, ``meta.json`` актуален, а зелёная фаза либо на диске, либо осознанно пропущена."""
+    """True, если ``graph_base`` есть, ``meta.json`` актуален, а зелёная фаза отражена на диске или осознанно отключена.
+
+    Если в ``meta`` зафиксирован успешный ``has_green_graph``, но ``graph_green.graphml`` удалён вручную —
+    возвращаем False (нужна догрузка), при условии что в настройках зелёная фаза precache включена.
+    """
     if not settings.has_precache_area_polygon:
         return True
     meta = load_meta(settings)
@@ -240,15 +244,34 @@ def precache_area_is_complete(settings: Settings) -> bool:
         settings.precache_area_use_green_graph
         and not settings.disable_satellite_green
     )
+    green_p = graph_green_path(settings)
+    has_green_file = green_p.is_file()
+    has_green_meta = meta.get("has_green_graph")
+    green_phase_pending = bool(meta.get("green_phase_pending"))
+
     if not expect_green:
+        # Только graph_base; graph_green не обязателен (даже если лежит старый meta с has_green_graph)
         return True
-    if graph_green_path(settings).is_file():
-        return True
-    # Зелёная фаза ещё не догружена (прерван precache после graph_base)
-    if meta.get("green_phase_pending"):
+
+    if has_green_meta is True:
+        if has_green_file:
+            return True
+        logger.warning(
+            "area_precache: в meta.json has_green_graph=true, но нет %s — кэш неполный, "
+            "нужна догрузка зелёной фазы",
+            green_p.name,
+        )
         return False
-    # В ``meta`` зафиксировано, что зелень не собиралась (например, не было Pillow) — считаем готово
-    return meta.get("has_green_graph") is False
+
+    if green_phase_pending:
+        return False
+
+    if has_green_meta is False:
+        # Зелёная фаза намеренно не выполнялась (нет Pillow и т.п.)
+        return True
+
+    # Устаревший meta без флага или неопределённое состояние
+    return False
 
 
 def _complete_green_only_from_base(application: "Application", geom: Any) -> Path:
@@ -306,9 +329,12 @@ def ensure_area_precache(application: "Application") -> Path:
         raise ValueError("Задайте PRECACHE_AREA_POLYGON_WKT")
     if precache_area_is_complete(s):
         out = precache_area_dir(s)
+        gg = graph_green_path(s)
         logger.info(
-            "area_precache: кэш арены уже готов (%s…), пропуск",
+            "area_precache: кэш арены уже готов (%s…), пропуск · каталог=%s · graph_green=%s",
             out.name[:16],
+            out,
+            "есть" if gg.is_file() else "нет",
         )
         return out
     geom = parse_precache_polygon(s)

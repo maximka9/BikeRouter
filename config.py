@@ -19,11 +19,13 @@ from typing import Dict, List, Tuple
 try:
     from dotenv import load_dotenv
 
-    # Сначала `.env` в текущей рабочей директории, затем рядом с пакетом
-    # (`bike_router/.env`), чтобы `python -m bike_router.tools.precache_area` из `NIR/`
-    # видел тот же конфиг, что и при запуске из `bike_router/`.
+    _PACKAGE_ENV = Path(__file__).resolve().parent / ".env"
+    # Сначала `.env` в cwd (без перезаписи уже заданных в ОС переменных).
     load_dotenv()
-    load_dotenv(Path(__file__).resolve().parent / ".env")
+    # Затем `bike_router/.env` с override=True: иначе BIKE_ROUTER_BASE_DIR из
+    # пользовательских/системных переменных Windows (например R:\\data) перебивает
+    # проектный .env, и тайлы уезжают не в каталог репозитория.
+    load_dotenv(_PACKAGE_ENV, override=True)
 except ImportError:
     pass
 
@@ -261,8 +263,14 @@ class Settings:
 
     # --- Кэш ---
     cache_satellite: bool = _env_bool("CACHE_SATELLITE", True)
+    # Отклонять однотонные/серые тайлы перед записью в cache/tiles (иначе зелень → нули)
+    tile_validate_for_green: bool = _env_bool("TILE_VALIDATE_FOR_GREEN", True)
     cache_tile_analysis: bool = _env_bool("CACHE_TILE_ANALYSIS", True)
     force_recalculate: bool = _env_bool("FORCE_RECALCULATE", False)
+    # green_edges: не доверять pickle, где у всех рёбер нулевая зелень (часто после сбоя тайлов).
+    green_edge_reject_all_zero_cache: bool = _env_bool(
+        "GREEN_EDGE_REJECT_ALL_ZERO_CACHE", True
+    )
     # Персистентный кэш ответов Nominatim (forward/reverse) на диске
     geocode_disk_cache: bool = _env_bool("GEOCODE_DISK_CACHE", True)
     # Кэш JSON ответов POST /alternatives (инвалидация: узлы/рёбра + отпечаток весов)
@@ -427,7 +435,9 @@ class Settings:
         if env_base:
             self.base_dir = os.path.abspath(env_base)
         elif not self.base_dir:
-            self.base_dir = str(Path(__file__).resolve().parent.parent)
+            # Данные по умолчанию: подкаталог ``bike_router/data`` (а не родитель пакета),
+            # чтобы кэш был внутри репозитория: ``data/cache``, ``data/osmnx_cache``.
+            self.base_dir = str(Path(__file__).resolve().parent / "data")
 
 
 # ---------------------------------------------------------------------------

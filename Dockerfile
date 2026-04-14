@@ -20,9 +20,14 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY . /app/bike_router
 
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 RUN mkdir -p /data/cache /data/osmnx_cache
 
 EXPOSE 8000
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Один воркер: граф OSM в памяти на процесс; при >1 — копия графа на каждый воркер.
 CMD ["gunicorn", "bike_router.api:app", \

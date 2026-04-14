@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, Set, Tuple
 
@@ -45,6 +46,11 @@ class GreenAnalyzer:
         self._cache = cache_service
         self._settings = settings
         self._satellite_warning: Optional[str] = None
+        # LRU при чтении масок с диска в цикле по рёбрам (без гигабайтного dict в RAM)
+        self._tile_mask_read_lru: OrderedDict[
+            Tuple[int, int, int], Tuple[np.ndarray, np.ndarray]
+        ] = OrderedDict()
+        self._tile_mask_read_lru_max: int = 8192
 
     def consume_satellite_warning(self) -> Optional[str]:
         """Одноразово отдать предупреждение о неполных тайлах (режим green в ответе)."""
@@ -237,24 +243,79 @@ class GreenAnalyzer:
             logger.debug("Тайлы не нужны: все рёбра уже в edge-кэше")
         else:
             self._satellite_warning = None
+            self._tile_mask_read_lru.clear()
             n_need = len(tiles_needed)
-            tile_images = self._tiles.download_batch(tiles_needed, zoom)
-            n_ok = len(tile_images)
-            if n_ok < n_need:
+            tiles_list = sorted(tiles_needed)
+            batch_cap = self._settings.green_tile_batch_size
+            if batch_cap <= 0:
+                batch_cap = n_need
+            else:
+                batch_cap = min(batch_cap, n_need)
+
+            n_tg_cache = n_tg_compute = n_tg_fail = 0
+            n_ok_total = 0
+
+            if n_need > batch_cap:
+                logger.info(
+                    "Спутник: разбиение на пакеты по %d тайлов (GREEN_TILE_BATCH_SIZE), всего %d",
+                    batch_cap,
+                    n_need,
+                )
+            if self._settings.cache_tile_analysis:
+                logger.info(
+                    "Маски T/G пишутся в tile_green_masks/*.npz; в RAM не копится словарь на все тайлы "
+                    "(CACHE_TILE_ANALYSIS=true)"
+                )
+
+            for start in range(0, n_need, batch_cap):
+                chunk_list = tiles_list[start : start + batch_cap]
+                chunk_set = set(chunk_list)
+                if n_need > batch_cap:
+                    logger.info(
+                        "Спутник: пакет тайлов %d–%d из %d",
+                        start + 1,
+                        min(start + batch_cap, n_need),
+                        n_need,
+                    )
+                tile_images = self._tiles.download_batch(chunk_set, zoom)
+                n_ok = len(tile_images)
+                n_ok_total += n_ok
+                if n_ok < len(chunk_set):
+                    self._satellite_warning = (
+                        f"Загружено спутниковых тайлов {n_ok_total} из {n_need} "
+                        f"(пакет {start // batch_cap + 1}); оценка озеленения может быть неполной."
+                    )
+                    logger.warning("%s", self._satellite_warning)
+                part_masks, nc, ncm, nf = self._parallel_build_tile_masks(
+                    tile_images, zoom, chunk_set
+                )
+                if self._settings.cache_tile_analysis:
+                    # Маски уже в .npz; не держим сотни тысяч ndarray в одном dict (OOM/своп).
+                    pass
+                else:
+                    tile_masks.update(part_masks)
+                n_tg_cache += nc
+                n_tg_compute += ncm
+                n_tg_fail += nf
+                del tile_images
+                del part_masks
+
+            if n_ok_total < n_need and self._satellite_warning is None:
                 self._satellite_warning = (
-                    f"Загружено спутниковых тайлов {n_ok} из {n_need}; "
+                    f"Загружено спутниковых тайлов {n_ok_total} из {n_need}; "
                     "оценка озеленения по снимку может быть неполной."
                 )
                 logger.warning("%s", self._satellite_warning)
-            tile_masks, n_tg_cache, n_tg_compute, n_tg_fail = (
-                self._parallel_build_tile_masks(
-                    tile_images, zoom, tiles_needed
-                )
+
+            masks_done = (
+                len(tile_masks)
+                if not self._settings.cache_tile_analysis
+                else n_need
             )
             logger.info(
                 "Маски T/G: готово %d / %d (tile_green_masks hit %d, miss %d, fail %d); "
                 "%% по коридору: 100·Σ(M∩T)/Σ(M)",
-                len(tile_masks),
+                masks_done,
                 len(tiles_needed),
                 n_tg_cache,
                 n_tg_compute,
@@ -282,8 +343,11 @@ class GreenAnalyzer:
             sum_m = 0
             sum_t = 0
             sum_g = 0
+            ram_masks: Optional[
+                Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]]
+            ] = None if self._settings.cache_tile_analysis else tile_masks
             for tx, ty in edge_tiles[idx]:
-                pair = tile_masks.get((tx, ty))
+                pair = self._resolve_tile_masks_pair(tx, ty, zoom, ram_masks)
                 if pair is None:
                     continue
                 t_mask, g_mask = pair
@@ -338,6 +402,46 @@ class GreenAnalyzer:
         ).hexdigest()[:28]
         sub = os.path.join(self._cache.cache_dir, "tile_green_masks")
         return os.path.join(sub, f"{key}.npz")
+
+    def _load_green_tile_masks_npz(
+        self, tx: int, ty: int, zoom: int
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """Чтение готовых масок с диска (без PIL), для агрегации при CACHE_TILE_ANALYSIS."""
+        path = self._tile_mask_cache_path(tx, ty, zoom)
+        if not os.path.isfile(path):
+            return None
+        try:
+            z = np.load(path)
+            t = z["trees"].astype(bool)
+            g = z["grass"].astype(bool)
+            if t.shape != g.shape:
+                return None
+            return (t, g)
+        except Exception as exc:
+            logger.debug("tile mask npz read %s: %s", path, exc)
+            return None
+
+    def _resolve_tile_masks_pair(
+        self,
+        tx: int,
+        ty: int,
+        zoom: int,
+        ram: Optional[Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]]],
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        if ram is not None:
+            return ram.get((tx, ty))
+        key = (tx, ty, zoom)
+        od = self._tile_mask_read_lru
+        if key in od:
+            od.move_to_end(key)
+            return od[key]
+        pair = self._load_green_tile_masks_npz(tx, ty, zoom)
+        if pair is None:
+            return None
+        od[key] = pair
+        while len(od) > self._tile_mask_read_lru_max:
+            od.popitem(last=False)
+        return pair
 
     def _get_or_compute_tile_masks(
         self, img: Any, tx: int, ty: int, zoom: int

@@ -2,7 +2,8 @@
 #   docker compose up --build
 #
 # Кэш (OSM, area_precache, тайлы): каталог ./data на хосте → /data в контейнере (bind mount).
-# Сначала соберите precache отдельно (см. README), затем поднимайте API — без PRECACHE_AREA_BUILD_ON_STARTUP.
+# Кэш area precache: либо заранее ``docker compose run … precache_area``, либо
+# ``PRECACHE_AREA_ENSURE_BEFORE_API=true`` в .env — entrypoint догрузит до Gunicorn (идемпотентно).
 #
 # Скопируйте .env.example → .env и при необходимости поправьте AREA_* и порты.
 #
@@ -29,4 +30,5 @@ services:
       interval: 30s
       timeout: 15s
       retries: 5
-      start_period: 180s
+      # Первый старт может долго догружать area precache (ensure в entrypoint)
+      start_period: 900s

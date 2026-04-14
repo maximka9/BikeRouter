@@ -1,5 +1,8 @@
 # Зафиксированные версии для воспроизводимой установки (Python 3.10+).
 # Установка: pip install -r bike_router/requirements.txt
+#
+# Windows: если зависает import osmnx / pyogrio (GDAL) — см. README «Windows: import osmnx»;
+# надёжно: conda-forge или переустановка pyogrio, без дублирующего GDAL в PATH.
 
 numpy==2.3.5
 geopandas==1.1.1

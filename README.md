@@ -26,8 +26,9 @@
 | `bike_router/models.py` | Pydantic-модели запросов/ответов и `HealthResponse` |
 | `bike_router/exceptions.py` | Доменные ошибки маршрутизации |
 | `bike_router/requirements.txt` | Зафиксированные версии зависимостей |
-| `bike_router/Dockerfile` | Сборка образа приложения |
+| `bike_router/Dockerfile` | Сборка образа приложения, `ENTRYPOINT` → `docker-entrypoint.sh` |
 | `bike_router/docker-compose.yml` | Сервис, bind mount `./data` → `/data`, healthcheck |
+| `bike_router/docker-entrypoint.sh` | Перед Gunicorn: опционально `ensure_precache` при `PRECACHE_AREA_ENSURE_BEFORE_API` |
 | `bike_router/.dockerignore` | Исключения при сборке образа |
 | `bike_router/.env.example` | Шаблон переменных окружения (копировать в `.env`) |
 | `bike_router/.env` | Локальные секреты/настройки (не коммитить) |
@@ -71,6 +72,8 @@
 |------|------------|
 | `bike_router/tools/route_scenarios.json` | Набор сценариев для регрессии API |
 | `bike_router/tools/run_route_scenarios.py` | Скрипт прогона сценариев против запущенного сервера |
+| `bike_router/tools/precache_area.py` | CLI предсборки area precache (`ensure_area_precache`) |
+| `bike_router/tools/ensure_precache.py` | Точка входа для entrypoint Docker до поднятия API |
 | `bike_router/docs/ROUTE_TEST_MATRIX.md` | Чеклист ручной проверки UX |
 | `bike_router/deploy/nginx.example.conf` | Пример конфигурации обратного прокси |
 
@@ -142,6 +145,12 @@ bike_router/
 | `{BASE}/cache/*.pkl` (прочие) | `cache.py` → `get_path()` | Прочие pickle по старым ключам bbox |
 | `{BASE}/cache/nominatim_disk/` | `api.py` / геокодинг | Дисковый кэш Nominatim (если включён) |
 | `{BASE}/osmnx_cache/` | `services/graph.py` | Кэш загрузок OSMnx |
+| `{BASE}/cache/area_precache/<hash>/` | `services/area_graph_cache.py` | **Area precache**: OSM + веса по **`PRECACHE_AREA_POLYGON_WKT`**, `graph_base.graphml` / `graph_green.graphml`, `meta.json` |
+
+**Два независимых типа кэша графа**
+
+1. **Area precache** — один раз по **полигону** (`PRECACHE_AREA_*`): быстрый разбор маршрутов, если коридор запроса целиком **внутри** этой арены. Файлы — в **`cache/area_precache/`** (см. таблицу выше).
+2. **Corridor cache** — при **`GRAPH_CORRIDOR_MODE=true`** и точках **вне** арены (или если bbox не помещается в полигон): граф строится по **прямоугольнику между точками** и кладётся в **`cache/corridor_graphs/*.graphml`** (`corridor_graph_cache.py`). Это другой ключ и другая семантика, чем area precache.
 
 Локально, если **`BIKE_ROUTER_BASE_DIR`** не задан, корень по умолчанию — **родительский каталог** папки `bike_router` (см. `config.py`), то есть кэши окажутся рядом с `bike_router`, а не внутри неё.
 
@@ -157,6 +166,17 @@ python -m bike_router
 Откройте http://127.0.0.1:8000/ — интерфейс. OpenAPI: http://127.0.0.1:8000/docs  
 
 Переменные **`BIKE_ROUTER_HOST`** и **`BIKE_ROUTER_PORT`** задают bind для `python -m bike_router` (по умолчанию **`0.0.0.0:8000`**, чтобы зайти с телефона в той же сети: `http://<IPv4 из ipconfig>:8000`). Только localhost: `BIKE_ROUTER_HOST=127.0.0.1`.
+
+### Windows: «зависает» `import osmnx` или `import pyogrio`
+
+К **Bike Router** это не относится: так бывает у связки **GeoPandas / OSMnx / pyogrio** (внутри — **GDAL**). После `print('start')` тишина означает, что интерпретатор грузит нативные DLL (иногда минуты, иногда бесконечно при конфликте версий).
+
+**Что сделать по порядку:**
+
+1. Убедиться, что в **`PATH`** нет «левого» GDAL (например **OSGeo4W** и одновременно колёса из pip) — временно уберите лишние пути к `gdal*.dll` и перезапустите терминал.
+2. Переустановить движок: `pip install --upgrade --force-reinstall pyogrio` (или то же для `osmnx` и `geopandas`).
+3. Самый стабильный вариант на Windows — отдельное окружение **conda/mamba** с **conda-forge**: `conda install -c conda-forge python=3.12 geopandas osmnx pyogrio` (там согласованы GDAL и бинарники).
+4. Если **`import pyogrio`** зависает, а **`import geopandas`** — нет: тяжёлая подгрузка всё равно может случиться при первом реальном чтении геоданных или при **`import osmnx`** — ориентируйтесь на пункты выше, а не на проект.
 
 ## Запуск в Docker
 
@@ -176,7 +196,9 @@ docker compose run --rm bike-router python -m bike_router.tools.precache_area
 
 Результат появится в **`./data/cache/area_precache/...`**. После этого в **`.env`** держите **`PRECACHE_AREA_BUILD_ON_STARTUP=false`**, чтобы при **`docker compose up`** API **не** запускал тяжёлую сборку внутри `warmup`.
 
-Локально без Docker (из каталога с `bike_router` на `PYTHONPATH`): задайте **`BIKE_ROUTER_BASE_DIR`** на каталог с `cache` (например **`./data`**) и выполните **`python -m bike_router.tools.precache_area`**.
+**Автоматически до старта API:** в **`.env`** задайте **`PRECACHE_AREA_ENSURE_BEFORE_API=true`** (и **`PRECACHE_AREA_ENABLED=true`**). Тогда `docker-entrypoint.sh` перед Gunicorn вызовет **`python -m bike_router.tools.ensure_precache`**: если кэш уже полный — выход за секунды; если оборвалось при прошлом запуске — догрузка продолжается (временные файлы `*.tmp` снимаются при следующем заходе). Для долгой первой загрузки в **`docker-compose.yml`** у healthcheck увеличен **`start_period`** (см. файл).
+
+Локально без Docker (чтобы всё лежало на нужном диске, напр. `R:`): из каталога **родителя** пакета (`NIR`, где лежит папка `bike_router`) задайте **`BIKE_ROUTER_BASE_DIR`** на каталог данных (например **`R:\Python\NIR\bike_router\data`**) и выполните **`python -m bike_router.tools.precache_area`**. Тогда **`cache/`** (тайлы, `area_precache`, **SRTM HGT** в `cache/srtm_hgt/`) и **`osmnx_cache/`** создаются под этим путём, а не в образе Docker и не в `C:\Users\…\.cache\srtm`.
 
 ### Запуск API
 
@@ -258,14 +280,14 @@ ingress:
 | Полигон графа | **`AREA_POLYGON_WKT`** — WKT `POLYGON` / `MULTIPOLYGON` (lon lat); если задан, имеет приоритет над `AREA_*` |
 | Bbox графа | **`AREA_MIN_LAT`**, **`AREA_MAX_LAT`**, **`AREA_MIN_LON`**, **`AREA_MAX_LON`** — если все заданы и ненулевые, граф строится по прямоугольнику |
 | Коридор по запросу | **`GRAPH_CORRIDOR_MODE=true`** — без полигона и без ненулевого `AREA_*`: граф и спутниковая зелень в прямоугольнике между точками запроса; запас по умолчанию **`CORRIDOR_BUFFER_METERS=400`** (метры по широте/долготе); при **`CORRIDOR_BUFFER_METERS=0`** — запас **`BUFFER`** в градусах; кэш графов — **`cache/corridor_graphs/*.graphml`** при **`CORRIDOR_GRAPH_DISK_CACHE=true`** |
-| Предкэш арены (area precache) | **`PRECACHE_AREA_ENABLED=true`** и **`PRECACHE_AREA_POLYGON_WKT`** — отдельно от **`AREA_POLYGON_WKT`**: не переключает fixed-area режим; при corridor-режиме, если прямоугольник коридора запроса целиком внутри полигона, граф берётся с диска **`cache/area_precache/<hash>/`** (без live Overpass). Сборка **отдельной командой**: **`python -m bike_router.tools.precache_area`** (в Docker — см. раздел «Запуск в Docker»). **`PRECACHE_AREA_BUILD_ON_STARTUP`** по умолчанию **`false`**: API не строит кэш при старте. Параметры зелени и весов те же, что в runtime; инвалидация по fingerprint в **`meta.json`**. См. раздел ниже. |
+| Предкэш арены (area precache) | **`PRECACHE_AREA_ENABLED=true`** и **`PRECACHE_AREA_POLYGON_WKT`** — отдельно от **`AREA_POLYGON_WKT`**: не переключает fixed-area режим; при corridor-режиме, если прямоугольник коридора запроса целиком внутри полигона, граф берётся с диска **`cache/area_precache/<hash>/`** (без live Overpass). Сборка: **`python -m bike_router.tools.precache_area`** или в Docker **`PRECACHE_AREA_ENSURE_BEFORE_API=true`** → **`python -m bike_router.tools.ensure_precache`** в entrypoint до Gunicorn. **`PRECACHE_AREA_BUILD_ON_STARTUP`** по умолчанию **`false`**: API не строит кэш при старте. Параметры зелени и весов те же, что в runtime; инвалидация по fingerprint в **`meta.json`**. См. раздел ниже. |
 | CORS | **`CORS_ALLOW_ORIGINS`**: `*` (по умолчанию, dev) или список origin через запятую для публикации |
 | Запасной bbox | **`START_*`**, **`END_*`**, **`BUFFER`** — если нет ни полигона, ни `AREA_*`, и не включён коридор |
 | Лимиты | **`MAX_ROUTE_KM`**, **`MAX_SNAP_DISTANCE_M`** |
 | Инвалидация кэша маршрутов | **`ROUTING_ALGO_VERSION`** — увеличить после изменения формул весов / логики в `bike_router/services/graph.py`, `bike_router/services/routing.py` и т.д. |
 | Дисковый кэш | **`GEOCODE_DISK_CACHE`**, **`ROUTE_DISK_CACHE`**, **`CORRIDOR_GRAPH_DISK_CACHE`** — `true`/`false` |
-| Прочие кэши | **`CACHE_SATELLITE`**, **`CACHE_TILE_ANALYSIS`**, **`FORCE_RECALCULATE`** |
-| TMS для зелени | **`TMS_SERVER`**, **`SATELLITE_ZOOM`**, **`ROAD_BUFFER_METERS`** (ширина коридора **M** вокруг линии дороги в метрах), **`TILE_DOWNLOAD_THREADS`** (загрузка тайлов и построение масок T/G) |
+| Прочие кэши | **`CACHE_SATELLITE`**, **`CACHE_TILE_ANALYSIS`** (оставьте **`true`** на большом precache: маски в `cache/tile_green_masks`, агрегация читает с диска и не раздувает RAM), **`FORCE_RECALCULATE`** |
+| TMS для зелени | **`TMS_SERVER`**, **`SATELLITE_ZOOM`**, **`ROAD_BUFFER_METERS`** (ширина коридора **M** вокруг линии дороги в метрах), **`TILE_DOWNLOAD_THREADS`**, **`GREEN_TILE_BATCH_SIZE`** (сколько тайлов за один проход загрузки+масок; меньше — меньше RAM на большом полигоне; `0` — всё сразу) |
 | Покрытие без `surface` в OSM | Тег OSM при наличии → иначе эвристика **`tracktype`** / **`highway`** → `unknown` (коэфф. 1.0); см. `bike_router/services/surface_resolve.py` |
 
 **Обязательные переменные:** для старта API ни одна не обязательна. Для **production** либо фиксированная зона (**`AREA_*`** / **`AREA_POLYGON_WKT`**), либо **`GRAPH_CORRIDOR_MODE`** без фиксированной области; при Docker задайте **`BIKE_ROUTER_BASE_DIR`**.

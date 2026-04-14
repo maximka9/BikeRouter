@@ -14,9 +14,11 @@ class ElevationService:
     """Обёртка над библиотекой ``srtm`` с внутренним кэшем высот.
 
     Перед первым использованием необходимо вызвать :meth:`init`.
+    ``srtm_cache_dir`` — куда сохранять HGT (по умолчанию в коде задаётся из ``Settings``).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, srtm_cache_dir: Optional[str] = None) -> None:
+        self._srtm_cache_dir = (srtm_cache_dir or "").strip() or None
         self._data: Optional[srtm.data.GeoElevationData] = None
         self._cache: dict[tuple, float] = {}
 
@@ -33,7 +35,11 @@ class ElevationService:
             logger.debug("SRTM уже инициализирован, повторная загрузка пропущена")
         else:
             logger.info("Инициализация SRTM...")
-            self._data = srtm.get_data()
+            if self._srtm_cache_dir:
+                logger.info("SRTM файлы: %s", self._srtm_cache_dir)
+                self._data = srtm.get_data(local_cache_dir=self._srtm_cache_dir)
+            else:
+                self._data = srtm.get_data()
 
         if test_lat is not None and test_lon is not None:
             elev = self.get_elevation(test_lat, test_lon)

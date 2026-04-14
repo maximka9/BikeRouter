@@ -480,9 +480,17 @@ class GraphBuilder:
 
     def recompute_green_weights_only(self, edges_gdf: gpd.GeoDataFrame) -> None:
         """Пересчитать только ``weight_*_green`` при неизменных ``weight_*_full``."""
-        green = edges_gdf["green_coeff"].values
+        # После load_graphml веса часто строки (XML) — без float ломается w_full * eff_green
+        green = (
+            pd.to_numeric(edges_gdf["green_coeff"], errors="coerce")
+            .fillna(1.0)
+            .to_numpy(dtype=np.float64)
+        )
         for profile in PROFILES:
-            w_full = edges_gdf[f"weight_{profile.key}_full"].values
+            w_full = pd.to_numeric(
+                edges_gdf[f"weight_{profile.key}_full"],
+                errors="coerce",
+            ).to_numpy(dtype=np.float64)
             eff_green = np.clip(
                 1.0 + (green - 1.0) * profile.green_sensitivity, 0.2, 1.5
             )

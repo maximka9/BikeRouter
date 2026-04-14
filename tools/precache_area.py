@@ -8,6 +8,10 @@
 В Docker (тот же ``.env``, каталог ``./data`` на хосте)::
 
     docker compose run --rm bike-router python -m bike_router.tools.precache_area
+
+Первые секунды после команды могут **молчать**: идёт импорт тяжёлых библиотек.
+При подозрении на зависание: ``python -u -m bike_router.tools.precache_area`` (без буфера вывода)
+или смотрите строки ``precache_area: …`` в stderr. Забитый системный диск сильно замедляет старт.
 """
 
 from __future__ import annotations
@@ -28,14 +32,21 @@ logging.basicConfig(
 logger = logging.getLogger("precache_area")
 
 
+def _phase(msg: str) -> None:
+    """Ранний вывод до тяжёлых импортов (geopandas/osmnx могут молчать минутами)."""
+    print(msg, file=sys.stderr, flush=True)
+
+
 def main() -> int:
+    _phase("precache_area: загрузка модулей (geopandas, osmnx — может занять 1–3 мин при холодном старте)…")
     from bike_router.app import Application
     from bike_router.config import Settings
     from bike_router.services.area_graph_cache import (
-        build_area_precache,
+        ensure_area_precache,
         precache_area_dir,
     )
 
+    _phase("precache_area: чтение Settings из .env…")
     s = Settings()
     if not s.has_precache_area_polygon:
         logger.error(
@@ -43,8 +54,12 @@ def main() -> int:
             "(и при необходимости BIKE_ROUTER_BASE_DIR)."
         )
         return 1
+    _phase(
+        f"precache_area: BIKE_ROUTER_BASE_DIR={s.base_dir!r} — создание Application (OSMnx)…"
+    )
     app = Application(s)
-    out = build_area_precache(app)
+    _phase("precache_area: запуск ensure_area_precache…")
+    out = ensure_area_precache(app)
     logger.info("Готово: %s", out)
     logger.info("Каталог предкэша: %s", precache_area_dir(s))
     return 0

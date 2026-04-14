@@ -101,7 +101,10 @@ class TileService:
         if self._settings.cache_satellite:
             if os.path.exists(cache_file):
                 try:
-                    return Image.open(cache_file), "cache"
+                    # Иначе PIL держит открытый файл на каждый тайл → при сотнях тысяч
+                    # кэш-хитов «Too many open files» (OSError 24).
+                    with Image.open(cache_file) as im:
+                        return im.copy(), "cache"
                 except Exception as exc:
                     logger.debug(
                         "Битый кэш тайла (%d,%d,z=%d): %s", x, y, zoom, exc
@@ -133,6 +136,7 @@ class TileService:
             )
             if resp.status_code == 200:
                 img = Image.open(BytesIO(resp.content))
+                img.load()
                 if self._settings.cache_satellite:
                     try:
                         img.save(cache_file, "JPEG")

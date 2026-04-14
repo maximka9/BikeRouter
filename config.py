@@ -19,7 +19,11 @@ from typing import Dict, List, Tuple
 try:
     from dotenv import load_dotenv
 
+    # Сначала `.env` в текущей рабочей директории, затем рядом с пакетом
+    # (`bike_router/.env`), чтобы `python -m bike_router.tools.precache_area` из `NIR/`
+    # видел тот же конфиг, что и при запуске из `bike_router/`.
     load_dotenv()
+    load_dotenv(Path(__file__).resolve().parent / ".env")
 except ImportError:
     pass
 
@@ -246,6 +250,9 @@ class Settings:
     # True — не качать спутник и не считать зелень по тайлам (заглушки); быстрый старт Docker/CI
     disable_satellite_green: bool = _env_bool("DISABLE_SATELLITE_GREEN", False)
     tile_download_threads: int = _env("TILE_DOWNLOAD_THREADS", 8, int)
+    # Сколько тайлов обрабатывать за один проход (скачивание + маски T/G). Меньше — меньше RAM.
+    # 0 — без разбиения (как раньше; на огромном полигоне возможен OOM).
+    green_tile_batch_size: int = _env("GREEN_TILE_BATCH_SIZE", 4096, int)
     tms_server: str = _env("TMS_SERVER", "google")
 
     # --- Лимиты маршрутизации ---
@@ -347,6 +354,11 @@ class Settings:
     @property
     def osmnx_cache_dir(self) -> str:
         return os.path.join(self.base_dir, "osmnx_cache")
+
+    @property
+    def srtm_local_cache_dir(self) -> str:
+        """Каталог для HGT библиотеки ``srtm`` (иначе пишет в ``~/.cache/srtm`` на системном диске)."""
+        return os.path.join(self.base_dir, "cache", "srtm_hgt")
 
     @property
     def has_area_bbox(self) -> bool:

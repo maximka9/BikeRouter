@@ -89,7 +89,7 @@ def parse_precache_polygon(settings: Settings) -> Any:
     return geom
 
 
-def arena_wgs84_tuple(geom: shapely_base.BaseGeometry) -> Tuple[float, float, float, float]:
+def arena_wgs84_tuple(geom: Any) -> Tuple[float, float, float, float]:
     """Формат ``RouteEngine._corridor_wgs84``: (min_lat, max_lat, min_lon, max_lon)."""
     b = geom.bounds  # minx, miny, maxx, maxy = lon
     min_lon, min_lat, max_lon, max_lat = b[0], b[1], b[2], b[3]
@@ -159,6 +159,7 @@ def save_meta(
     has_green_graph: bool,
     nodes: int,
     edges: int,
+    green_phase_pending: bool = False,
 ) -> None:
     d = precache_area_dir(settings)
     d.mkdir(parents=True, exist_ok=True)
@@ -170,6 +171,7 @@ def save_meta(
         "built_at_utc": datetime.now(timezone.utc).isoformat(),
         "edges": edges,
         "fingerprint": fp,
+        "green_phase_pending": green_phase_pending,
         "has_green_graph": has_green_graph,
         "nodes": nodes,
         "routing_algo_fp": routing_engine_cache_fingerprint(),
@@ -208,11 +210,130 @@ def load_graphml_path(path: Path) -> Optional[nx.MultiDiGraph]:
         return None
 
 
+def cleanup_stale_precache_tmp_files(settings: Settings) -> None:
+    """Удалить *.tmp после прерванной записи (иначе сборка может зависнуть на битых файлах)."""
+    if not settings.has_precache_area_polygon:
+        return
+    d = precache_area_dir(settings)
+    if not d.is_dir():
+        return
+    for name in ("meta.json.tmp", "graph_base.graphml.tmp", "graph_green.graphml.tmp"):
+        p = d / name
+        if p.is_file():
+            try:
+                p.unlink()
+                logger.info("area_precache: удалён незавершённый %s", name)
+            except OSError as exc:
+                logger.warning("area_precache: не удалось удалить %s: %s", p, exc)
+
+
+def precache_area_is_complete(settings: Settings) -> bool:
+    """True, если ``graph_base`` есть, ``meta.json`` актуален, а зелёная фаза либо на диске, либо осознанно пропущена."""
+    if not settings.has_precache_area_polygon:
+        return True
+    meta = load_meta(settings)
+    if not meta or not meta_matches_current(meta, settings):
+        return False
+    if not graph_base_path(settings).is_file():
+        return False
+    expect_green = (
+        settings.precache_area_use_green_graph
+        and not settings.disable_satellite_green
+    )
+    if not expect_green:
+        return True
+    if graph_green_path(settings).is_file():
+        return True
+    # Зелёная фаза ещё не догружена (прерван precache после graph_base)
+    if meta.get("green_phase_pending"):
+        return False
+    # В ``meta`` зафиксировано, что зелень не собиралась (например, не было Pillow) — считаем готово
+    return meta.get("has_green_graph") is False
+
+
+def _complete_green_only_from_base(application: "Application", geom: Any) -> Path:
+    """Доначитка ``graph_green`` из уже сохранённого ``graph_base`` (повтор после обрыва или только phase1)."""
+    s = application.settings
+    gb = application.graph_builder
+    base_p = graph_base_path(s)
+    G = load_graphml_path(base_p)
+    if G is None:
+        logger.warning("area_precache: graph_base битый — полная пересборка")
+        return build_area_precache(application)
+
+    if not (
+        s.precache_area_use_green_graph
+        and not s.disable_satellite_green
+        and application.green._tiles.pil_available
+    ):
+        save_meta(
+            s,
+            geom,
+            has_green_graph=False,
+            nodes=G.number_of_nodes(),
+            edges=G.number_of_edges(),
+            green_phase_pending=False,
+        )
+        return precache_area_dir(s)
+
+    logger.info("area_precache: доначитка спутниковой зелени с существующего graph_base…")
+    G_work = G.copy()
+    e2 = gb.to_geodataframe(G_work)
+    e2 = gb.upgrade_edges_satellite_weights(e2)
+    Gg = gb.apply_weights(G_work, e2)
+    Gg.graph["bike_router_satellite_phase"] = _SAT_PHASE_FULL
+    _save_graphml(Gg, graph_green_path(s))
+    logger.info(
+        "area_precache: сохранён graph_green.graphml (%d узлов)",
+        Gg.number_of_nodes(),
+    )
+    save_meta(
+        s,
+        geom,
+        has_green_graph=True,
+        nodes=G.number_of_nodes(),
+        edges=G.number_of_edges(),
+        green_phase_pending=False,
+    )
+    return precache_area_dir(s)
+
+
+def ensure_area_precache(application: "Application") -> Path:
+    """Идемпотентная подготовка: если кэш полный — выход; иначе сборка или только зелёная фаза."""
+    s = application.settings
+    cleanup_stale_precache_tmp_files(s)
+    if not s.has_precache_area_polygon:
+        raise ValueError("Задайте PRECACHE_AREA_POLYGON_WKT")
+    if precache_area_is_complete(s):
+        out = precache_area_dir(s)
+        logger.info(
+            "area_precache: кэш арены уже готов (%s…), пропуск",
+            out.name[:16],
+        )
+        return out
+    geom = parse_precache_polygon(s)
+    meta_ok = load_meta(s)
+    meta_ok = meta_ok is not None and meta_matches_current(meta_ok, s)
+    base_ok = graph_base_path(s).is_file()
+    wants_green = (
+        s.precache_area_use_green_graph
+        and not s.disable_satellite_green
+        and application.green._tiles.pil_available
+    )
+    if meta_ok and base_ok and wants_green and not graph_green_path(s).is_file():
+        logger.info(
+            "area_precache: graph_base есть, graph_green нет — догружаем только зелёную фазу"
+        )
+        return _complete_green_only_from_base(application, geom)
+    return build_area_precache(application)
+
+
 def build_area_precache(application: Application) -> Path:
     """Полная предсборка: OSM по полигону, base + опционально green graph, meta, polygon.wkt."""
     s = application.settings
     if not s.has_precache_area_polygon:
         raise ValueError("Задайте PRECACHE_AREA_POLYGON_WKT")
+    cleanup_stale_precache_tmp_files(s)
     geom = parse_precache_polygon(s)
     b = geom.bounds
     mid_lat = (b[1] + b[3]) / 2.0
@@ -238,12 +359,23 @@ def build_area_precache(application: Application) -> Path:
         G.number_of_nodes(),
     )
 
-    has_green = False
-    if (
+    wants_satellite = (
         s.precache_area_use_green_graph
         and not s.disable_satellite_green
         and application.green._tiles.pil_available
-    ):
+    )
+    has_green = False
+
+    if wants_satellite:
+        # Промежуточный meta: после обрыва на тайлах не перекачивать OSM — только зелёная фаза
+        save_meta(
+            s,
+            geom,
+            has_green_graph=False,
+            nodes=G.number_of_nodes(),
+            edges=G.number_of_edges(),
+            green_phase_pending=True,
+        )
         logger.info("area_precache: доначитка спутниковой зелени (как в runtime)…")
         G_work = G.copy()
         e2 = gb.to_geodataframe(G_work)
@@ -256,18 +388,42 @@ def build_area_precache(application: Application) -> Path:
             "area_precache: сохранён graph_green.graphml (%d узлов)",
             Gg.number_of_nodes(),
         )
+        save_meta(
+            s,
+            geom,
+            has_green_graph=True,
+            nodes=G.number_of_nodes(),
+            edges=G.number_of_edges(),
+            green_phase_pending=False,
+        )
     elif s.precache_area_use_green_graph and s.disable_satellite_green:
         logger.info(
             "area_precache: DISABLE_SATELLITE_GREEN=true — graph_green не строится"
         )
-
-    save_meta(
-        s,
-        geom,
-        has_green_graph=has_green,
-        nodes=G.number_of_nodes(),
-        edges=G.number_of_edges(),
-    )
+        save_meta(
+            s,
+            geom,
+            has_green_graph=False,
+            nodes=G.number_of_nodes(),
+            edges=G.number_of_edges(),
+            green_phase_pending=False,
+        )
+    else:
+        if (
+            s.precache_area_use_green_graph
+            and not application.green._tiles.pil_available
+        ):
+            logger.info(
+                "area_precache: Pillow недоступен — graph_green со спутником не строится"
+            )
+        save_meta(
+            s,
+            geom,
+            has_green_graph=False,
+            nodes=G.number_of_nodes(),
+            edges=G.number_of_edges(),
+            green_phase_pending=False,
+        )
     return out_dir
 
 

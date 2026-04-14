@@ -21,7 +21,31 @@ logger = logging.getLogger(__name__)
 # v2: после валидации тайлов в tiles.py (серые placeholder не кэшируются)
 TILE_VEG_MASK_VERSION = "ndisexg_v2_tileval"
 # Версия pickle green_edges: смена инвалидирует старые файлы (в т.ч. «залипшие» нули).
-GREEN_EDGES_CACHE_SCHEMA = "green_edges_v5"
+GREEN_EDGES_CACHE_SCHEMA = "green_edges_v6"
+
+# Семантика зелёного результата на ребре (edge-cache / отчёт качества).
+GREEN_EDGE_STATUS_VALID = "valid_green_result"
+GREEN_EDGE_STATUS_ZERO = "confirmed_zero_green"
+GREEN_EDGE_STATUS_INVALID = "invalid_imagery_or_incomplete_analysis"
+
+
+def _is_trustworthy_edge_record(r: Any) -> bool:
+    """Готовый к переиспользованию результат: не «отравленный» невалидным снимком."""
+    if not isinstance(r, dict):
+        return False
+    st = r.get("status") or r.get("green_status")
+    return st in (GREEN_EDGE_STATUS_VALID, GREEN_EDGE_STATUS_ZERO)
+
+
+def _edge_cache_covers_all_edges(
+    edge_cache: dict, index_arr: np.ndarray
+) -> bool:
+    for idx in index_arr:
+        r = edge_cache.get(idx)
+        if r is None or not _is_trustworthy_edge_record(r):
+            return False
+    return len(index_arr) > 0
+
 
 try:
     from PIL import Image, ImageDraw
@@ -54,12 +78,24 @@ class GreenAnalyzer:
             Tuple[int, int, int], Tuple[np.ndarray, np.ndarray]
         ] = OrderedDict()
         self._tile_mask_read_lru_max: int = 8192
+        self._last_satellite_quality: Optional[Dict[str, Any]] = None
 
     def consume_satellite_warning(self) -> Optional[str]:
         """Одноразово отдать предупреждение о неполных тайлах (режим green в ответе)."""
         w = self._satellite_warning
         self._satellite_warning = None
         return w
+
+    def green_analysis_is_acceptable(self) -> bool:
+        """True, если последний спутниковый проход можно считать завершённым и без отравления кэша."""
+        q = self._last_satellite_quality
+        if not q:
+            return False
+        return bool(q.get("persistable_for_cache"))
+
+    def last_satellite_quality_report(self) -> Optional[Dict[str, Any]]:
+        """Снимок качества для meta.json area precache (может быть None до первого расчёта)."""
+        return self._last_satellite_quality
 
     # ==================================================================
     # Анализ изображений
@@ -209,6 +245,14 @@ class GreenAnalyzer:
         )
 
         if not self._tiles.pil_available:
+            self._last_satellite_quality = {
+                "invalid_tiles_total": 0,
+                "n_tg_fail_total": 0,
+                "edges_semantic_ok": 0,
+                "edges_total": len(edges_gdf),
+                "persistable_for_cache": False,
+                "all_edges_semantic_ok": False,
+            }
             return self._fill_empty_green(edges_gdf)
 
         edge_tiles: dict = {}
@@ -247,8 +291,11 @@ class GreenAnalyzer:
                 tiles_needed.update(tl)
 
         tile_masks: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]] = {}
-        if len(edge_cache) >= len(edges_gdf):
-            logger.info("Все результаты в кэше (%d рёбер)", len(edge_cache))
+        if _edge_cache_covers_all_edges(edge_cache, index_arr):
+            logger.info(
+                "Все результаты в кэше (%d рёбер, семантика valid/zero)",
+                len(edge_cache),
+            )
         elif not tiles_needed:
             logger.debug("Тайлы не нужны: все рёбра уже в edge-кэше")
         else:
@@ -376,17 +423,25 @@ class GreenAnalyzer:
                 trees_l.append(0.0)
                 grass_l.append(0.0)
                 total_l.append(0.0)
+                edge_cache[idx] = {
+                    "trees": 0.0,
+                    "grass": 0.0,
+                    "total": 0.0,
+                    "status": GREEN_EDGE_STATUS_INVALID,
+                }
                 continue
 
             sum_m = 0
             sum_t = 0
             sum_g = 0
+            missing_tile_mask = False
             ram_masks: Optional[
                 Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]]
             ] = None if self._settings.cache_tile_analysis else tile_masks
             for tx, ty in edge_tiles[idx]:
                 pair = self._resolve_tile_masks_pair(tx, ty, zoom, ram_masks)
                 if pair is None:
+                    missing_tile_mask = True
                     continue
                 t_mask, g_mask = pair
                 h, w = t_mask.shape[0], t_mask.shape[1]
@@ -414,10 +469,28 @@ class GreenAnalyzer:
             else:
                 tp = gp = top = 0.0
 
+            if (
+                missing_tile_mask
+                or invalid_tiles_total > 0
+                or n_tg_fail_total > 0
+            ):
+                st = GREEN_EDGE_STATUS_INVALID
+            elif sum_m == 0:
+                st = GREEN_EDGE_STATUS_INVALID
+            elif top <= 1e-12:
+                st = GREEN_EDGE_STATUS_ZERO
+            else:
+                st = GREEN_EDGE_STATUS_VALID
+
             trees_l.append(tp)
             grass_l.append(gp)
             total_l.append(top)
-            edge_cache[idx] = {"trees": tp, "grass": gp, "total": top}
+            edge_cache[idx] = {
+                "trees": tp,
+                "grass": gp,
+                "total": top,
+                "status": st,
+            }
 
         logger.info("Спутник: агрегация по рёбрам коридора завершена (%d шт.)", n_edges)
 
@@ -426,12 +499,27 @@ class GreenAnalyzer:
             or n_tg_fail_total > 0
             or invalid_tiles_total > 0
         )
+        all_semantic_ok = _edge_cache_covers_all_edges(edge_cache, index_arr)
+        persistable = (not skip_edge_persist) and all_semantic_ok
+        n_trust = sum(
+            1
+            for idx in index_arr
+            if _is_trustworthy_edge_record(edge_cache.get(idx, {}))
+        )
+        self._last_satellite_quality = {
+            "invalid_tiles_total": invalid_tiles_total,
+            "n_tg_fail_total": n_tg_fail_total,
+            "edges_semantic_ok": n_trust,
+            "edges_total": int(n_edges),
+            "persistable_for_cache": persistable,
+            "all_edges_semantic_ok": all_semantic_ok,
+        }
         self._save_edge_cache(
             edge_cache,
             edges_gdf,
             zoom,
             buf_m,
-            skip_disk=skip_edge_persist,
+            skip_disk=not persistable,
         )
 
         edges_gdf["trees_percent"] = trees_l
@@ -601,9 +689,9 @@ class GreenAnalyzer:
     def _edge_cache_is_degenerate_all_zeros(
         cached: Dict[Any, Any], n_edges: int
     ) -> bool:
-        """Полный кэш, где у каждого ребра trees=grass=total=0 — часто артефакт сбоя тайлов/TMS.
+        """Полный кэш из нулей без подтверждённой семантики — часто артефакт сбоя тайлов/TMS.
 
-        Не трогаем совсем маленькие графы: там нули могут быть осмысленны.
+        ``confirmed_zero_green`` с нулевыми процентами — валидно и не считается дегенератом.
         """
         if n_edges < 100 or len(cached) < n_edges:
             return False
@@ -616,7 +704,11 @@ class GreenAnalyzer:
                 or float(r.get("total", 0) or 0) != 0.0
             ):
                 return False
-        return True
+        for r in cached.values():
+            if r.get("status") == GREEN_EDGE_STATUS_ZERO:
+                continue
+            return True
+        return False
 
     def _load_edge_cache(
         self, edges_gdf: gpd.GeoDataFrame, zoom: int, buf_m: int
@@ -629,8 +721,21 @@ class GreenAnalyzer:
         path = self._edge_cache_path(edges_gdf, zoom, buf_m)
         cached = self._cache.load(path)
         if cached:
+            trusted = {
+                k: v
+                for k, v in cached.items()
+                if isinstance(v, dict) and _is_trustworthy_edge_record(v)
+            }
+            dropped = len(cached) - len(trusted)
+            if dropped:
+                logger.info(
+                    "green_edges: отброшено %d записей без валидного status (v6+), осталось %d",
+                    dropped,
+                    len(trusted),
+                )
+            cached = trusted
             logger.info(
-                "Кэш анализа рёбер (%s…): %d записей",
+                "Кэш анализа рёбер (%s…): %d доверенных записей",
                 os.path.basename(path)[:16],
                 len(cached),
             )

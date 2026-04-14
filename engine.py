@@ -41,6 +41,7 @@ from .services.area_graph_cache import (
     load_graphml_path,
     load_meta,
     meta_matches_current,
+    precache_area_is_complete,
     precache_corridor_fits_arena,
     select_precache_graph_path,
     select_warmup_precache_graph_path,
@@ -370,6 +371,11 @@ class RouteEngine:
         meta = load_meta(s)
         if not meta or not meta_matches_current(meta, s):
             return False
+        if not precache_area_is_complete(s):
+            logger.info(
+                "area_precache: кэш полигона не готов семантически (meta) — live коридор"
+            )
+            return False
         if not precache_corridor_fits_arena(s, required_wgs84):
             return False
         path = select_precache_graph_path(s, need_satellite)
@@ -418,7 +424,7 @@ class RouteEngine:
         if not meta:
             logger.info(
                 "Warmup: area_precache ещё не собран (нет meta.json в %s). "
-                "Включите PRECACHE_AREA_BUILD_ON_STARTUP или выполните python -m bike_router.tools.precache_area",
+                "Офлайн: python -m bike_router.tools.precache_area",
                 graph_base_path(s).parent,
             )
             return False
@@ -427,6 +433,11 @@ class RouteEngine:
                 "Warmup: area_precache на диске не подходит: fingerprint в meta.json "
                 "не совпадает с текущими настройками. Удалите каталог %s или пересоберите кэш.",
                 graph_base_path(s).parent,
+            )
+            return False
+        if not precache_area_is_complete(s):
+            logger.info(
+                "Warmup: area_precache не готов по meta (green_quality_state) — пропуск предзагрузки"
             )
             return False
         path = select_warmup_precache_graph_path(s)
@@ -643,31 +654,7 @@ class RouteEngine:
             fp = routing_engine_cache_fingerprint()
             self._route_disk_cache.set_cache_context(0, 0, fp)
 
-            # 1) Сборка на диске (долго только при первом запуске / пустом каталоге).
-            if (
-                s.precache_area_enabled
-                and s.has_precache_area_polygon
-                and s.precache_area_build_on_startup
-            ):
-                try:
-                    from .services.area_graph_cache import build_area_precache
-
-                    if not graph_base_path(s).is_file():
-                        logger.info(
-                            "Warmup: сборка area_precache по PRECACHE_AREA_POLYGON_WKT "
-                            "(может занять много времени)…"
-                        )
-                        build_area_precache(self._app)
-                    else:
-                        logger.info(
-                            "Warmup: area_precache уже есть на диске (%s…), "
-                            "пропуск сборки (удалите каталог для пересборки)",
-                            graph_base_path(s).parent.name[:16],
-                        )
-                except Exception as exc:
-                    logger.warning("Warmup: area_precache не собран: %s", exc)
-
-            # 2) Предзагрузка арены в память — без второго запроса к Overpass на старте.
+            # 1) Предзагрузка арены в память — без второго запроса к Overpass на старте.
             area_preloaded = False
             if s.precache_area_enabled and s.has_precache_area_polygon:
                 try:
@@ -678,7 +665,7 @@ class RouteEngine:
                         exc,
                     )
 
-            # 3) Коридор START/END из .env — только если арена не загружена (иначе лишний Overpass).
+            # 2) Опционально: коридор START/END из .env (CORRIDOR_WARMUP_PREBUILD) — не основной режим.
             if s.corridor_warmup_prebuild and not area_preloaded:
                 try:
                     eff_buf: Optional[float] = (

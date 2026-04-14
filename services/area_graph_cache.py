@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-AREA_PRECACHE_SCHEMA = "area_precache_v1"
+AREA_PRECACHE_SCHEMA = "area_precache_v2"
 
 _SAT_PHASE_STUB = "stub"
 _SAT_PHASE_FULL = "full"
@@ -160,22 +160,53 @@ def save_meta(
     nodes: int,
     edges: int,
     green_phase_pending: bool = False,
+    graph_base_ready: bool = True,
+    green_quality_state: Optional[str] = None,
+    invalid_tiles_rejected: int = 0,
+    green_edges_semantic_ok_count: int = 0,
+    green_from_valid_imagery: Optional[bool] = None,
 ) -> None:
     d = precache_area_dir(settings)
     d.mkdir(parents=True, exist_ok=True)
     wkt = settings.precache_area_polygon_wkt_stripped
     fp = area_precache_content_fingerprint(settings)
+    gqs = green_quality_state or (
+        "disabled"
+        if not (
+            settings.precache_area_use_green_graph
+            and not settings.disable_satellite_green
+        )
+        else "unknown"
+    )
+    expect_g = (
+        settings.precache_area_use_green_graph
+        and not settings.disable_satellite_green
+    )
+    stages = {
+        "completed": graph_base_ready
+        and ((not expect_g) or (gqs == "ok" and has_green_graph)),
+        "graph_base_ready": graph_base_ready,
+        "graph_green_ready": bool(has_green_graph and gqs == "ok"),
+        "green_edges_ready": has_green_graph and gqs == "ok",
+        "green_tiles_validated": (not expect_g) or (gqs == "ok" and invalid_tiles_rejected == 0),
+    }
     payload = {
         "arena_wgs84": list(arena_wgs84_tuple(geom)),
         "area_name": settings.precache_area_name,
         "built_at_utc": datetime.now(timezone.utc).isoformat(),
         "edges": edges,
         "fingerprint": fp,
+        "graph_base_ready": graph_base_ready,
+        "green_edges_semantic_ok_count": int(green_edges_semantic_ok_count),
+        "green_from_valid_imagery": green_from_valid_imagery,
         "green_phase_pending": green_phase_pending,
+        "green_quality_state": gqs,
         "has_green_graph": has_green_graph,
+        "invalid_tiles_rejected": int(invalid_tiles_rejected),
         "nodes": nodes,
         "routing_algo_fp": routing_engine_cache_fingerprint(),
         "schema": AREA_PRECACHE_SCHEMA,
+        "stages": stages,
         "wkt": wkt,
     }
     mp = meta_path(settings)
@@ -228,11 +259,7 @@ def cleanup_stale_precache_tmp_files(settings: Settings) -> None:
 
 
 def precache_area_is_complete(settings: Settings) -> bool:
-    """True, если ``graph_base`` есть, ``meta.json`` актуален, а зелёная фаза отражена на диске или осознанно отключена.
-
-    Если в ``meta`` зафиксирован успешный ``has_green_graph``, но ``graph_green.graphml`` удалён вручную —
-    возвращаем False (нужна догрузка), при условии что в настройках зелёная фаза precache включена.
-    """
+    """Готовность area precache: файлы + ``green_quality_state`` (v2 meta)."""
     if not settings.has_precache_area_polygon:
         return True
     meta = load_meta(settings)
@@ -246,31 +273,37 @@ def precache_area_is_complete(settings: Settings) -> bool:
     )
     green_p = graph_green_path(settings)
     has_green_file = green_p.is_file()
-    has_green_meta = meta.get("has_green_graph")
-    green_phase_pending = bool(meta.get("green_phase_pending"))
+    gqs = (meta.get("green_quality_state") or "").strip()
 
     if not expect_green:
-        # Только graph_base; graph_green не обязателен (даже если лежит старый meta с has_green_graph)
         return True
 
-    if has_green_meta is True:
+    if bool(meta.get("green_phase_pending")):
+        return False
+
+    if gqs in ("invalid_imagery", "incomplete", "unknown"):
+        logger.info(
+            "area_precache: не готов — green_quality_state=%s",
+            gqs or "∅",
+        )
+        return False
+
+    if gqs == "ok":
         if has_green_file:
             return True
         logger.warning(
-            "area_precache: в meta.json has_green_graph=true, но нет %s — кэш неполный, "
-            "нужна догрузка зелёной фазы",
+            "area_precache: meta green_quality_state=ok, но нет %s",
             green_p.name,
         )
         return False
 
-    if green_phase_pending:
+    if expect_green and gqs == "no_satellite":
+        logger.info(
+            "area_precache: не готов — спутниковая зелень недоступна (Pillow / no_satellite)"
+        )
         return False
 
-    if has_green_meta is False:
-        # Зелёная фаза намеренно не выполнялась (нет Pillow и т.п.)
-        return True
-
-    # Устаревший meta без флага или неопределённое состояние
+    # Устаревший meta без v2 или неизвестное состояние
     return False
 
 
@@ -296,6 +329,8 @@ def _complete_green_only_from_base(application: "Application", geom: Any) -> Pat
             nodes=G.number_of_nodes(),
             edges=G.number_of_edges(),
             green_phase_pending=False,
+            green_quality_state="no_satellite",
+            green_from_valid_imagery=False,
         )
         return precache_area_dir(s)
 
@@ -303,6 +338,31 @@ def _complete_green_only_from_base(application: "Application", geom: Any) -> Pat
     G_work = G.copy()
     e2 = gb.to_geodataframe(G_work)
     e2 = gb.upgrade_edges_satellite_weights(e2)
+    q = application.green.last_satellite_quality_report() or {}
+    if not application.green.green_analysis_is_acceptable():
+        gp = graph_green_path(s)
+        if gp.is_file():
+            try:
+                gp.unlink()
+            except OSError:
+                pass
+        save_meta(
+            s,
+            geom,
+            has_green_graph=False,
+            nodes=G.number_of_nodes(),
+            edges=G.number_of_edges(),
+            green_phase_pending=False,
+            green_quality_state="invalid_imagery",
+            invalid_tiles_rejected=int(q.get("invalid_tiles_total", 0)),
+            green_edges_semantic_ok_count=int(q.get("edges_semantic_ok", 0)),
+            green_from_valid_imagery=False,
+        )
+        logger.error(
+            "area_precache: graph_green не сохранён — спутниковые данные не прошли проверку качества"
+        )
+        return precache_area_dir(s)
+
     Gg = gb.apply_weights(G_work, e2)
     Gg.graph["bike_router_satellite_phase"] = _SAT_PHASE_FULL
     _save_graphml(Gg, graph_green_path(s))
@@ -317,6 +377,10 @@ def _complete_green_only_from_base(application: "Application", geom: Any) -> Pat
         nodes=G.number_of_nodes(),
         edges=G.number_of_edges(),
         green_phase_pending=False,
+        green_quality_state="ok",
+        invalid_tiles_rejected=int(q.get("invalid_tiles_total", 0)),
+        green_edges_semantic_ok_count=int(q.get("edges_semantic_ok", 0)),
+        green_from_valid_imagery=True,
     )
     return precache_area_dir(s)
 
@@ -393,7 +457,6 @@ def build_area_precache(application: Application) -> Path:
     has_green = False
 
     if wants_satellite:
-        # Промежуточный meta: после обрыва на тайлах не перекачивать OSM — только зелёная фаза
         save_meta(
             s,
             geom,
@@ -401,11 +464,37 @@ def build_area_precache(application: Application) -> Path:
             nodes=G.number_of_nodes(),
             edges=G.number_of_edges(),
             green_phase_pending=True,
+            green_quality_state="incomplete",
         )
         logger.info("area_precache: доначитка спутниковой зелени (как в runtime)…")
         G_work = G.copy()
         e2 = gb.to_geodataframe(G_work)
         e2 = gb.upgrade_edges_satellite_weights(e2)
+        q = application.green.last_satellite_quality_report() or {}
+        if not application.green.green_analysis_is_acceptable():
+            gp = graph_green_path(s)
+            if gp.is_file():
+                try:
+                    gp.unlink()
+                except OSError:
+                    pass
+            save_meta(
+                s,
+                geom,
+                has_green_graph=False,
+                nodes=G.number_of_nodes(),
+                edges=G.number_of_edges(),
+                green_phase_pending=False,
+                green_quality_state="invalid_imagery",
+                invalid_tiles_rejected=int(q.get("invalid_tiles_total", 0)),
+                green_edges_semantic_ok_count=int(q.get("edges_semantic_ok", 0)),
+                green_from_valid_imagery=False,
+            )
+            logger.error(
+                "area_precache: graph_green не сохранён — невалидные или неполные спутниковые данные"
+            )
+            return out_dir
+
         Gg = gb.apply_weights(G_work, e2)
         Gg.graph["bike_router_satellite_phase"] = _SAT_PHASE_FULL
         _save_graphml(Gg, graph_green_path(s))
@@ -421,6 +510,10 @@ def build_area_precache(application: Application) -> Path:
             nodes=G.number_of_nodes(),
             edges=G.number_of_edges(),
             green_phase_pending=False,
+            green_quality_state="ok",
+            invalid_tiles_rejected=int(q.get("invalid_tiles_total", 0)),
+            green_edges_semantic_ok_count=int(q.get("edges_semantic_ok", 0)),
+            green_from_valid_imagery=True,
         )
     elif s.precache_area_use_green_graph and s.disable_satellite_green:
         logger.info(
@@ -433,6 +526,8 @@ def build_area_precache(application: Application) -> Path:
             nodes=G.number_of_nodes(),
             edges=G.number_of_edges(),
             green_phase_pending=False,
+            green_quality_state="disabled",
+            green_from_valid_imagery=False,
         )
     else:
         if (
@@ -449,6 +544,8 @@ def build_area_precache(application: Application) -> Path:
             nodes=G.number_of_nodes(),
             edges=G.number_of_edges(),
             green_phase_pending=False,
+            green_quality_state="no_satellite",
+            green_from_valid_imagery=False,
         )
     return out_dir
 

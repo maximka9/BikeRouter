@@ -60,33 +60,35 @@ class SmokeTests(unittest.TestCase):
 
         import bike_router.config as cfg
 
-        with patch.dict(
-            os.environ,
-            {
-                "GRAPH_CORRIDOR_MODE": "true",
-                "AREA_MIN_LAT": "53",
-                "AREA_MAX_LAT": "54",
-                "AREA_MIN_LON": "50",
-                "AREA_MAX_LON": "51",
-                "AREA_POLYGON_WKT": "",
-            },
-        ):
+        # reload(config) снова вызывает load_dotenv(override=True) — без мока подтянется bike_router/.env.
+        with patch("dotenv.load_dotenv"):
+            with patch.dict(
+                os.environ,
+                {
+                    "GRAPH_CORRIDOR_MODE": "true",
+                    "AREA_MIN_LAT": "53",
+                    "AREA_MAX_LAT": "54",
+                    "AREA_MIN_LON": "50",
+                    "AREA_MAX_LON": "51",
+                    "AREA_POLYGON_WKT": "",
+                },
+            ):
+                importlib.reload(cfg)
+                self.assertFalse(cfg.Settings().use_dynamic_corridor_graph)
+            with patch.dict(
+                os.environ,
+                {
+                    "GRAPH_CORRIDOR_MODE": "true",
+                    "AREA_MIN_LAT": "0",
+                    "AREA_MAX_LAT": "0",
+                    "AREA_MIN_LON": "0",
+                    "AREA_MAX_LON": "0",
+                    "AREA_POLYGON_WKT": "",
+                },
+            ):
+                importlib.reload(cfg)
+                self.assertTrue(cfg.Settings().use_dynamic_corridor_graph)
             importlib.reload(cfg)
-            self.assertFalse(cfg.Settings().use_dynamic_corridor_graph)
-        with patch.dict(
-            os.environ,
-            {
-                "GRAPH_CORRIDOR_MODE": "true",
-                "AREA_MIN_LAT": "0",
-                "AREA_MAX_LAT": "0",
-                "AREA_MIN_LON": "0",
-                "AREA_MAX_LON": "0",
-                "AREA_POLYGON_WKT": "",
-            },
-        ):
-            importlib.reload(cfg)
-            self.assertTrue(cfg.Settings().use_dynamic_corridor_graph)
-        importlib.reload(cfg)
 
     def test_corridor_bbox_cache_key_stable(self) -> None:
         from bike_router.config import Settings

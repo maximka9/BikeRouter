@@ -263,8 +263,6 @@ class Settings:
 
     # --- Кэш ---
     cache_satellite: bool = _env_bool("CACHE_SATELLITE", True)
-    # Отклонять однотонные/серые тайлы перед записью в cache/tiles (иначе зелень → нули)
-    tile_validate_for_green: bool = _env_bool("TILE_VALIDATE_FOR_GREEN", True)
     cache_tile_analysis: bool = _env_bool("CACHE_TILE_ANALYSIS", True)
     force_recalculate: bool = _env_bool("FORCE_RECALCULATE", False)
     # green_edges: не доверять pickle, где у всех рёбер нулевая зелень (часто после сбоя тайлов).

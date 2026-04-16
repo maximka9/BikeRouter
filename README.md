@@ -148,7 +148,7 @@ bike_router/
 
 | Путь на диске | Откуда в коде | Содержимое |
 |---------------|----------------|------------|
-| `{BASE}/cache/tiles/` | `services/cache.py` → `tile_dir()` | JPEG спутниковых тайлов (`{server}_{z}_{x}_{y}.jpg`). При ``TILE_VALIDATE_FOR_GREEN=true`` однотонные/серые ответы не сохраняются (`tiles.py`) |
+| `{BASE}/cache/tiles/` | `services/cache.py` → `tile_dir()` | JPEG спутниковых тайлов (`{server}_{z}_{x}_{y}.jpg`) |
 | `{BASE}/cache/tile_green_masks/` | `services/green.py` | Маски деревьев/травы по тайлу (`*.npz`) |
 | `{BASE}/cache/green_edges/` | `services/green.py` | Pickle кэш анализа рёбер по bbox (ключ включает TMS/zoom; схема `green_edges_v6`). Полностью нулевой кэш при большом графе при загрузке отбрасывается — см. `GREEN_EDGE_REJECT_ALL_ZERO_CACHE` |
 | `{BASE}/cache/corridor_graphs/` | `services/corridor_graph_cache.py` | GraphML взвешенных графов коридора |

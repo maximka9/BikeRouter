@@ -41,6 +41,7 @@ from .services.area_graph_cache import (
     load_graphml_path,
     load_meta,
     meta_matches_current,
+    meta_path,
     precache_area_is_complete,
     precache_corridor_fits_arena,
     select_precache_graph_path,
@@ -369,7 +370,18 @@ class RouteEngine:
         if not s.use_dynamic_corridor_graph:
             return False
         meta = load_meta(s)
-        if not meta or not meta_matches_current(meta, s):
+        if not meta:
+            logger.info(
+                "area_precache: нет meta.json под BIKE_ROUTER_BASE_DIR — live коридор "
+                "(офлайн: python -m bike_router.tools.precache_area)"
+            )
+            return False
+        if not meta_matches_current(meta, s):
+            logger.info(
+                "area_precache: fingerprint в meta.json не совпадает с текущими "
+                "настройками (zoom/buffer/TMS/ROUTING_ALGO_VERSION/…) — пересоберите "
+                "precache_area или выровняйте .env"
+            )
             return False
         if not precache_area_is_complete(s):
             logger.info(
@@ -377,11 +389,16 @@ class RouteEngine:
             )
             return False
         if not precache_corridor_fits_arena(s, required_wgs84):
+            logger.info(
+                "area_precache: bbox коридора запроса (с буфером) не целиком внутри "
+                "PRECACHE_AREA_POLYGON_WKT — live коридор"
+            )
             return False
         path = select_precache_graph_path(s, need_satellite)
         if path is None:
-            logger.debug(
-                "area_precache: нет подходящего graphml (need_satellite=%s)",
+            logger.info(
+                "area_precache: нет подходящего graphml (need_satellite=%s) — "
+                "проверьте graph_base/graph_green и PRECACHE_AREA_USE_GREEN_GRAPH",
                 need_satellite,
             )
             return False
@@ -422,10 +439,25 @@ class RouteEngine:
             return False
         meta = load_meta(s)
         if not meta:
+            d = graph_base_path(s).parent
+            extra = ""
+            if d.is_dir() and not meta_path(s).is_file():
+                try:
+                    n_files = sum(1 for _ in d.iterdir())
+                    extra = (
+                        f" Папка на диске есть ({n_files} объектов), но без meta.json "
+                        "кэш не действителен — сборка не завершилась или файлы удалены. "
+                        "Удалите эту папку и заново выполните "
+                        "`python -m bike_router.tools.precache_area` "
+                        "(в Docker: `docker compose run --rm bike-router "
+                        "python -m bike_router.tools.precache_area`)."
+                    )
+                except OSError:
+                    pass
             logger.info(
-                "Warmup: area_precache ещё не собран (нет meta.json в %s). "
-                "Офлайн: python -m bike_router.tools.precache_area",
-                graph_base_path(s).parent,
+                "Warmup: area_precache ещё не собран (нет meta.json в %s).%s",
+                d,
+                extra,
             )
             return False
         if not meta_matches_current(meta, s):

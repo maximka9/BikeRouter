@@ -18,7 +18,6 @@ from .tiles import TileService
 logger = logging.getLogger(__name__)
 
 # Пороги NDI/ExG в compute_vegetation_masks; при изменении — увеличить для сброса кэша .npz
-# v2: после валидации тайлов в tiles.py (серые placeholder не кэшируются)
 TILE_VEG_MASK_VERSION = "ndisexg_v2_tileval"
 # Версия pickle green_edges: смена инвалидирует старые файлы (в т.ч. «залипшие» нули).
 GREEN_EDGES_CACHE_SCHEMA = "green_edges_v6"
@@ -89,11 +88,9 @@ class GreenAnalyzer:
     def green_analysis_is_acceptable(self) -> bool:
         """True, если последний спутниковый проход можно считать завершённым и без отравления кэша.
 
-        Политика **консервативная**: ``persistable_for_cache`` ложен при любых
-        ``invalid_tiles_total``/сбоях масок/предупреждении — дисковый edge-cache и
-        ``graph_green`` не помечаются как полные. Это снижает переиспользование при
-        частично плохих тайлах; ослабление — отдельная настройка (см. агрегацию в
-        ``calculate_satellite_batch``).
+        Политика **консервативная**: ``persistable_for_cache`` ложен при сбоях масок
+        HTTP/тайлов или предупреждении — дисковый edge-cache и ``graph_green`` не
+        помечаются как полные (см. агрегацию в ``calculate_satellite_batch``).
         """
         q = self._last_satellite_quality
         if not q:
@@ -286,7 +283,6 @@ class GreenAnalyzer:
 
         edge_cache = self._load_edge_cache(edges_gdf, zoom, buf_m)
         n_tg_fail_total = 0
-        invalid_tiles_total = 0
 
         tiles_needed: Set[Tuple[int, int]] = set()
         for pos in range(n_edges):
@@ -341,8 +337,7 @@ class GreenAnalyzer:
                         min(start + batch_cap, n_need),
                         n_need,
                     )
-                tile_images, tstats = self._tiles.download_batch(chunk_set, zoom)
-                invalid_tiles_total += tstats.invalid_rejected
+                tile_images, _ = self._tiles.download_batch(chunk_set, zoom)
                 n_ok = len(tile_images)
                 n_ok_total += n_ok
                 if n_ok < len(chunk_set):
@@ -372,17 +367,6 @@ class GreenAnalyzer:
                     "оценка озеленения по снимку может быть неполной."
                 )
                 logger.warning("%s", self._satellite_warning)
-
-            if invalid_tiles_total > 0:
-                msg = (
-                    f"Отклонено {invalid_tiles_total} тайлов как серые/плоские "
-                    "(не годятся для цветового анализа зелени); edge-кэш не сохраняем."
-                )
-                if self._satellite_warning:
-                    self._satellite_warning = f"{self._satellite_warning} {msg}"
-                else:
-                    self._satellite_warning = msg
-                logger.warning("tiles: %s", msg)
 
             masks_done = (
                 len(tile_masks)
@@ -476,11 +460,7 @@ class GreenAnalyzer:
             else:
                 tp = gp = top = 0.0
 
-            if (
-                missing_tile_mask
-                or invalid_tiles_total > 0
-                or n_tg_fail_total > 0
-            ):
+            if missing_tile_mask or n_tg_fail_total > 0:
                 st = GREEN_EDGE_STATUS_INVALID
             elif sum_m == 0:
                 st = GREEN_EDGE_STATUS_INVALID
@@ -501,11 +481,9 @@ class GreenAnalyzer:
 
         logger.info("Спутник: агрегация по рёбрам коридора завершена (%d шт.)", n_edges)
 
-        # Строгость: любой сбой тайла/маски или warning → не сохраняем «полный» кэш (см. docstring).
+        # Строгость: сбой маски / HTTP или warning → не сохраняем «полный» кэш (см. docstring).
         skip_edge_persist = (
-            self._satellite_warning is not None
-            or n_tg_fail_total > 0
-            or invalid_tiles_total > 0
+            self._satellite_warning is not None or n_tg_fail_total > 0
         )
         all_semantic_ok = _edge_cache_covers_all_edges(edge_cache, index_arr)
         persistable = (not skip_edge_persist) and all_semantic_ok
@@ -515,7 +493,7 @@ class GreenAnalyzer:
             if _is_trustworthy_edge_record(edge_cache.get(idx, {}))
         )
         self._last_satellite_quality = {
-            "invalid_tiles_total": invalid_tiles_total,
+            "invalid_tiles_total": 0,
             "n_tg_fail_total": n_tg_fail_total,
             "edges_semantic_ok": n_trust,
             "edges_total": int(n_edges),

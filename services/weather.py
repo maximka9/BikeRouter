@@ -202,8 +202,22 @@ def compute_weather_multipliers(
     )
 
 
-def _cache_key(lat: float, lon: float, iso_hour: str) -> str:
-    return f"{round(lat, 3)}:{round(lon, 3)}:{iso_hour[:13]}"
+def _cache_key(lat: float, lon: float, iso_hour: str, historical: bool) -> str:
+    return f"{round(lat, 3)}:{round(lon, 3)}:{iso_hour[:13]}:{'a' if historical else 'f'}"
+
+
+def _weather_target_in_past(when_iso: str) -> bool:
+    """True, если момент *when_iso* уже наступил — для выбора Archive API вместо Forecast."""
+    from datetime import datetime
+
+    raw = str(when_iso).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if dt.tzinfo is not None:
+        return dt < datetime.now(dt.tzinfo)
+    return dt < datetime.now()
 
 
 def fetch_open_meteo_hourly(
@@ -244,6 +258,8 @@ def fetch_open_meteo_hourly(
         "start_date": dstr,
         "end_date": dstr,
         "timezone": "auto",
+        # Явно м/с: иначе по умолчанию км/ч (документация Forecast/Archive API).
+        "wind_speed_unit": "ms",
     }
     try:
         r = requests.get(url, params=params, timeout=25)
@@ -282,8 +298,8 @@ def fetch_open_meteo_hourly(
         return float(v)
 
     w_raw = _arr("wind_speed_10m", 10.0)
-    # Open-Meteo forecast: wind_speed_10m в км/ч → м/с
-    wind_ms = w_raw / 3.6 if w_raw > 35 else max(0.0, w_raw)
+    # Параметр wind_speed_unit=ms — значения в м/с (по умолчанию у API — км/ч).
+    wind_ms = max(0.0, w_raw)
 
     app_t = None
     apt_arr = hourly.get("apparent_temperature")
@@ -298,8 +314,7 @@ def fetch_open_meteo_hourly(
     gust_arr = hourly.get("wind_gusts_10m")
     gust = None
     if gust_arr and best_i < len(gust_arr) and gust_arr[best_i] is not None:
-        g0 = float(gust_arr[best_i])
-        gust = g0 / 3.6 if g0 > 35 else g0
+        gust = max(0.0, float(gust_arr[best_i]))
 
     sw_arr = hourly.get("shortwave_radiation")
     sw = None
@@ -345,7 +360,8 @@ def resolve_weather_for_route(
         snap = manual
         src = "manual"
     elif mode == "auto" or use_live_weather or mode == "live":
-        key = _cache_key(lat, lon, when)
+        use_archive = _weather_target_in_past(when)
+        key = _cache_key(lat, lon, when, use_archive)
         now = time.time()
         with _CACHE_LOCK:
             ent = _CACHE.get(key)
@@ -353,9 +369,11 @@ def resolve_weather_for_route(
                 snap = ent[1]
                 src = "open_meteo_cache"
             else:
-                snap = fetch_open_meteo_hourly(lat, lon, when, historical=False)
+                snap = fetch_open_meteo_hourly(
+                    lat, lon, when, historical=use_archive
+                )
                 _CACHE[key] = (now, snap)
-                src = "open_meteo"
+                src = "open_meteo_archive" if use_archive else "open_meteo"
     else:
         snap = manual if manual is not None else WeatherSnapshot()
         src = "manual" if manual is not None else "default"

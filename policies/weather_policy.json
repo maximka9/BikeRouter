@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "green_edge_coupling": 0.55,
+  "description": "Множители погоды к компонентам стоимости ребра (1.0 = нейтрально). Настраиваются по диапазонам метеопеременных.",
+  "temperature_c": {
+    "cold_below": 5,
+    "cool_max": 15,
+    "warm_min": 25,
+    "hot_above": 30
+  },
+  "precipitation_mm_h": {
+    "dry_max": 0.1,
+    "light_max": 1.0,
+    "heavy_above": 2.0
+  },
+  "wind_ms": {
+    "calm_max": 4,
+    "breeze_max": 8,
+    "strong_above": 12
+  },
+  "cloud_cover_pct": {
+    "clear_max": 30,
+    "overcast_min": 70
+  },
+  "humidity_pct": {
+    "comfort_max": 60,
+    "humid_above": 80
+  },
+  "multipliers": {
+    "physical": {
+      "base": 1.0,
+      "per_temp_hot": 0.012,
+      "per_temp_cold": 0.008,
+      "rain_light": 1.06,
+      "rain_heavy": 1.14,
+      "wind_headwind_proxy": 0.04,
+      "humid_surface": 1.05
+    },
+    "heat": {
+      "base": 1.0,
+      "per_temp_above_22": 0.022,
+      "cloud_reduction_per_pct": 0.0022,
+      "rain_reduction_light": 0.92,
+      "rain_reduction_heavy": 0.82
+    },
+    "green": {
+      "base": 1.0,
+      "hot_sunny_bonus": 1.18,
+      "cool_cloud_penalty": 0.92,
+      "rain_neutralize": 0.72
+    },
+    "stress": {
+      "base": 1.0,
+      "rain": 1.12,
+      "wind_strong": 1.1,
+      "low_visibility_cloud": 1.05,
+      "wet_and_fast_road": 1.08
+    },
+    "surface": {
+      "base": 1.0,
+      "rain": 1.08,
+      "humid": 1.04
+    }
+  }
+}

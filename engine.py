@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,6 +23,7 @@ from .config import (
     PROFILES,
     TIME_SLOTS,
     TURN_PENALTY_BASE,
+    RoutingPreferenceProfile,
     Settings,
     routing_engine_cache_fingerprint,
     routing_preference_profile,
@@ -46,6 +48,8 @@ from .models import (
     RoutingContextMeta,
     StairsInfo,
     SurfaceBreakdown,
+    WeatherRouteContext,
+    WeatherSnapshotValues,
 )
 from .services.heat import heat_context_multiplier
 from .services.area_graph_cache import (
@@ -75,6 +79,12 @@ from .services.routing import (
     RouteService,
     sanitize_multidigraph_routing_weights,
 )
+from .services.weather import (
+    WeatherSnapshot,
+    WeatherWeightParams,
+    resolve_weather_for_route,
+    snapshot_from_manual,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +99,128 @@ _VARIANT_LABEL_DEFAULT = {
     "green": "С учётом озеленения",
     "shortest": "Кратчайший по карте",
 }
+
+# Минимизация только физической части веса с погодными множителями (режим full/green).
+_WEATHER_PHYSICAL_ROUTING_PREF = RoutingPreferenceProfile(
+    key="weather_physical",
+    label="",
+    alpha=1.0,
+    beta=0.0,
+    gamma=0.0,
+    delta=0.0,
+)
+
+
+def _engine_weather_mode(request_mode: Optional[str], use_live_weather: bool) -> str:
+    if use_live_weather:
+        return "auto"
+    m = (request_mode or "none").strip().lower()
+    return m if m else "none"
+
+
+def _weather_snapshot_to_values(snap: WeatherSnapshot) -> WeatherSnapshotValues:
+    return WeatherSnapshotValues(
+        temperature_c=float(snap.temperature_c),
+        apparent_temperature_c=snap.apparent_temperature_c,
+        precipitation_mm=float(snap.precipitation_mm),
+        precipitation_probability=snap.precipitation_probability,
+        wind_speed_ms=float(snap.wind_speed_ms),
+        wind_gusts_ms=snap.wind_gusts_ms,
+        cloud_cover_pct=float(snap.cloud_cover_pct),
+        humidity_pct=float(snap.humidity_pct),
+        shortwave_radiation_wm2=snap.shortwave_radiation_wm2,
+    )
+
+
+def _weather_summary_ru(snap: WeatherSnapshot, wp: WeatherWeightParams) -> str:
+    if not wp.enabled:
+        return "Погода не учитывалась при выборе путей."
+    m = wp.mults
+    parts: List[str] = []
+    if m.physical > 1.04:
+        parts.append("рельеф и покрытие «дороже» из‑за погоды")
+    elif m.physical < 0.97:
+        parts.append("физическая часть стоимости слегка снижена")
+    if m.heat > 1.05:
+        parts.append("тепловой дискомфорт усилен")
+    elif m.heat < 0.97:
+        parts.append("тепловая нагрузка ниже обычной для слота")
+    if m.green > 1.06:
+        parts.append("тень и зелёные участки дают больший бонус")
+    elif m.green < 0.96:
+        parts.append("влияние озеленения на комфорт ослаблено")
+    if m.stress > 1.05:
+        parts.append("транспортный стресс и риск выше")
+    if m.surface > 1.05:
+        parts.append("покрытие штрафуется сильнее (влага/скользкость)")
+    if snap.precipitation_mm > 0.3:
+        parts.append("осадки увеличивают «цену» подъёмов и плохого покрытия")
+    if not parts:
+        return "Погодные поправки близки к нейтральным."
+    return "; ".join(parts)
+
+
+def _build_weather_route_context(
+    *,
+    request_mode: str,
+    use_live_weather: bool,
+    weather_time: Optional[str],
+    departure_time: Optional[str],
+    snap: WeatherSnapshot,
+    source: str,
+    wp: WeatherWeightParams,
+) -> WeatherRouteContext:
+    mults: Dict[str, float] = {}
+    if wp.enabled:
+        mults = {k: round(float(v), 4) for k, v in asdict(wp.mults).items()}
+    wt = weather_time or departure_time
+    return WeatherRouteContext(
+        enabled=bool(wp.enabled),
+        mode=request_mode,
+        use_live_weather=use_live_weather,
+        weather_time=wt,
+        source=source,
+        snapshot=_weather_snapshot_to_values(snap),
+        multipliers=mults,
+        summary_ru=_weather_summary_ru(snap, wp),
+    )
+
+
+def _resolve_route_weather(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    *,
+    request_mode: str,
+    use_live_weather: bool,
+    weather_time: Optional[str],
+    departure_time: Optional[str],
+    temperature_c: Optional[float],
+    precipitation_mm: Optional[float],
+    wind_speed_ms: Optional[float],
+    cloud_cover_pct: Optional[float],
+    humidity_pct: Optional[float],
+) -> Tuple[WeatherSnapshot, str, WeatherWeightParams]:
+    lat = (float(start[0]) + float(end[0])) * 0.5
+    lon = (float(start[1]) + float(end[1])) * 0.5
+    wm = _engine_weather_mode(request_mode, use_live_weather)
+    manual: Optional[WeatherSnapshot] = None
+    if wm == "manual":
+        manual = snapshot_from_manual(
+            temperature_c=temperature_c,
+            precipitation_mm=precipitation_mm,
+            wind_speed_ms=wind_speed_ms,
+            cloud_cover_pct=cloud_cover_pct,
+            humidity_pct=humidity_pct,
+        )
+    return resolve_weather_for_route(
+        lat=lat,
+        lon=lon,
+        weather_mode=wm,
+        use_live_weather=False,
+        weather_time_iso=weather_time,
+        departure_time=departure_time,
+        manual=manual,
+    )
 
 
 def _fmt_time(seconds: float) -> str:
@@ -844,6 +976,7 @@ class RouteEngine:
         cost_override: Optional[float] = None,
         heat_stress_metrics: Optional[HeatStressMetrics] = None,
         routing_context: Optional[RoutingContextMeta] = None,
+        weather: Optional[WeatherRouteContext] = None,
     ) -> RouteResponse:
         """Собрать :class:`RouteResponse` из уже найденного :class:`RouteResult`."""
         profile = _PROFILE_MAP[profile_key]
@@ -922,6 +1055,7 @@ class RouteEngine:
             time_display=_fmt_time(time_s),
             cost=round(cost, 1),
             routing_context=rc,
+            weather=weather,
             heat_cost_total=float(hm.total_heat_cost) if hm else 0.0,
             stress_cost_total=float(hm.stress_cost_total) if hm else 0.0,
             exposed_length_m=float(hm.exposed_high_length_m) if hm else 0.0,
@@ -1067,6 +1201,10 @@ class RouteEngine:
         *,
         include_green_route: bool,
         graph: Optional[nx.MultiDiGraph] = None,
+        weather: Optional[WeatherWeightParams] = None,
+        time_slot_key: str = "noon",
+        heat_context_mult: float = 1.0,
+        weather_ctx: Optional[WeatherRouteContext] = None,
     ) -> List[RouteResponse]:
         """Собрать варианты; порядок в ответе — кратчайший, полный, зелёный (если есть)."""
         profile = _PROFILE_MAP[profile_key]
@@ -1077,10 +1215,36 @@ class RouteEngine:
         w_full = f"weight_{profile.key}_full"
         w_green = f"weight_{profile.key}_green"
 
-        rf = router.find_route(G, start, end, w_full)
+        if weather is not None and weather.enabled:
+            rf = router.find_route_combined(
+                G,
+                start,
+                end,
+                profile_key,
+                time_slot_key,
+                _WEATHER_PHYSICAL_ROUTING_PREF,
+                heat_context_mult=heat_context_mult,
+                weather=weather,
+                physical_weight_key=w_full,
+            )
+        else:
+            rf = router.find_route(G, start, end, w_full)
         rg = None
         if include_green_route:
-            rg = router.find_route(G, start, end, w_green)
+            if weather is not None and weather.enabled:
+                rg = router.find_route_combined(
+                    G,
+                    start,
+                    end,
+                    profile_key,
+                    time_slot_key,
+                    _WEATHER_PHYSICAL_ROUTING_PREF,
+                    heat_context_mult=heat_context_mult,
+                    weather=weather,
+                    physical_weight_key=w_green,
+                )
+            else:
+                rg = router.find_route(G, start, end, w_green)
 
         exclude = {tuple(rf.edges)}
         if rg is not None:
@@ -1088,6 +1252,24 @@ class RouteEngine:
 
         routes_out: List[RouteResponse] = []
         if include_green_route and rg is not None:
+            seg_full = router.route_segment_costs(
+                G,
+                rf,
+                profile_key,
+                time_slot_key,
+                heat_context_mult=heat_context_mult,
+                weather=weather,
+                physical_weight_key=w_full,
+            )
+            seg_green = router.route_segment_costs(
+                G,
+                rg,
+                profile_key,
+                time_slot_key,
+                heat_context_mult=heat_context_mult,
+                weather=weather,
+                physical_weight_key=w_green,
+            )
             routes_out.append(
                 self._build_route_response(
                     start,
@@ -1098,6 +1280,8 @@ class RouteEngine:
                     w_full,
                     _VARIANT_LABEL_DEFAULT["full"],
                     graph=G,
+                    cost_override=round(seg_full["physical"], 1),
+                    weather=weather_ctx,
                 )
             )
             routes_out.append(
@@ -1110,9 +1294,24 @@ class RouteEngine:
                     w_green,
                     _VARIANT_LABEL_DEFAULT["green"],
                     graph=G,
+                    cost_override=round(seg_green["physical"], 1),
+                    weather=weather_ctx,
                 )
             )
         else:
+            seg_full = (
+                router.route_segment_costs(
+                    G,
+                    rf,
+                    profile_key,
+                    time_slot_key,
+                    heat_context_mult=heat_context_mult,
+                    weather=weather,
+                    physical_weight_key=w_full,
+                )
+                if weather is not None and weather.enabled
+                else None
+            )
             routes_out.append(
                 self._build_route_response(
                     start,
@@ -1123,6 +1322,12 @@ class RouteEngine:
                     w_full,
                     _VARIANT_LABEL_DEFAULT["full"],
                     graph=G,
+                    cost_override=(
+                        round(seg_full["physical"], 1)
+                        if seg_full is not None
+                        else None
+                    ),
+                    weather=weather_ctx,
                 )
             )
 
@@ -1138,6 +1343,7 @@ class RouteEngine:
                     w_full,
                     _VARIANT_LABEL_DEFAULT["shortest"],
                     graph=G,
+                    weather=weather_ctx,
                 )
             )
         else:
@@ -1153,6 +1359,7 @@ class RouteEngine:
                         w_full,
                         "Альтернативный путь",
                         graph=G,
+                        weather=weather_ctx,
                     )
                 )
 
@@ -1167,6 +1374,10 @@ class RouteEngine:
         include_green_route: bool,
         skip_satellite_green: bool,
         corridor_buffer_meters: Optional[float],
+        weather: Optional[WeatherWeightParams] = None,
+        time_slot_key: str = "noon",
+        heat_context_mult: float = 1.0,
+        weather_ctx: Optional[WeatherRouteContext] = None,
     ) -> List[RouteResponse]:
         self._ensure_graph_for_corridor(
             start,
@@ -1188,6 +1399,10 @@ class RouteEngine:
             profile_key,
             include_green_route=include_green_route,
             graph=G,
+            weather=weather,
+            time_slot_key=time_slot_key,
+            heat_context_mult=heat_context_mult,
+            weather_ctx=weather_ctx,
         )
 
     def compute_green_route_addon(
@@ -1234,6 +1449,8 @@ class RouteEngine:
         season: str = "summer",
         air_temperature_c: Optional[float] = None,
         heat_mult: Optional[float] = None,
+        weather: Optional[WeatherWeightParams] = None,
+        physical_weight_key: Optional[str] = None,
     ) -> HeatStressMetrics:
         pref = routing_preference_profile(routing_profile_key)
         router = self._app.router
@@ -1246,7 +1463,13 @@ class RouteEngine:
             )
         )
         seg = router.route_segment_costs(
-            G, route, profile_key, time_slot_key, heat_context_mult=hm
+            G,
+            route,
+            profile_key,
+            time_slot_key,
+            heat_context_mult=hm,
+            weather=weather,
+            physical_weight_key=physical_weight_key,
         )
         expm = router.route_exposure_metrics(G, route, time_slot_key)
         exp_open = router.route_exposure_metrics(
@@ -1264,8 +1487,15 @@ class RouteEngine:
             pref,
             turn_count=turns,
             heat_context_mult=hm,
+            weather=weather,
+            physical_weight_key=physical_weight_key,
         )
         turn_part = float(pref.delta * TURN_PENALTY_BASE * max(0, turns))
+        wm_dict: Optional[Dict[str, float]] = None
+        if weather is not None and weather.enabled:
+            wm_dict = {
+                k: round(float(v), 4) for k, v in asdict(weather.mults).items()
+            }
         br = CombinedCostBreakdown(
             physical=round(pref.alpha * seg["physical"], 1),
             heat_effective=round(pref.beta * seg["heat"], 1),
@@ -1275,6 +1505,7 @@ class RouteEngine:
             stress_intersection=round(pref.gamma * seg["stress_intersection"], 1),
             turn_penalty=round(turn_part, 1),
             heat_context_multiplier=round(hm, 4),
+            weather_multipliers=wm_dict,
         )
         return HeatStressMetrics(
             time_slot=time_slot_key,
@@ -1346,6 +1577,8 @@ class RouteEngine:
         *,
         season: str = "summer",
         air_temperature_c: Optional[float] = None,
+        weather: Optional[WeatherWeightParams] = None,
+        weather_ctx: Optional[WeatherRouteContext] = None,
     ) -> List[RouteResponse]:
         router = self._app.router
         pref = routing_preference_profile(routing_profile_key)
@@ -1359,7 +1592,12 @@ class RouteEngine:
             hk = f"heat_{time_slot_key}"
             r = router.find_route(G, start, end, hk)
             seg = router.route_segment_costs(
-                G, r, profile_key, time_slot_key, heat_context_mult=hm_ctx
+                G,
+                r,
+                profile_key,
+                time_slot_key,
+                heat_context_mult=hm_ctx,
+                weather=weather,
             )
             metrics = self._make_heat_stress_metrics(
                 G,
@@ -1370,6 +1608,7 @@ class RouteEngine:
                 season=season,
                 air_temperature_c=air_temperature_c,
                 heat_mult=hm_ctx,
+                weather=weather,
             )
             rc = self._routing_context_meta(
                 time_slot_key=time_slot_key,
@@ -1394,12 +1633,18 @@ class RouteEngine:
                     cost_override=seg["heat"],
                     heat_stress_metrics=metrics,
                     routing_context=rc,
+                    weather=weather_ctx,
                 )
             )
         elif crit == "stress":
             r = router.find_route(G, start, end, "stress_cost")
             seg = router.route_segment_costs(
-                G, r, profile_key, time_slot_key, heat_context_mult=hm_ctx
+                G,
+                r,
+                profile_key,
+                time_slot_key,
+                heat_context_mult=hm_ctx,
+                weather=weather,
             )
             metrics = self._make_heat_stress_metrics(
                 G,
@@ -1410,6 +1655,7 @@ class RouteEngine:
                 season=season,
                 air_temperature_c=air_temperature_c,
                 heat_mult=hm_ctx,
+                weather=weather,
             )
             rc = self._routing_context_meta(
                 time_slot_key=time_slot_key,
@@ -1434,6 +1680,7 @@ class RouteEngine:
                     cost_override=seg["stress"],
                     heat_stress_metrics=metrics,
                     routing_context=rc,
+                    weather=weather_ctx,
                 )
             )
         elif crit == "heat_stress":
@@ -1446,6 +1693,7 @@ class RouteEngine:
                     time_slot_key,
                     pref,
                     heat_context_mult=hm_ctx,
+                    weather=weather,
                 )
             else:
                 r = router.find_route_combined(
@@ -1456,6 +1704,7 @@ class RouteEngine:
                     time_slot_key,
                     pref,
                     heat_context_mult=hm_ctx,
+                    weather=weather,
                 )
             metrics = self._make_heat_stress_metrics(
                 G,
@@ -1466,6 +1715,7 @@ class RouteEngine:
                 season=season,
                 air_temperature_c=air_temperature_c,
                 heat_mult=hm_ctx,
+                weather=weather,
             )
             rc = self._routing_context_meta(
                 time_slot_key=time_slot_key,
@@ -1490,6 +1740,7 @@ class RouteEngine:
                     cost_override=metrics.combined_cost,
                     heat_stress_metrics=metrics,
                     routing_context=rc,
+                    weather=weather_ctx,
                 )
             )
         else:
@@ -1509,6 +1760,7 @@ class RouteEngine:
                 season=season,
                 air_temperature_c=air_temperature_c,
                 heat_mult=hm_ctx,
+                weather=weather,
             )
             rc_s = self._routing_context_meta(
                 time_slot_key=time_slot_key,
@@ -1532,6 +1784,7 @@ class RouteEngine:
                     graph=G,
                     heat_stress_metrics=hm_short,
                     routing_context=rc_s,
+                    weather=weather_ctx,
                 )
             )
         return routes_out
@@ -1549,6 +1802,8 @@ class RouteEngine:
         corridor_buffer_meters: Optional[float],
         season: str = "summer",
         air_temperature_c: Optional[float] = None,
+        weather: Optional[WeatherWeightParams] = None,
+        weather_ctx: Optional[WeatherRouteContext] = None,
     ) -> List[RouteResponse]:
         self._ensure_graph_for_corridor(
             start,
@@ -1574,6 +1829,8 @@ class RouteEngine:
             time_slot_key,
             season=season,
             air_temperature_c=air_temperature_c,
+            weather=weather,
+            weather_ctx=weather_ctx,
         )
 
     def compute_alternatives(
@@ -1590,6 +1847,14 @@ class RouteEngine:
         season: str = "summer",
         air_temperature_c: Optional[float] = None,
         include_criteria_bundle: bool = False,
+        weather_mode: str = "none",
+        use_live_weather: bool = False,
+        weather_time: Optional[str] = None,
+        temperature_c: Optional[float] = None,
+        precipitation_mm: Optional[float] = None,
+        wind_speed_ms: Optional[float] = None,
+        cloud_cover_pct: Optional[float] = None,
+        humidity_pct: Optional[float] = None,
     ) -> AlternativesResponse:
         """Несколько вариантов; green_enabled=False — 2 маршрута без спутника.
 
@@ -1606,10 +1871,34 @@ class RouteEngine:
 
         crit = (criterion or "default").strip().lower()
         season_val = (season or "summer").lower()
+        slot_key = _resolve_time_slot_key(departure_time, time_slot_override)
+        hm_default = heat_context_multiplier(
+            season_val, slot_key, air_temperature_c
+        )
+        w_snap, wsrc, wp = _resolve_route_weather(
+            start,
+            end,
+            request_mode=weather_mode,
+            use_live_weather=use_live_weather,
+            weather_time=weather_time,
+            departure_time=departure_time,
+            temperature_c=temperature_c,
+            precipitation_mm=precipitation_mm,
+            wind_speed_ms=wind_speed_ms,
+            cloud_cover_pct=cloud_cover_pct,
+            humidity_pct=humidity_pct,
+        )
+        disp_mode = _engine_weather_mode(weather_mode, use_live_weather)
+        weather_ctx = _build_weather_route_context(
+            request_mode=disp_mode,
+            use_live_weather=use_live_weather,
+            weather_time=weather_time,
+            departure_time=departure_time,
+            snap=w_snap,
+            source=wsrc,
+            wp=wp,
+        )
         if crit in ("heat", "stress", "heat_stress"):
-            slot_key = _resolve_time_slot_key(
-                departure_time, time_slot_override
-            )
             inc_route_disk_miss()
             logger.info(
                 "Alternatives: критерий=%s слот=%s routing_profile=%s season=%s",
@@ -1631,6 +1920,8 @@ class RouteEngine:
                     corridor_buffer_meters=None,
                     season=season_val,
                     air_temperature_c=air_temperature_c,
+                    weather=wp,
+                    weather_ctx=weather_ctx,
                 )
             else:
                 base = float(s.corridor_buffer_meters)
@@ -1655,6 +1946,8 @@ class RouteEngine:
                             corridor_buffer_meters=eff,
                             season=season_val,
                             air_temperature_c=air_temperature_c,
+                            weather=wp,
+                            weather_ctx=weather_ctx,
                         )
                         break
                     except RouteNotFoundError as e:
@@ -1684,6 +1977,10 @@ class RouteEngine:
                     profile_key,
                     include_green_route=green_enabled,
                     graph=G,
+                    weather=wp,
+                    time_slot_key=slot_key,
+                    heat_context_mult=hm_default,
+                    weather_ctx=weather_ctx,
                 )
                 for sub in ("heat", "stress", "heat_stress"):
                     criteria_bundle[sub] = self._build_criterion_routes(
@@ -1696,6 +1993,8 @@ class RouteEngine:
                         slot_key,
                         season=season_val,
                         air_temperature_c=air_temperature_c,
+                        weather=wp,
+                        weather_ctx=weather_ctx,
                     )
             return AlternativesResponse(
                 routes=routes_out, criteria_bundle=criteria_bundle
@@ -1705,7 +2004,7 @@ class RouteEngine:
         include_green = green_enabled
 
         cached = None
-        if not include_criteria_bundle:
+        if not include_criteria_bundle and not wp.enabled:
             cached = self._route_disk_cache.get(
                 start, end, profile_key, green_enabled=green_enabled
             )
@@ -1739,6 +2038,10 @@ class RouteEngine:
                 include_green_route=include_green,
                 skip_satellite_green=skip_sat,
                 corridor_buffer_meters=None,
+                weather=wp,
+                time_slot_key=slot_key,
+                heat_context_mult=hm_default,
+                weather_ctx=weather_ctx,
             )
         else:
             base = float(s.corridor_buffer_meters)
@@ -1758,6 +2061,10 @@ class RouteEngine:
                         include_green_route=include_green,
                         skip_satellite_green=skip_sat,
                         corridor_buffer_meters=eff,
+                        weather=wp,
+                        time_slot_key=slot_key,
+                        heat_context_mult=hm_default,
+                        weather_ctx=weather_ctx,
                     )
                     logger.info(
                         "auto_expand_corridor attempt=%d corridor_m=%.0f "
@@ -1799,9 +2106,6 @@ class RouteEngine:
 
         criteria_bundle: Optional[Dict[str, List[RouteResponse]]] = None
         if include_criteria_bundle:
-            slot_key = _resolve_time_slot_key(
-                departure_time, time_slot_override
-            )
             with self._graph_lock:
                 if not self._loaded or self._graph is None:
                     raise BikeRouterError("Граф не загружен. Вызовите warmup().")
@@ -1818,11 +2122,13 @@ class RouteEngine:
                     slot_key,
                     season=season_val,
                     air_temperature_c=air_temperature_c,
+                    weather=wp,
+                    weather_ctx=weather_ctx,
                 )
         out = AlternativesResponse(
             routes=routes_out, criteria_bundle=criteria_bundle
         )
-        if not include_criteria_bundle:
+        if not include_criteria_bundle and not wp.enabled:
             try:
                 self._route_disk_cache.put(
                     start,

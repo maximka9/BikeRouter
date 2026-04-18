@@ -121,6 +121,23 @@ class AlternativesRequest(BaseModel):
         default=False,
         description="Если true — в ответе criteria_bundle со сравнением нескольких критериев",
     )
+    weather_mode: str = Field(
+        default="none",
+        description="none — без погоды; auto — Open-Meteo; manual — поля ниже",
+    )
+    use_live_weather: bool = Field(
+        default=False,
+        description="Если true — как auto (прогноз/кэш по координатам и времени)",
+    )
+    weather_time: Optional[str] = Field(
+        default=None,
+        description="ISO 8601 — время для почасовой погоды (иначе departure_time)",
+    )
+    temperature_c: Optional[float] = Field(default=None, description="Ручая погода °C")
+    precipitation_mm: Optional[float] = Field(default=None, description="Осадки мм/ч (ручной режим)")
+    wind_speed_ms: Optional[float] = Field(default=None, description="Ветер м/с")
+    cloud_cover_pct: Optional[float] = Field(default=None, description="Облачность %")
+    humidity_pct: Optional[float] = Field(default=None, description="Влажность %")
 
 
 class AlternativesStartRequest(BaseModel):
@@ -159,6 +176,14 @@ class AlternativesStartRequest(BaseModel):
         default=False,
         description="Сравнение нескольких критериев в ответе",
     )
+    weather_mode: str = Field(default="none")
+    use_live_weather: bool = False
+    weather_time: Optional[str] = None
+    temperature_c: Optional[float] = None
+    precipitation_mm: Optional[float] = None
+    wind_speed_ms: Optional[float] = None
+    cloud_cover_pct: Optional[float] = None
+    humidity_pct: Optional[float] = None
 
 
 class AlternativesStartResponse(BaseModel):
@@ -272,6 +297,10 @@ class CombinedCostBreakdown(BaseModel):
         default=1.0,
         description="κ: сезон и/или температура",
     )
+    weather_multipliers: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Погодные множители (если режим погоды включён)",
+    )
 
 
 class RoutingContextMeta(BaseModel):
@@ -289,6 +318,45 @@ class RoutingContextMeta(BaseModel):
     thermal_model_proxy: bool = Field(
         default=False,
         description="True если использован упрощённый прокси (мало спутниковых данных)",
+    )
+
+
+class WeatherSnapshotValues(BaseModel):
+    """Нормализованные поля погоды в ответе API."""
+
+    temperature_c: float = 20.0
+    apparent_temperature_c: Optional[float] = None
+    precipitation_mm: float = 0.0
+    precipitation_probability: Optional[float] = None
+    wind_speed_ms: float = 3.0
+    wind_gusts_ms: Optional[float] = None
+    cloud_cover_pct: float = 50.0
+    humidity_pct: float = 60.0
+    shortwave_radiation_wm2: Optional[float] = None
+
+
+class WeatherRouteContext(BaseModel):
+    """Погода, по которой строился маршрут, и итоговые множители модели."""
+
+    enabled: bool = False
+    mode: str = Field(
+        default="none",
+        description="none | auto | manual",
+    )
+    use_live_weather: bool = False
+    weather_time: Optional[str] = Field(
+        default=None,
+        description="ISO 8601 — момент, для которого взята погода",
+    )
+    source: str = Field(default="", description="open_meteo | manual | none | …")
+    snapshot: Optional[WeatherSnapshotValues] = None
+    multipliers: Dict[str, float] = Field(
+        default_factory=dict,
+        description="physical, heat, green, stress, surface",
+    )
+    summary_ru: str = Field(
+        default="",
+        description="Кратко: как погода повлияла на веса",
     )
 
 
@@ -453,6 +521,10 @@ class RouteResponse(BaseModel):
     routing_context: Optional[RoutingContextMeta] = Field(
         default=None,
         description="Слот, сезон, κ и профиль",
+    )
+    weather: Optional[WeatherRouteContext] = Field(
+        default=None,
+        description="Погодный контекст и множители (если запрошено)",
     )
     heat_cost_total: float = Field(
         default=0.0,

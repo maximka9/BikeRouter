@@ -21,9 +21,45 @@ from ..config import (
 )
 from .heat import angle_diff_deg
 from .stress import stress_metrics_for_route
+from .weather import WeatherWeightParams
 from ..exceptions import RouteNotFoundError
 
 logger = logging.getLogger(__name__)
+
+
+def effective_edge_components(
+    edge_data: dict,
+    profile_key: str,
+    time_slot_key: str,
+    heat_context_mult: float,
+    weather: Optional[WeatherWeightParams],
+    *,
+    physical_weight_key: Optional[str] = None,
+) -> Tuple[float, float, float]:
+    """Физическая, тепловая и стрессовая составляющие с учётом погоды (как в поиске пути)."""
+    phys_k = physical_weight_key or f"weight_{profile_key}_full"
+    heat_k = f"heat_{time_slot_key}"
+    phys = coerce_edge_weight_numeric(
+        edge_data.get(phys_k),
+        fallback=float("inf"),
+    )
+    h = coerce_edge_weight_numeric(edge_data.get(heat_k), fallback=0.0)
+    hm = float(heat_context_mult) if math.isfinite(heat_context_mult) else 1.0
+    st = coerce_edge_weight_numeric(edge_data.get("stress_cost"), fallback=0.0)
+    if not weather or not weather.enabled:
+        return phys, h * hm, st
+    wm = weather.mults
+    gcc = float(weather.green_coupling)
+    g_edge = min(1.0, max(0.0, float(edge_data.get("trees_pct") or 0) / 100.0))
+    phys_eff = (
+        phys
+        * wm.physical
+        * wm.surface
+        * (1.0 + max(0.0, wm.green - 1.0) * g_edge * gcc)
+    )
+    heat_eff = h * hm * wm.heat
+    st_eff = st * wm.stress
+    return phys_eff, heat_eff, st_eff
 
 
 def _edge_gradient_abs_for_display(edge_data: dict) -> float:
@@ -334,18 +370,19 @@ class RouteService:
         pref: RoutingPreferenceProfile,
         *,
         heat_context_mult: float = 1.0,
+        weather: Optional[WeatherWeightParams] = None,
+        physical_weight_key: Optional[str] = None,
     ) -> float:
-        """α·physical + β·heat(slot)·κ + γ·stress (без поворотов). κ — сезон/температура."""
-        phys_k = f"weight_{profile_key}_full"
-        phys = coerce_edge_weight_numeric(
-            edge_data.get(phys_k),
-            fallback=float("inf"),
+        """α·physical' + β·heat' + γ·stress' (без поворотов). Погода — в effective_edge_components."""
+        phys_eff, heat_eff, st_eff = effective_edge_components(
+            edge_data,
+            profile_key,
+            time_slot_key,
+            heat_context_mult,
+            weather,
+            physical_weight_key=physical_weight_key,
         )
-        heat_k = f"heat_{time_slot_key}"
-        h = coerce_edge_weight_numeric(edge_data.get(heat_k), fallback=0.0)
-        hm = float(heat_context_mult) if math.isfinite(heat_context_mult) else 1.0
-        st = coerce_edge_weight_numeric(edge_data.get("stress_cost"), fallback=0.0)
-        c = pref.alpha * phys + pref.beta * h * hm + pref.gamma * st
+        c = pref.alpha * phys_eff + pref.beta * heat_eff + pref.gamma * st_eff
         if not math.isfinite(c) or c <= 0:
             return float("inf")
         return float(c)
@@ -357,6 +394,8 @@ class RouteService:
         pref: RoutingPreferenceProfile,
         *,
         heat_context_mult: float = 1.0,
+        weather: Optional[WeatherWeightParams] = None,
+        physical_weight_key: Optional[str] = None,
     ) -> Callable[..., float]:
         def wf(_u: Any, _v: Any, dk: Dict[int, dict]) -> float:
             costs = []
@@ -368,6 +407,8 @@ class RouteService:
                         time_slot_key,
                         pref,
                         heat_context_mult=heat_context_mult,
+                        weather=weather,
+                        physical_weight_key=physical_weight_key,
                     )
                 )
             return min(costs) if costs else float("inf")
@@ -384,6 +425,8 @@ class RouteService:
         pref: RoutingPreferenceProfile,
         *,
         heat_context_mult: float = 1.0,
+        weather: Optional[WeatherWeightParams] = None,
+        physical_weight_key: Optional[str] = None,
     ) -> RouteResult:
         """Кратчайший путь по комбинированному весу (без штрафа за поворот)."""
         start = ox.distance.nearest_nodes(
@@ -397,6 +440,8 @@ class RouteService:
             time_slot_key,
             pref,
             heat_context_mult=heat_context_mult,
+            weather=weather,
+            physical_weight_key=physical_weight_key,
         )
         try:
             nodes = nx.shortest_path(G, source=start, target=end, weight=wf)
@@ -409,6 +454,8 @@ class RouteService:
             time_slot_key,
             pref,
             heat_context_mult=heat_context_mult,
+            weather=weather,
+            physical_weight_key=physical_weight_key,
         )
         return RouteResult(nodes, edges, start, end)
 
@@ -421,6 +468,8 @@ class RouteService:
         pref: RoutingPreferenceProfile,
         *,
         heat_context_mult: float = 1.0,
+        weather: Optional[WeatherWeightParams] = None,
+        physical_weight_key: Optional[str] = None,
     ) -> List[Tuple[int, int, int]]:
         edges: List[Tuple[int, int, int]] = []
         for i in range(len(nodes) - 1):
@@ -433,6 +482,8 @@ class RouteService:
                     time_slot_key,
                     pref,
                     heat_context_mult=heat_context_mult,
+                    weather=weather,
+                    physical_weight_key=physical_weight_key,
                 ),
             )
             edges.append((u, v, best_key))
@@ -463,6 +514,8 @@ class RouteService:
         pref: RoutingPreferenceProfile,
         *,
         heat_context_mult: float = 1.0,
+        weather: Optional[WeatherWeightParams] = None,
+        physical_weight_key: Optional[str] = None,
     ) -> RouteResult:
         """Dijkstra в пространстве состояний (узел, входящее ребро) — штраф за поворот."""
         start = ox.distance.nearest_nodes(
@@ -502,6 +555,8 @@ class RouteService:
                     time_slot_key,
                     pref,
                     heat_context_mult=heat_context_mult,
+                    weather=weather,
+                    physical_weight_key=physical_weight_key,
                 )
                 if not math.isfinite(base):
                     continue
@@ -563,6 +618,8 @@ class RouteService:
         time_slot_key: str,
         *,
         heat_context_mult: float = 1.0,
+        weather: Optional[WeatherWeightParams] = None,
+        physical_weight_key: Optional[str] = None,
     ) -> Dict[str, float]:
         """Суммы physical, heat (с κ), stress по выбранному слоту."""
         z = {
@@ -577,25 +634,47 @@ class RouteService:
         if route is None:
             return z
         hm = float(heat_context_mult) if math.isfinite(heat_context_mult) else 1.0
-        phys_k = f"weight_{profile_key}_full"
+        phys_k = physical_weight_key or f"weight_{profile_key}_full"
         heat_k = f"heat_{time_slot_key}"
+        sw = 1.0
+        if weather and weather.enabled:
+            sw = float(weather.mults.stress)
         for i in range(route.edge_count):
             d = G.edges[route.edges[i]]
-            z["physical"] += coerce_edge_weight_numeric(
-                d.get(phys_k), fallback=0.0
-            )
             hr = coerce_edge_weight_numeric(d.get(heat_k), fallback=0.0)
             z["heat_raw"] += hr
-            z["heat"] += hr * hm
-            z["stress"] += coerce_edge_weight_numeric(
-                d.get("stress_cost"), fallback=0.0
-            )
-            z["stress_segment"] += coerce_edge_weight_numeric(
-                d.get("stress_segment_cost"), fallback=0.0
-            )
-            z["stress_intersection"] += coerce_edge_weight_numeric(
-                d.get("stress_intersection_cost"), fallback=0.0
-            )
+            if weather and weather.enabled:
+                pe, he, se = effective_edge_components(
+                    d,
+                    profile_key,
+                    time_slot_key,
+                    heat_context_mult,
+                    weather,
+                    physical_weight_key=physical_weight_key,
+                )
+                z["physical"] += pe
+                z["heat"] += he
+                z["stress"] += se
+                z["stress_segment"] += coerce_edge_weight_numeric(
+                    d.get("stress_segment_cost"), fallback=0.0
+                ) * sw
+                z["stress_intersection"] += coerce_edge_weight_numeric(
+                    d.get("stress_intersection_cost"), fallback=0.0
+                ) * sw
+            else:
+                z["physical"] += coerce_edge_weight_numeric(
+                    d.get(phys_k), fallback=0.0
+                )
+                z["heat"] += hr * hm
+                z["stress"] += coerce_edge_weight_numeric(
+                    d.get("stress_cost"), fallback=0.0
+                )
+                z["stress_segment"] += coerce_edge_weight_numeric(
+                    d.get("stress_segment_cost"), fallback=0.0
+                )
+                z["stress_intersection"] += coerce_edge_weight_numeric(
+                    d.get("stress_intersection_cost"), fallback=0.0
+                )
             z["length_m"] += float(d.get("length", 0.0) or 0.0)
         return z
 
@@ -609,6 +688,8 @@ class RouteService:
         *,
         turn_count: int,
         heat_context_mult: float = 1.0,
+        weather: Optional[WeatherWeightParams] = None,
+        physical_weight_key: Optional[str] = None,
     ) -> float:
         """Итоговая комбинированная стоимость (с δ·turn)."""
         seg = RouteService.route_segment_costs(
@@ -617,6 +698,8 @@ class RouteService:
             profile_key,
             time_slot_key,
             heat_context_mult=heat_context_mult,
+            weather=weather,
+            physical_weight_key=physical_weight_key,
         )
         turn_part = float(pref.delta * TURN_PENALTY_BASE * max(0, turn_count))
         return float(

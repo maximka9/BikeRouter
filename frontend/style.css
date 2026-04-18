@@ -96,6 +96,30 @@ body {
   color: var(--text-muted);
 }
 
+.weather-fields {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.weather-fields .field-label { margin-top: 8px; }
+.weather-manual-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin-top: 8px;
+}
+.weather-manual-fields .field-label { grid-column: 1 / -1; }
+.weather-summary {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-sec);
+}
+.route-analytics-weather .weather-mult-row span:last-child {
+  font-size: 11px;
+  word-break: break-word;
+}
+
 /* ═══════════ Address inputs ═══════════ */
 .addr-group {
   display: flex;

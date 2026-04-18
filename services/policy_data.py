@@ -31,3 +31,7 @@ def load_heat_season_policy() -> Dict[str, Any]:
 
 def load_stress_policy() -> Dict[str, Any]:
     return _load_json("stress_policy.json")
+
+
+def load_weather_policy() -> Dict[str, Any]:
+    return _load_json("weather_policy.json")

@@ -307,6 +307,14 @@ async def alternatives(req: AlternativesRequest):
             season=req.season.value,
             air_temperature_c=req.air_temperature_c,
             include_criteria_bundle=req.include_criteria_bundle,
+            weather_mode=req.weather_mode,
+            use_live_weather=req.use_live_weather,
+            weather_time=req.weather_time,
+            temperature_c=req.temperature_c,
+            precipitation_mm=req.precipitation_mm,
+            wind_speed_ms=req.wind_speed_ms,
+            cloud_cover_pct=req.cloud_cover_pct,
+            humidity_pct=req.humidity_pct,
         )
         ms = (time.perf_counter() - t0) * 1000
         reqlog.info(
@@ -445,6 +453,14 @@ async def alternatives_start(req: AlternativesStartRequest):
             season=req.season.value,
             air_temperature_c=req.air_temperature_c,
             include_criteria_bundle=req.include_criteria_bundle,
+            weather_mode=req.weather_mode,
+            use_live_weather=req.use_live_weather,
+            weather_time=req.weather_time,
+            temperature_c=req.temperature_c,
+            precipitation_mm=req.precipitation_mm,
+            wind_speed_ms=req.wind_speed_ms,
+            cloud_cover_pct=req.cloud_cover_pct,
+            humidity_pct=req.humidity_pct,
         )
         routes = list(out.routes)
         cb = out.criteria_bundle

@@ -79,6 +79,9 @@ const state = {
   season: 'summer',
   airTemp: '',
   includeCriteriaBundle: false,
+  /** Погода: чекбокс и режим auto|manual */
+  weatherEnabled: false,
+  weatherMode: 'auto',
   /** Ответ criteria_bundle с сервера */
   criteriaBundle: null,
   /** pending=['green'] от API; сбрасывается при пустом pending или при mode===green в routes */
@@ -166,6 +169,16 @@ const dom = {
   thermalFields: $('#thermal-fields'),
   seasonAirGroup: $('#season-air-group'),
   criteriaBundlePanel: $('#criteria-bundle-panel'),
+  weatherEnabledCheckbox: $('#weather-enabled-checkbox'),
+  weatherFields: $('#weather-fields'),
+  weatherModeSelect: $('#weather-mode-select'),
+  weatherDatetime: $('#weather-datetime'),
+  weatherManualFields: $('#weather-manual-fields'),
+  wxTemp: $('#wx-temp'),
+  wxPrecip: $('#wx-precip'),
+  wxWind: $('#wx-wind'),
+  wxCloud: $('#wx-cloud'),
+  wxHumid: $('#wx-humid'),
 };
 
 const MQ_MOBILE = typeof window !== 'undefined' ? window.matchMedia('(max-width: 768px)') : null;
@@ -436,6 +449,42 @@ function buildRouteContextStrip(route) {
   return `<p class="route-ctx-strip">${parts.map((t) => escHtml(t)).join(' · ')}</p>`;
 }
 
+function buildWeatherAnalyticsHtml(route) {
+  const w = route.weather;
+  if (!w || !w.enabled || typeof w !== 'object') return '';
+  const snap = w.snapshot && typeof w.snapshot === 'object' ? w.snapshot : {};
+  const mult = w.multipliers && typeof w.multipliers === 'object' ? w.multipliers : {};
+  const rows = [];
+  if (w.source) {
+    rows.push(`<div class="analytics-row"><span>Источник погоды</span><span>${escHtml(String(w.source))}</span></div>`);
+  }
+  if (snap.temperature_c != null && Number.isFinite(Number(snap.temperature_c))) {
+    rows.push(`<div class="analytics-row"><span>Температура</span><span>${Number(snap.temperature_c).toFixed(1)}°C</span></div>`);
+  }
+  if (snap.precipitation_mm != null && Number.isFinite(Number(snap.precipitation_mm))) {
+    rows.push(`<div class="analytics-row"><span>Осадки</span><span>${Number(snap.precipitation_mm).toFixed(2)} мм/ч</span></div>`);
+  }
+  if (snap.wind_speed_ms != null && Number.isFinite(Number(snap.wind_speed_ms))) {
+    rows.push(`<div class="analytics-row"><span>Ветер</span><span>${Number(snap.wind_speed_ms).toFixed(1)} м/с</span></div>`);
+  }
+  if (snap.cloud_cover_pct != null && Number.isFinite(Number(snap.cloud_cover_pct))) {
+    rows.push(`<div class="analytics-row"><span>Облачность</span><span>${Number(snap.cloud_cover_pct).toFixed(0)}%</span></div>`);
+  }
+  if (snap.humidity_pct != null && Number.isFinite(Number(snap.humidity_pct))) {
+    rows.push(`<div class="analytics-row"><span>Влажность</span><span>${Number(snap.humidity_pct).toFixed(0)}%</span></div>`);
+  }
+  const mk = ['physical', 'heat', 'green', 'stress', 'surface'];
+  const multParts = mk
+    .filter((k) => mult[k] != null && Number.isFinite(Number(mult[k])))
+    .map((k) => `${k}: ×${Number(mult[k]).toFixed(3)}`);
+  if (multParts.length) {
+    rows.push(`<div class="analytics-row weather-mult-row"><span>Множители</span><span>${escHtml(multParts.join(', '))}</span></div>`);
+  }
+  const sum = w.summary_ru ? `<p class="weather-summary">${escHtml(w.summary_ru)}</p>` : '';
+  if (!rows.length && !sum) return '';
+  return `<div class="route-analytics route-analytics-weather"><h4 class="analytics-title">Погода</h4>${rows.join('')}${sum}</div>`;
+}
+
 function buildThermalAnalyticsHtml(route) {
   const hs = route.heat_stress;
   const hasFlat =
@@ -519,10 +568,11 @@ function buildStressAnalyticsHtml(route) {
 
 function buildRouteAnalyticsBlocks(route) {
   const ctx = buildRouteContextStrip(route);
+  const wx = buildWeatherAnalyticsHtml(route);
   const th = buildThermalAnalyticsHtml(route);
   const st = buildStressAnalyticsHtml(route);
-  if (!ctx && !th && !st) return '';
-  return `<div class="route-analytics-wrap">${ctx}${th}${st}</div>`;
+  if (!ctx && !wx && !th && !st) return '';
+  return `<div class="route-analytics-wrap">${ctx}${wx}${th}${st}</div>`;
 }
 
 function updateRoutingDetailsLayout() {
@@ -533,6 +583,15 @@ function updateRoutingDetailsLayout() {
   } else {
     det.setAttribute('open', 'open');
   }
+}
+
+function updateWeatherFormVisibility() {
+  const on = !!(dom.weatherEnabledCheckbox && dom.weatherEnabledCheckbox.checked);
+  if (dom.weatherFields) dom.weatherFields.classList.toggle('hidden', !on);
+  state.weatherEnabled = on;
+  const manual = on && dom.weatherModeSelect && dom.weatherModeSelect.value === 'manual';
+  if (dom.weatherManualFields) dom.weatherManualFields.classList.toggle('hidden', !manual);
+  state.weatherMode = dom.weatherModeSelect ? dom.weatherModeSelect.value : 'auto';
 }
 
 function updateRoutingAdvancedUi() {
@@ -548,6 +607,7 @@ function updateRoutingAdvancedUi() {
   }
   const hint = document.getElementById('criterion-hint');
   if (hint) hint.classList.toggle('hidden', c === 'default');
+  updateWeatherFormVisibility();
   updateRoutingDetailsLayout();
 }
 
@@ -582,6 +642,35 @@ function buildAlternativesRequestBody() {
   if (atRaw !== '') {
     const t = parseFloat(atRaw.replace(',', '.'));
     if (Number.isFinite(t)) body.air_temperature_c = t;
+  }
+
+  const wxOn = dom.weatherEnabledCheckbox && dom.weatherEnabledCheckbox.checked;
+  if (!wxOn) {
+    body.weather_mode = 'none';
+  } else {
+    const wm = dom.weatherModeSelect ? dom.weatherModeSelect.value : 'auto';
+    body.weather_mode = wm === 'manual' ? 'manual' : 'auto';
+    body.use_live_weather = wm !== 'manual';
+    if (dom.weatherDatetime && dom.weatherDatetime.value) {
+      body.weather_time = localDatetimeToIso(dom.weatherDatetime.value);
+    }
+    if (wm === 'manual') {
+      const optNum = (el) => {
+        if (!el || !String(el.value).trim()) return null;
+        const x = parseFloat(String(el.value).replace(',', '.'));
+        return Number.isFinite(x) ? x : null;
+      };
+      const t0 = optNum(dom.wxTemp);
+      const pr = optNum(dom.wxPrecip);
+      const wi = optNum(dom.wxWind);
+      const cc = optNum(dom.wxCloud);
+      const hu = optNum(dom.wxHumid);
+      if (t0 != null) body.temperature_c = t0;
+      if (pr != null) body.precipitation_mm = pr;
+      if (wi != null) body.wind_speed_ms = wi;
+      if (cc != null) body.cloud_cover_pct = cc;
+      if (hu != null) body.humidity_pct = hu;
+    }
   }
   return body;
 }
@@ -2329,6 +2418,21 @@ function setupEvents() {
       state.greenEnabled = dom.greenEnabledCheckbox.checked;
       syncUrlFromState();
     });
+  }
+  if (dom.weatherEnabledCheckbox) {
+    dom.weatherEnabledCheckbox.addEventListener('change', () => {
+      updateWeatherFormVisibility();
+      syncUrlFromState();
+    });
+  }
+  if (dom.weatherModeSelect) {
+    dom.weatherModeSelect.addEventListener('change', () => {
+      updateWeatherFormVisibility();
+      syncUrlFromState();
+    });
+  }
+  if (dom.weatherDatetime) {
+    dom.weatherDatetime.addEventListener('change', () => syncUrlFromState());
   }
 
   if (dom.criterionSelect) {

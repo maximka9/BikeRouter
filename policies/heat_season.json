@@ -1,0 +1,22 @@
+{
+  "reference_season": "summer",
+  "slot_temperature_factors": {
+    "summer": {
+      "morning": 0.92,
+      "noon": 1.0,
+      "evening": 0.88,
+      "night": 0.35
+    },
+    "spring_autumn": {
+      "morning": 0.72,
+      "noon": 0.82,
+      "evening": 0.75,
+      "night": 0.28
+    }
+  },
+  "air_temperature": {
+    "reference_c": 22.0,
+    "per_degree_above": 0.045,
+    "max_mult": 1.55
+  }
+}

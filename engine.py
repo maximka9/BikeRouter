@@ -21,6 +21,7 @@ from .app import Application
 from .config import (
     PROFILES,
     TIME_SLOTS,
+    TURN_PENALTY_BASE,
     Settings,
     routing_engine_cache_fingerprint,
     routing_preference_profile,
@@ -34,6 +35,7 @@ from .exceptions import (
 )
 from .models import (
     AlternativesResponse,
+    CombinedCostBreakdown,
     ElevationMetrics,
     ElevationPoint,
     GreenMetrics,
@@ -41,9 +43,11 @@ from .models import (
     MapLayersGeoJSON,
     RouteQualityHints,
     RouteResponse,
+    RoutingContextMeta,
     StairsInfo,
     SurfaceBreakdown,
 )
+from .services.heat import heat_context_multiplier
 from .services.area_graph_cache import (
     graph_base_path,
     load_graphml_path,
@@ -839,6 +843,7 @@ class RouteEngine:
         graph: Optional[nx.MultiDiGraph] = None,
         cost_override: Optional[float] = None,
         heat_stress_metrics: Optional[HeatStressMetrics] = None,
+        routing_context: Optional[RoutingContextMeta] = None,
     ) -> RouteResponse:
         """Собрать :class:`RouteResponse` из уже найденного :class:`RouteResult`."""
         profile = _PROFILE_MAP[profile_key]
@@ -905,6 +910,8 @@ class RouteEngine:
             na_surface=layers_dict["na_surface"],
         )
 
+        hm = heat_stress_metrics
+        rc = routing_context
         return RouteResponse(
             profile=profile.key,
             mode=mode,
@@ -914,6 +921,19 @@ class RouteEngine:
             time_s=round(time_s, 1),
             time_display=_fmt_time(time_s),
             cost=round(cost, 1),
+            routing_context=rc,
+            heat_cost_total=float(hm.total_heat_cost) if hm else 0.0,
+            stress_cost_total=float(hm.stress_cost_total) if hm else 0.0,
+            exposed_length_m=float(hm.exposed_high_length_m) if hm else 0.0,
+            building_shade_share=float(hm.building_shade_share) if hm else 0.0,
+            vegetation_shade_share=float(hm.vegetation_shade_share) if hm else 0.0,
+            stressful_intersections_count=int(hm.stressful_intersections_count)
+            if hm
+            else 0,
+            high_stress_segments_count=int(hm.high_stress_segments_count)
+            if hm
+            else 0,
+            turn_count_analytics=int(hm.turn_count) if hm else 0,
             elevation=ElevationMetrics(
                 climb_m=round(es["climb"], 1),
                 descent_m=round(es["descent"], 1),
@@ -1210,15 +1230,32 @@ class RouteEngine:
         profile_key: str,
         time_slot_key: str,
         routing_profile_key: str,
+        *,
+        season: str = "summer",
+        air_temperature_c: Optional[float] = None,
+        heat_mult: Optional[float] = None,
     ) -> HeatStressMetrics:
         pref = routing_preference_profile(routing_profile_key)
         router = self._app.router
         turns = router.count_significant_turns(G, route)
+        hm = (
+            float(heat_mult)
+            if heat_mult is not None and math.isfinite(float(heat_mult))
+            else heat_context_multiplier(
+                season, time_slot_key, air_temperature_c
+            )
+        )
         seg = router.route_segment_costs(
-            G, route, profile_key, time_slot_key
+            G, route, profile_key, time_slot_key, heat_context_mult=hm
         )
         expm = router.route_exposure_metrics(G, route, time_slot_key)
+        exp_open = router.route_exposure_metrics(
+            G, route, time_slot_key, exposure_threshold=0.32
+        )
         st = router.route_stress_levels(G, route)
+        sh = router.route_shade_shares(G, route)
+        n_int = router.count_stressful_intersections(G, route)
+        n_hi_seg = router.count_high_stress_segments(G, route)
         comb = router.route_combined_total(
             G,
             route,
@@ -1226,18 +1263,75 @@ class RouteEngine:
             time_slot_key,
             pref,
             turn_count=turns,
+            heat_context_mult=hm,
+        )
+        turn_part = float(pref.delta * TURN_PENALTY_BASE * max(0, turns))
+        br = CombinedCostBreakdown(
+            physical=round(pref.alpha * seg["physical"], 1),
+            heat_effective=round(pref.beta * seg["heat"], 1),
+            heat_raw=round(pref.beta * seg["heat_raw"], 1),
+            stress=round(pref.gamma * seg["stress"], 1),
+            stress_segment=round(pref.gamma * seg["stress_segment"], 1),
+            stress_intersection=round(pref.gamma * seg["stress_intersection"], 1),
+            turn_penalty=round(turn_part, 1),
+            heat_context_multiplier=round(hm, 4),
         )
         return HeatStressMetrics(
             time_slot=time_slot_key,
+            season=(season or "summer").lower(),
             routing_profile=pref.key,
             total_heat_cost=round(seg["heat"], 1),
+            heat_cost_raw=round(seg["heat_raw"], 1),
+            stress_cost_total=round(seg["stress"], 1),
             exposed_high_length_m=round(expm["exposed_high_length_m"], 1),
+            exposed_open_unfavorable_length_m=round(
+                exp_open["exposed_high_length_m"], 1
+            ),
             avg_exposure_unit=round(expm["avg_exposure"], 3),
+            vegetation_shade_share=round(sh["vegetation_shade_share"], 3),
+            building_shade_share=round(sh["building_shade_share"], 3),
             avg_stress_lts=round(st["avg_lts"], 2),
             max_stress_lts=round(st["max_lts"], 2),
             high_stress_length_fraction=round(st["high_stress_fraction"], 3),
+            high_stress_segments_count=n_hi_seg,
+            stressful_intersections_count=n_int,
             turn_count=turns,
             combined_cost=round(comb, 1),
+            combined_breakdown=br,
+        )
+
+    @staticmethod
+    def _route_uses_thermal_proxy(
+        G: nx.MultiDiGraph, route: Optional[RouteResult]
+    ) -> bool:
+        if route is None or route.edge_count <= 0:
+            return False
+        for i in range(route.edge_count):
+            d = G.edges[route.edges[i]]
+            if int(d.get("thermal_use_proxy", 0) or 0):
+                return True
+        return False
+
+    def _routing_context_meta(
+        self,
+        *,
+        time_slot_key: str,
+        season: str,
+        routing_profile_key: str,
+        air_temperature_c: Optional[float],
+        heat_mult: float,
+        criterion: str,
+        G: nx.MultiDiGraph,
+        route: Optional[RouteResult],
+    ) -> RoutingContextMeta:
+        return RoutingContextMeta(
+            time_slot=time_slot_key,
+            season=(season or "summer").lower(),
+            routing_profile=routing_profile_key,
+            criterion=criterion,
+            air_temperature_c=air_temperature_c,
+            heat_context_multiplier=round(float(heat_mult), 4),
+            thermal_model_proxy=self._route_uses_thermal_proxy(G, route),
         )
 
     def _build_criterion_routes(
@@ -1249,20 +1343,43 @@ class RouteEngine:
         criterion: str,
         routing_profile_key: str,
         time_slot_key: str,
+        *,
+        season: str = "summer",
+        air_temperature_c: Optional[float] = None,
     ) -> List[RouteResponse]:
         router = self._app.router
         pref = routing_preference_profile(routing_profile_key)
         routes_out: List[RouteResponse] = []
         crit = criterion.strip().lower()
+        hm_ctx = heat_context_multiplier(
+            season, time_slot_key, air_temperature_c
+        )
 
         if crit == "heat":
             hk = f"heat_{time_slot_key}"
             r = router.find_route(G, start, end, hk)
             seg = router.route_segment_costs(
-                G, r, profile_key, time_slot_key
+                G, r, profile_key, time_slot_key, heat_context_mult=hm_ctx
             )
-            hm = self._make_heat_stress_metrics(
-                G, r, profile_key, time_slot_key, routing_profile_key
+            metrics = self._make_heat_stress_metrics(
+                G,
+                r,
+                profile_key,
+                time_slot_key,
+                routing_profile_key,
+                season=season,
+                air_temperature_c=air_temperature_c,
+                heat_mult=hm_ctx,
+            )
+            rc = self._routing_context_meta(
+                time_slot_key=time_slot_key,
+                season=season,
+                routing_profile_key=routing_profile_key,
+                air_temperature_c=air_temperature_c,
+                heat_mult=hm_ctx,
+                criterion="heat",
+                G=G,
+                route=r,
             )
             routes_out.append(
                 self._build_route_response(
@@ -1275,16 +1392,34 @@ class RouteEngine:
                     "Минимальная тепловая нагрузка",
                     graph=G,
                     cost_override=seg["heat"],
-                    heat_stress_metrics=hm,
+                    heat_stress_metrics=metrics,
+                    routing_context=rc,
                 )
             )
         elif crit == "stress":
             r = router.find_route(G, start, end, "stress_cost")
             seg = router.route_segment_costs(
-                G, r, profile_key, time_slot_key
+                G, r, profile_key, time_slot_key, heat_context_mult=hm_ctx
             )
-            hm = self._make_heat_stress_metrics(
-                G, r, profile_key, time_slot_key, routing_profile_key
+            metrics = self._make_heat_stress_metrics(
+                G,
+                r,
+                profile_key,
+                time_slot_key,
+                routing_profile_key,
+                season=season,
+                air_temperature_c=air_temperature_c,
+                heat_mult=hm_ctx,
+            )
+            rc = self._routing_context_meta(
+                time_slot_key=time_slot_key,
+                season=season,
+                routing_profile_key=routing_profile_key,
+                air_temperature_c=air_temperature_c,
+                heat_mult=hm_ctx,
+                criterion="stress",
+                G=G,
+                route=r,
             )
             routes_out.append(
                 self._build_route_response(
@@ -1297,7 +1432,8 @@ class RouteEngine:
                     "Минимальный транспортный стресс",
                     graph=G,
                     cost_override=seg["stress"],
-                    heat_stress_metrics=hm,
+                    heat_stress_metrics=metrics,
+                    routing_context=rc,
                 )
             )
         elif crit == "heat_stress":
@@ -1309,6 +1445,7 @@ class RouteEngine:
                     profile_key,
                     time_slot_key,
                     pref,
+                    heat_context_mult=hm_ctx,
                 )
             else:
                 r = router.find_route_combined(
@@ -1318,9 +1455,27 @@ class RouteEngine:
                     profile_key,
                     time_slot_key,
                     pref,
+                    heat_context_mult=hm_ctx,
                 )
-            hm = self._make_heat_stress_metrics(
-                G, r, profile_key, time_slot_key, routing_profile_key
+            metrics = self._make_heat_stress_metrics(
+                G,
+                r,
+                profile_key,
+                time_slot_key,
+                routing_profile_key,
+                season=season,
+                air_temperature_c=air_temperature_c,
+                heat_mult=hm_ctx,
+            )
+            rc = self._routing_context_meta(
+                time_slot_key=time_slot_key,
+                season=season,
+                routing_profile_key=routing_profile_key,
+                air_temperature_c=air_temperature_c,
+                heat_mult=hm_ctx,
+                criterion="heat_stress",
+                G=G,
+                route=r,
             )
             routes_out.append(
                 self._build_route_response(
@@ -1332,8 +1487,9 @@ class RouteEngine:
                     f"weight_{profile_key}_full",
                     "Тепло и безопасность",
                     graph=G,
-                    cost_override=hm.combined_cost,
-                    heat_stress_metrics=hm,
+                    cost_override=metrics.combined_cost,
+                    heat_stress_metrics=metrics,
+                    routing_context=rc,
                 )
             )
         else:
@@ -1344,6 +1500,26 @@ class RouteEngine:
 
         rs = router.find_route_safe(G, start, end, "length")
         if rs is not None:
+            hm_short = self._make_heat_stress_metrics(
+                G,
+                rs,
+                profile_key,
+                time_slot_key,
+                routing_profile_key,
+                season=season,
+                air_temperature_c=air_temperature_c,
+                heat_mult=hm_ctx,
+            )
+            rc_s = self._routing_context_meta(
+                time_slot_key=time_slot_key,
+                season=season,
+                routing_profile_key=routing_profile_key,
+                air_temperature_c=air_temperature_c,
+                heat_mult=hm_ctx,
+                criterion="shortest",
+                G=G,
+                route=rs,
+            )
             routes_out.append(
                 self._build_route_response(
                     start,
@@ -1354,6 +1530,8 @@ class RouteEngine:
                     f"weight_{profile_key}_full",
                     "Кратчайший по карте (для сравнения)",
                     graph=G,
+                    heat_stress_metrics=hm_short,
+                    routing_context=rc_s,
                 )
             )
         return routes_out
@@ -1369,6 +1547,8 @@ class RouteEngine:
         time_slot_key: str,
         green_enabled: bool,
         corridor_buffer_meters: Optional[float],
+        season: str = "summer",
+        air_temperature_c: Optional[float] = None,
     ) -> List[RouteResponse]:
         self._ensure_graph_for_corridor(
             start,
@@ -1392,6 +1572,8 @@ class RouteEngine:
             criterion,
             routing_profile_key,
             time_slot_key,
+            season=season,
+            air_temperature_c=air_temperature_c,
         )
 
     def compute_alternatives(
@@ -1405,6 +1587,9 @@ class RouteEngine:
         routing_profile_key: str = "balanced",
         departure_time: Optional[str] = None,
         time_slot_override: Optional[str] = None,
+        season: str = "summer",
+        air_temperature_c: Optional[float] = None,
+        include_criteria_bundle: bool = False,
     ) -> AlternativesResponse:
         """Несколько вариантов; green_enabled=False — 2 маршрута без спутника.
 
@@ -1420,16 +1605,18 @@ class RouteEngine:
             )
 
         crit = (criterion or "default").strip().lower()
+        season_val = (season or "summer").lower()
         if crit in ("heat", "stress", "heat_stress"):
             slot_key = _resolve_time_slot_key(
                 departure_time, time_slot_override
             )
             inc_route_disk_miss()
             logger.info(
-                "Alternatives: критерий=%s слот=%s routing_profile=%s",
+                "Alternatives: критерий=%s слот=%s routing_profile=%s season=%s",
                 crit,
                 slot_key,
                 routing_profile_key,
+                season_val,
             )
             s = self._app.settings
             if not s.use_dynamic_corridor_graph or s.corridor_buffer_meters <= 0:
@@ -1442,6 +1629,8 @@ class RouteEngine:
                     time_slot_key=slot_key,
                     green_enabled=green_enabled,
                     corridor_buffer_meters=None,
+                    season=season_val,
+                    air_temperature_c=air_temperature_c,
                 )
             else:
                 base = float(s.corridor_buffer_meters)
@@ -1464,6 +1653,8 @@ class RouteEngine:
                             time_slot_key=slot_key,
                             green_enabled=green_enabled,
                             corridor_buffer_meters=eff,
+                            season=season_val,
+                            air_temperature_c=air_temperature_c,
                         )
                         break
                     except RouteNotFoundError as e:
@@ -1480,14 +1671,44 @@ class RouteEngine:
                                 max_attempts=max_attempts,
                             )
                         extra += step
-            return AlternativesResponse(routes=routes_out)
+            criteria_bundle: Optional[Dict[str, List[RouteResponse]]] = None
+            if include_criteria_bundle:
+                with self._graph_lock:
+                    if not self._loaded or self._graph is None:
+                        raise BikeRouterError("Граф не загружен. Вызовите warmup().")
+                    G = self._graph
+                criteria_bundle = {}
+                criteria_bundle["default"] = self._collect_alternative_routes(
+                    start,
+                    end,
+                    profile_key,
+                    include_green_route=green_enabled,
+                    graph=G,
+                )
+                for sub in ("heat", "stress", "heat_stress"):
+                    criteria_bundle[sub] = self._build_criterion_routes(
+                        start,
+                        end,
+                        profile_key,
+                        G,
+                        sub,
+                        routing_profile_key,
+                        slot_key,
+                        season=season_val,
+                        air_temperature_c=air_temperature_c,
+                    )
+            return AlternativesResponse(
+                routes=routes_out, criteria_bundle=criteria_bundle
+            )
 
         skip_sat = not green_enabled
         include_green = green_enabled
 
-        cached = self._route_disk_cache.get(
-            start, end, profile_key, green_enabled=green_enabled
-        )
+        cached = None
+        if not include_criteria_bundle:
+            cached = self._route_disk_cache.get(
+                start, end, profile_key, green_enabled=green_enabled
+            )
         if cached is not None:
             try:
                 inc_route_disk_hit()
@@ -1499,16 +1720,6 @@ class RouteEngine:
                 return AlternativesResponse.model_validate(cached)
             except Exception:
                 logger.debug("Route disk cache invalid, recalculating")
-
-        cached = self._route_disk_cache.get(
-            start, end, profile_key, green_enabled=green_enabled
-        )
-        if cached is not None:
-            try:
-                inc_route_disk_hit()
-                return AlternativesResponse.model_validate(cached)
-            except Exception:
-                pass
 
         inc_route_disk_miss()
         logger.info(
@@ -1586,17 +1797,42 @@ class RouteEngine:
                         )
                     extra += step
 
-        out = AlternativesResponse(routes=routes_out)
-        try:
-            self._route_disk_cache.put(
-                start,
-                end,
-                profile_key,
-                [r.model_dump(mode="json") for r in out.routes],
-                green_enabled=green_enabled,
+        criteria_bundle: Optional[Dict[str, List[RouteResponse]]] = None
+        if include_criteria_bundle:
+            slot_key = _resolve_time_slot_key(
+                departure_time, time_slot_override
             )
-        except Exception as exc:
-            logger.debug("Route cache store skipped: %s", exc)
+            with self._graph_lock:
+                if not self._loaded or self._graph is None:
+                    raise BikeRouterError("Граф не загружен. Вызовите warmup().")
+                G = self._graph
+            criteria_bundle = {"default": routes_out}
+            for sub in ("heat", "stress", "heat_stress"):
+                criteria_bundle[sub] = self._build_criterion_routes(
+                    start,
+                    end,
+                    profile_key,
+                    G,
+                    sub,
+                    routing_profile_key,
+                    slot_key,
+                    season=season_val,
+                    air_temperature_c=air_temperature_c,
+                )
+        out = AlternativesResponse(
+            routes=routes_out, criteria_bundle=criteria_bundle
+        )
+        if not include_criteria_bundle:
+            try:
+                self._route_disk_cache.put(
+                    start,
+                    end,
+                    profile_key,
+                    [r.model_dump(mode="json") for r in out.routes],
+                    green_enabled=green_enabled,
+                )
+            except Exception as exc:
+                logger.debug("Route cache store skipped: %s", exc)
         return out
 
     def compute_alternatives_phase1_two_routes(

@@ -43,6 +43,13 @@ class RoutingPreferenceEnum(str, Enum):
     sport = "sport"
 
 
+class SeasonEnum(str, Enum):
+    """Сезон для температурного множителя (см. policies/heat_season.json)."""
+
+    summer = "summer"
+    spring_autumn = "spring_autumn"
+
+
 # ── Базовые типы ─────────────────────────────────────────────────
 
 
@@ -101,6 +108,18 @@ class AlternativesRequest(BaseModel):
     time_slot: Optional[str] = Field(
         default=None,
         description="Явный слот: morning | noon | evening | night (если задан — важнее departure_time)",
+    )
+    season: SeasonEnum = Field(
+        SeasonEnum.summer,
+        description="Сезон для множителя тепла (summer | spring_autumn)",
+    )
+    air_temperature_c: Optional[float] = Field(
+        default=None,
+        description="Опционально: температура воздуха °C для поправки тепловой модели",
+    )
+    include_criteria_bundle: bool = Field(
+        default=False,
+        description="Если true — в ответе criteria_bundle со сравнением нескольких критериев",
     )
 
 
@@ -202,19 +221,78 @@ class ElevationPoint(BaseModel):
     elevation_m: float
 
 
+class CombinedCostBreakdown(BaseModel):
+    """Разложение комбинированной стоимости (для heat_stress)."""
+
+    physical: float = 0.0
+    heat_effective: float = 0.0
+    heat_raw: float = 0.0
+    stress: float = 0.0
+    stress_segment: float = 0.0
+    stress_intersection: float = 0.0
+    turn_penalty: float = 0.0
+    heat_context_multiplier: float = Field(
+        default=1.0,
+        description="κ: сезон и/или температура",
+    )
+
+
+class RoutingContextMeta(BaseModel):
+    """Служебный контекст расчёта для воспроизводимости и диплома."""
+
+    time_slot: str = ""
+    season: str = "summer"
+    routing_profile: str = ""
+    criterion: str = Field(
+        default="",
+        description="Критерий построения: default | heat | stress | heat_stress",
+    )
+    air_temperature_c: Optional[float] = None
+    heat_context_multiplier: float = 1.0
+    thermal_model_proxy: bool = Field(
+        default=False,
+        description="True если использован упрощённый прокси (мало спутниковых данных)",
+    )
+
+
 class HeatStressMetrics(BaseModel):
     """Метрики тепловой нагрузки и транспортного стресса вдоль маршрута."""
 
     time_slot: str = Field(default="", description="morning | noon | evening | night")
+    season: str = Field(default="summer", description="summer | spring_autumn")
     routing_profile: str = Field(default="", description="balanced | safe | cool | sport")
-    total_heat_cost: float = Field(default=0.0, description="Суммарная тепловая стоимость")
+    total_heat_cost: float = Field(
+        default=0.0,
+        description="Суммарная тепловая стоимость с учётом κ (сезон/T)",
+    )
+    heat_cost_raw: float = Field(
+        default=0.0,
+        description="Тепловая стоимость без κ (как в графе)",
+    )
+    stress_cost_total: float = Field(default=0.0, description="Суммарный stress_cost по рёбрам")
     exposed_high_length_m: float = Field(
         default=0.0,
-        description="Длина сегментов с высокой солнечной экспозицией (слот)",
+        description="Длина с высокой экспозицией (интегральный показатель слота)",
+    )
+    exposed_open_unfavorable_length_m: float = Field(
+        default=0.0,
+        description="Длина открытых теплонеблагоприятных сегментов (порог экспозиции)",
     )
     avg_exposure_unit: float = Field(
         default=0.0,
         description="Средняя безразмерная экспозиция по длине",
+    )
+    vegetation_shade_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Средневзвешенная доля тени растительности по длине",
+    )
+    building_shade_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Средневзвешенная доля прокси-тени зданий по длине",
     )
     avg_stress_lts: float = Field(default=0.0, description="Средний уровень стресса (1–4)")
     max_stress_lts: float = Field(default=0.0, description="Максимальный стресс на сегменте")
@@ -224,10 +302,22 @@ class HeatStressMetrics(BaseModel):
         le=1.0,
         description="Доля длины с LTS ≥ порога (≈3)",
     )
+    high_stress_segments_count: int = Field(
+        default=0,
+        description="Число рёбер с высоким LTS",
+    )
+    stressful_intersections_count: int = Field(
+        default=0,
+        description="Число рёбер со стрессом пересечения выше порога",
+    )
     turn_count: int = Field(default=0, description="Число заметных поворотов")
     combined_cost: float = Field(
         default=0.0,
-        description="α·physical + β·heat + γ·stress + δ·turn",
+        description="α·physical + β·heat·κ + γ·stress + δ·turn",
+    )
+    combined_breakdown: Optional[CombinedCostBreakdown] = Field(
+        default=None,
+        description="Детализация для heat_stress",
     )
 
 
@@ -323,6 +413,27 @@ class RouteResponse(BaseModel):
         default=None,
         description="Заполняется для критериев heat, stress, heat_stress",
     )
+    routing_context: Optional[RoutingContextMeta] = Field(
+        default=None,
+        description="Слот, сезон, κ и профиль",
+    )
+    heat_cost_total: float = Field(
+        default=0.0,
+        description="Дублирует тепловую сумму для аналитики (0 если не применимо)",
+    )
+    stress_cost_total: float = Field(default=0.0)
+    exposed_length_m: float = Field(
+        default=0.0,
+        description="Длина с высокой тепловой экспозицией",
+    )
+    building_shade_share: float = Field(default=0.0, ge=0.0, le=1.0)
+    vegetation_shade_share: float = Field(default=0.0, ge=0.0, le=1.0)
+    stressful_intersections_count: int = Field(default=0)
+    high_stress_segments_count: int = Field(default=0)
+    turn_count_analytics: int = Field(
+        default=0,
+        description="Число значимых поворотов (дублирует heat_stress.turn_count при наличии)",
+    )
 
 
 class AlternativesResponse(BaseModel):
@@ -332,6 +443,10 @@ class AlternativesResponse(BaseModel):
         ...,
         description="Список вариантов: оптимальный, зелёный, кратчайший по длине или альтернатива",
         min_length=1,
+    )
+    criteria_bundle: Optional[Dict[str, List[RouteResponse]]] = Field(
+        default=None,
+        description="При include_criteria_bundle: сравнение критериев по ключам",
     )
 
 

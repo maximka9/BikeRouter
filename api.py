@@ -273,6 +273,9 @@ async def alternatives(req: AlternativesRequest):
             routing_profile_key=req.routing_profile.value,
             departure_time=req.departure_time,
             time_slot_override=req.time_slot,
+            season=req.season.value,
+            air_temperature_c=req.air_temperature_c,
+            include_criteria_bundle=req.include_criteria_bundle,
         )
         ms = (time.perf_counter() - t0) * 1000
         reqlog.info(

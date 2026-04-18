@@ -76,6 +76,12 @@ _GRAPHML_NUMERIC_EDGE_ATTRS = frozenset(
         "edge_bearing_deg",
         "stress_lts",
         "stress_cost",
+        "stress_segment_cost",
+        "stress_intersection_cost",
+        "stress_intersection_score",
+        "thermal_open_sky_share",
+        "thermal_vegetation_shade_share",
+        "thermal_building_shade_share",
         *[f"heat_{s.key}" for s in TIME_SLOTS],
         *[f"heat_exposure_{s.key}" for s in TIME_SLOTS],
     }
@@ -103,10 +109,11 @@ def sanitize_multidigraph_routing_weights(G: nx.MultiDiGraph) -> None:
             )
         for attr in list(d.keys()):
             sa = str(attr)
-            if sa.startswith("heat_") or sa in (
-                "stress_lts",
-                "stress_cost",
-                "edge_bearing_deg",
+            if (
+                sa.startswith("heat_")
+                or sa.startswith("thermal_")
+                or sa.startswith("stress_")
+                or sa in ("edge_bearing_deg",)
             ):
                 d[attr] = coerce_edge_weight_numeric(d.get(attr), fallback=0.0)
         for attr in _GRAPHML_NUMERIC_EDGE_ATTRS:
@@ -325,8 +332,10 @@ class RouteService:
         profile_key: str,
         time_slot_key: str,
         pref: RoutingPreferenceProfile,
+        *,
+        heat_context_mult: float = 1.0,
     ) -> float:
-        """α·physical + β·heat(slot) + γ·stress (без поворотов)."""
+        """α·physical + β·heat(slot)·κ + γ·stress (без поворотов). κ — сезон/температура."""
         phys_k = f"weight_{profile_key}_full"
         phys = coerce_edge_weight_numeric(
             edge_data.get(phys_k),
@@ -334,8 +343,9 @@ class RouteService:
         )
         heat_k = f"heat_{time_slot_key}"
         h = coerce_edge_weight_numeric(edge_data.get(heat_k), fallback=0.0)
+        hm = float(heat_context_mult) if math.isfinite(heat_context_mult) else 1.0
         st = coerce_edge_weight_numeric(edge_data.get("stress_cost"), fallback=0.0)
-        c = pref.alpha * phys + pref.beta * h + pref.gamma * st
+        c = pref.alpha * phys + pref.beta * h * hm + pref.gamma * st
         if not math.isfinite(c) or c <= 0:
             return float("inf")
         return float(c)
@@ -345,13 +355,19 @@ class RouteService:
         profile_key: str,
         time_slot_key: str,
         pref: RoutingPreferenceProfile,
+        *,
+        heat_context_mult: float = 1.0,
     ) -> Callable[..., float]:
         def wf(_u: Any, _v: Any, dk: Dict[int, dict]) -> float:
             costs = []
             for _k, ed in dk.items():
                 costs.append(
                     RouteService.combined_edge_weight(
-                        ed, profile_key, time_slot_key, pref
+                        ed,
+                        profile_key,
+                        time_slot_key,
+                        pref,
+                        heat_context_mult=heat_context_mult,
                     )
                 )
             return min(costs) if costs else float("inf")
@@ -366,6 +382,8 @@ class RouteService:
         profile_key: str,
         time_slot_key: str,
         pref: RoutingPreferenceProfile,
+        *,
+        heat_context_mult: float = 1.0,
     ) -> RouteResult:
         """Кратчайший путь по комбинированному весу (без штрафа за поворот)."""
         start = ox.distance.nearest_nodes(
@@ -375,14 +393,22 @@ class RouteService:
             G, X=end_coords[1], Y=end_coords[0]
         )
         wf = self._multigraph_combined_weight_fn(
-            profile_key, time_slot_key, pref
+            profile_key,
+            time_slot_key,
+            pref,
+            heat_context_mult=heat_context_mult,
         )
         try:
             nodes = nx.shortest_path(G, source=start, target=end, weight=wf)
         except nx.NetworkXNoPath:
             raise RouteNotFoundError(f"combined:{time_slot_key}")
         edges = self._resolve_edge_keys_combined(
-            G, nodes, profile_key, time_slot_key, pref
+            G,
+            nodes,
+            profile_key,
+            time_slot_key,
+            pref,
+            heat_context_mult=heat_context_mult,
         )
         return RouteResult(nodes, edges, start, end)
 
@@ -393,6 +419,8 @@ class RouteService:
         profile_key: str,
         time_slot_key: str,
         pref: RoutingPreferenceProfile,
+        *,
+        heat_context_mult: float = 1.0,
     ) -> List[Tuple[int, int, int]]:
         edges: List[Tuple[int, int, int]] = []
         for i in range(len(nodes) - 1):
@@ -400,7 +428,11 @@ class RouteService:
             best_key = min(
                 G[u][v],
                 key=lambda k: RouteService.combined_edge_weight(
-                    G[u][v][k], profile_key, time_slot_key, pref
+                    G[u][v][k],
+                    profile_key,
+                    time_slot_key,
+                    pref,
+                    heat_context_mult=heat_context_mult,
                 ),
             )
             edges.append((u, v, best_key))
@@ -429,6 +461,8 @@ class RouteService:
         profile_key: str,
         time_slot_key: str,
         pref: RoutingPreferenceProfile,
+        *,
+        heat_context_mult: float = 1.0,
     ) -> RouteResult:
         """Dijkstra в пространстве состояний (узел, входящее ребро) — штраф за поворот."""
         start = ox.distance.nearest_nodes(
@@ -463,7 +497,11 @@ class RouteService:
             for _vv, w, k in G.out_edges(v, keys=True):
                 ed = G[v][w][k]
                 base = self.combined_edge_weight(
-                    ed, profile_key, time_slot_key, pref
+                    ed,
+                    profile_key,
+                    time_slot_key,
+                    pref,
+                    heat_context_mult=heat_context_mult,
                 )
                 if not math.isfinite(base):
                     continue
@@ -523,16 +561,22 @@ class RouteService:
         route: Optional[RouteResult],
         profile_key: str,
         time_slot_key: str,
+        *,
+        heat_context_mult: float = 1.0,
     ) -> Dict[str, float]:
-        """Суммы physical, heat, stress по выбранному слоту."""
+        """Суммы physical, heat (с κ), stress по выбранному слоту."""
         z = {
             "physical": 0.0,
             "heat": 0.0,
+            "heat_raw": 0.0,
             "stress": 0.0,
+            "stress_segment": 0.0,
+            "stress_intersection": 0.0,
             "length_m": 0.0,
         }
         if route is None:
             return z
+        hm = float(heat_context_mult) if math.isfinite(heat_context_mult) else 1.0
         phys_k = f"weight_{profile_key}_full"
         heat_k = f"heat_{time_slot_key}"
         for i in range(route.edge_count):
@@ -540,9 +584,17 @@ class RouteService:
             z["physical"] += coerce_edge_weight_numeric(
                 d.get(phys_k), fallback=0.0
             )
-            z["heat"] += coerce_edge_weight_numeric(d.get(heat_k), fallback=0.0)
+            hr = coerce_edge_weight_numeric(d.get(heat_k), fallback=0.0)
+            z["heat_raw"] += hr
+            z["heat"] += hr * hm
             z["stress"] += coerce_edge_weight_numeric(
                 d.get("stress_cost"), fallback=0.0
+            )
+            z["stress_segment"] += coerce_edge_weight_numeric(
+                d.get("stress_segment_cost"), fallback=0.0
+            )
+            z["stress_intersection"] += coerce_edge_weight_numeric(
+                d.get("stress_intersection_cost"), fallback=0.0
             )
             z["length_m"] += float(d.get("length", 0.0) or 0.0)
         return z
@@ -556,10 +608,15 @@ class RouteService:
         pref: RoutingPreferenceProfile,
         *,
         turn_count: int,
+        heat_context_mult: float = 1.0,
     ) -> float:
         """Итоговая комбинированная стоимость (с δ·turn)."""
         seg = RouteService.route_segment_costs(
-            G, route, profile_key, time_slot_key
+            G,
+            route,
+            profile_key,
+            time_slot_key,
+            heat_context_mult=heat_context_mult,
         )
         turn_part = float(pref.delta * TURN_PENALTY_BASE * max(0, turn_count))
         return float(
@@ -624,6 +681,65 @@ class RouteService:
             "max_lts": m["max_lts"],
             "high_stress_fraction": float(m["high_stress_fraction"]),
         }
+
+    @staticmethod
+    def route_shade_shares(
+        G: nx.MultiDiGraph,
+        route: Optional[RouteResult],
+    ) -> Dict[str, float]:
+        """Средневзвешенные по длине доли тени (растительность / здания)."""
+        if route is None:
+            return {"vegetation_shade_share": 0.0, "building_shade_share": 0.0}
+        tlen = 0.0
+        sv = 0.0
+        sb = 0.0
+        for i in range(route.edge_count):
+            d = G.edges[route.edges[i]]
+            ln = float(d.get("length", 0.0) or 0.0)
+            tlen += ln
+            sv += ln * float(d.get("thermal_vegetation_shade_share", 0.0) or 0.0)
+            sb += ln * float(d.get("thermal_building_shade_share", 0.0) or 0.0)
+        if tlen <= 0:
+            return {"vegetation_shade_share": 0.0, "building_shade_share": 0.0}
+        return {
+            "vegetation_shade_share": float(sv / tlen),
+            "building_shade_share": float(sb / tlen),
+        }
+
+    @staticmethod
+    def count_stressful_intersections(
+        G: nx.MultiDiGraph,
+        route: Optional[RouteResult],
+        *,
+        score_threshold: float = 0.35,
+    ) -> int:
+        """Число рёбер с заметным стрессом пересечения."""
+        if route is None:
+            return 0
+        n = 0
+        for i in range(route.edge_count):
+            d = G.edges[route.edges[i]]
+            sc = float(d.get("stress_intersection_score", 0.0) or 0.0)
+            if sc >= score_threshold:
+                n += 1
+        return n
+
+    @staticmethod
+    def count_high_stress_segments(
+        G: nx.MultiDiGraph,
+        route: Optional[RouteResult],
+        *,
+        lts_threshold: float = 2.5,
+    ) -> int:
+        """Число рёбер с высоким сегментным LTS."""
+        if route is None:
+            return 0
+        n = 0
+        for i in range(route.edge_count):
+            d = G.edges[route.edges[i]]
+            if float(d.get("stress_lts", 0.0) or 0.0) >= lts_threshold:
+                n += 1
+        return n
 
     # ------------------------------------------------------------------
     # Геометрия маршрута

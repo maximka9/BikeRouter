@@ -7,7 +7,7 @@ from bike_router.config import (
 )
 from bike_router.services.heat import (
     angle_diff_deg,
-    exposure_units_for_all_slots,
+    exposure_units_detailed_all_slots,
     heat_cost_for_edge,
 )
 from bike_router.services.routing import RouteService
@@ -57,11 +57,12 @@ def test_heat_cost_nonnegative():
 
 def test_exposure_slots_differ_by_sun():
     tags = {"highway": "residential", "width": "12"}
-    e_m = exposure_units_for_all_slots(90.0, 10.0, 5.0, tags)
-    e_n = exposure_units_for_all_slots(90.0, 10.0, 5.0, tags)
-    assert set(e_m.keys()) == {"morning", "noon", "evening", "night"}
+    e = exposure_units_detailed_all_slots(
+        90.0, 10.0, 5.0, tags, use_fallback=False
+    )
+    assert set(e.keys()) == {"morning", "noon", "evening", "night"}
     # ночной слот слабее инсоляции
-    assert e_n["night"] <= e_n["noon"]
+    assert e["night"] <= e["noon"]
 
 
 def test_combined_edge_weight_finite():

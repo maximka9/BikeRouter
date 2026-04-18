@@ -1,11 +1,12 @@
-"""Тепловая стоимость ребра: ориентация, открытость, тень от зелени/«каньона»."""
+"""Тепловая модель: разложение на тень растительности, зданий и открытый неблагоприятный участок."""
 
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import HEAT_COST_SCALE, TimeSlotDef, TIME_SLOTS
+from .policy_data import load_heat_season_policy
 
 # ---------------------------------------------------------------------------
 # Геометрия
@@ -35,7 +36,7 @@ def edge_bearing_deg_from_geom(geom: Any) -> float:
     if geom is None:
         return 0.0
     gt = getattr(geom, "geom_type", "") or ""
-    coords = []
+    coords: List[Tuple[float, float]] = []
     try:
         if gt in ("LineString", "LinearRing"):
             coords = list(geom.coords)
@@ -65,51 +66,80 @@ def angle_diff_deg(a: float, b: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Тепловая модель (упрощённая)
+# Доли тени / открытости (признаки ребра)
 # ---------------------------------------------------------------------------
 
 
 def open_sky_fraction(trees_pct: float, grass_pct: float) -> float:
-    """Доля «открытого неба» вдоль коридора (не равно зелёный комфорт)."""
+    """Доля «открытого неба» вдоль коридора."""
     t = max(0.0, min(100.0, float(trees_pct or 0.0)))
     g = max(0.0, min(100.0, float(grass_pct or 0.0)))
-    # Крона сильнее закрывает небо, чем трава
     blocked = min(0.92, (t / 100.0) * 0.72 + (g / 100.0) * 0.18)
     return max(0.08, 1.0 - blocked)
 
 
-def tree_shadow_mitigation(trees_pct: float) -> float:
-    """Ослабление солнечного штрафа за счёт тени от деревьев [0..1]."""
+def vegetation_shade_share(trees_pct: float, grass_pct: float) -> float:
+    """Доля «тени от растительности» [0..1] (крона сильнее травы)."""
     t = max(0.0, min(100.0, float(trees_pct or 0.0)))
-    return min(0.85, (t / 100.0) * 0.9)
+    g = max(0.0, min(100.0, float(grass_pct or 0.0)))
+    return float(min(0.95, (t / 100.0) * 0.92 + (g / 100.0) * 0.25))
 
 
-def building_canyon_mitigation(tags: Dict[str, Any]) -> float:
-    """Прокси тени зданий: узкая улица → больше тени с боков."""
+def building_shade_share(tags: Dict[str, Any]) -> float:
+    """Прокси тени зданий по ширине проезда [0..1]."""
     w = tags.get("width") or tags.get("est:width")
     if w is None:
-        return 0.25  # неизвестно — лёгкая «городская» тень
+        return 0.22
     try:
         wm = float(str(w).replace("m", "").strip().split()[0])
     except (ValueError, IndexError):
-        return 0.25
+        return 0.22
     if wm <= 0:
-        return 0.25
-    # < 12 м — заметный каньон
-    return float(min(0.75, max(0.1, 1.0 - wm / 35.0)))
+        return 0.22
+    return float(min(0.82, max(0.05, 1.0 - wm / 32.0)))
 
 
-def solar_exposure_unit(
+def direct_sun_factor(bearing_deg: float, slot: TimeSlotDef) -> float:
+    """Относительная прямая инсоляция фасада/полотна [0..1]."""
+    sun = slot.sun_azimuth_deg
+    ins = max(0.0, min(1.0, slot.insolation_scale))
+    diff = angle_diff_deg(bearing_deg + 90.0, sun)
+    direct = abs(math.cos(math.radians(diff)))
+    return max(0.0, min(1.0, direct * ins))
+
+
+def open_unfavorable_unit(
+    O: float,
+    V: float,
+    B: float,
+    D: float,
+    *,
+    veg_weight: float = 0.88,
+    bld_weight: float = 0.62,
+) -> float:
+    """Безразмерная «открытая теплонеблагоприятная» экспозиция [0..1].
+
+    Не сводится к одной зелени: учитываются независимые ослабления от V и B.
+    """
+    Om = max(0.0, min(1.0, O))
+    Vm = max(0.0, min(1.0, V))
+    Bm = max(0.0, min(1.0, B))
+    Dm = max(0.0, min(1.0, D))
+    # совместное ослабление прямого солнца на открытом участке
+    shade_combined = 1.0 - (1.0 - Vm * veg_weight) * (1.0 - Bm * bld_weight)
+    return max(0.0, min(1.0, Dm * Om * (1.0 - shade_combined)))
+
+
+def legacy_exposure_unit(
     bearing_deg: float,
     slot: TimeSlotDef,
     open_frac: float,
     tree_mit: float,
     build_mit: float,
 ) -> float:
-    """Безразмерная экспозиция [0..1] для ребра."""
+    """Быстрый прокси (fallback), совместимый с первой версией."""
     sun = slot.sun_azimuth_deg
     ins = max(0.0, min(1.0, slot.insolation_scale))
-    # Горизонтальная проекция: |cos(diff)| — фасады/стены упрощённо
     diff = angle_diff_deg(bearing_deg + 90.0, sun)
     direct = abs(math.cos(math.radians(diff)))
     shade = min(0.95, tree_mit * 0.85 + build_mit * 0.55)
@@ -123,28 +153,81 @@ def heat_cost_for_edge(
     *,
     scale: float = HEAT_COST_SCALE,
 ) -> float:
-    """Интегральный тепловой штраф на ребре (масштаб как у physical)."""
     if length_m <= 0 or not math.isfinite(length_m):
         return 0.0
     return float(scale * length_m * exposure_unit)
 
 
-def exposure_units_for_all_slots(
+def thermal_edge_features(
     bearing_deg: float,
     trees_pct: float,
     grass_pct: float,
     tags: Dict[str, Any],
+) -> Tuple[float, float, float, float]:
+    """O, V, B и комбинированный tree/build mitigation для legacy."""
+    O = open_sky_fraction(trees_pct, grass_pct)
+    V = vegetation_shade_share(trees_pct, grass_pct)
+    B = building_shade_share(tags)
+    tree_mit = min(0.85, (max(0.0, min(100.0, trees_pct)) / 100.0) * 0.9)
+    build_mit = building_shade_share(tags)
+    return O, V, B, tree_mit
+
+
+def exposure_units_detailed_all_slots(
+    bearing_deg: float,
+    trees_pct: float,
+    grass_pct: float,
+    tags: Dict[str, Any],
+    *,
+    use_fallback: bool,
 ) -> Dict[str, float]:
-    """Безразмерная экспозиция [0..1] по каждому слоту."""
-    open_frac = open_sky_fraction(trees_pct, grass_pct)
-    tree_m = tree_shadow_mitigation(trees_pct)
-    bld_m = building_canyon_mitigation(tags)
-    return {
-        slot.key: solar_exposure_unit(
-            bearing_deg, slot, open_frac, tree_m, bld_m
-        )
-        for slot in TIME_SLOTS
-    }
+    """Безразмерная тепловая нагрузка по слотам (детально или прокси)."""
+    O, V, B, _tm = thermal_edge_features(
+        bearing_deg, trees_pct, grass_pct, tags
+    )
+    out: Dict[str, float] = {}
+    for slot in TIME_SLOTS:
+        D = direct_sun_factor(bearing_deg, slot)
+        if use_fallback:
+            open_frac = O
+            tree_mit = min(0.85, (float(trees_pct or 0) / 100.0) * 0.9)
+            b_mit = B
+            out[slot.key] = legacy_exposure_unit(
+                bearing_deg, slot, open_frac, tree_mit, b_mit
+            )
+        else:
+            out[slot.key] = open_unfavorable_unit(O, V, B, D)
+    return out
+
+
+def heat_context_multiplier(
+    season: str,
+    time_slot_key: str,
+    air_temperature_c: Optional[float],
+    *,
+    policy: Optional[Dict[str, Any]] = None,
+) -> float:
+    """Множитель к уже посчитанному heat_cost на ребре (сезон + опционально T воздуха)."""
+    pol = policy if policy is not None else load_heat_season_policy()
+    if not pol:
+        return 1.0
+    season = (season or "summer").strip().lower()
+    if season in ("spring", "autumn"):
+        season = "spring_autumn"
+    slots_map = (pol.get("slot_temperature_factors") or {}).get(season)
+    if not isinstance(slots_map, dict):
+        slots_map = (pol.get("slot_temperature_factors") or {}).get("summer", {})
+    m = float(slots_map.get(time_slot_key, 1.0)) if isinstance(slots_map, dict) else 1.0
+    if air_temperature_c is None:
+        return max(0.05, min(2.0, m))
+    at = pol.get("air_temperature") or {}
+    ref = float(at.get("reference_c", 22.0))
+    per = float(at.get("per_degree_above", 0.045))
+    mx = float(at.get("max_mult", 1.55))
+    extra = max(0.0, float(air_temperature_c) - ref)
+    tmul = 1.0 + per * extra
+    tmul = min(mx, tmul)
+    return max(0.05, min(2.5, m * tmul))
 
 
 def heat_costs_for_all_slots(
@@ -153,9 +236,12 @@ def heat_costs_for_all_slots(
     trees_pct: float,
     grass_pct: float,
     tags: Dict[str, Any],
+    *,
+    use_fallback: bool = False,
 ) -> Dict[str, float]:
-    """Тепловая стоимость по каждому именованному слоту TIME_SLOTS."""
-    exps = exposure_units_for_all_slots(bearing_deg, trees_pct, grass_pct, tags)
+    exps = exposure_units_detailed_all_slots(
+        bearing_deg, trees_pct, grass_pct, tags, use_fallback=use_fallback
+    )
     return {k: heat_cost_for_edge(length_m, v) for k, v in exps.items()}
 
 
@@ -166,7 +252,6 @@ def heat_metrics_for_route(
     *,
     exposure_threshold: float = 0.45,
 ) -> Dict[str, float]:
-    """Суммарный тепловой штраф и длина сильной экспозиции."""
     if not lengths:
         return {
             "total_heat_cost": 0.0,

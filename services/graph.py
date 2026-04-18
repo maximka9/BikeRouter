@@ -24,8 +24,18 @@ from ..exceptions import OverpassUnavailableError
 from ..metrics import inc_overpass_subretry
 from .elevation import ElevationService
 from .green import GreenAnalyzer
-from .heat import edge_bearing_deg_from_geom, exposure_units_for_all_slots, heat_cost_for_edge
-from .stress import lts_from_osm_tags, stress_cost_for_edge
+from .heat import (
+    edge_bearing_deg_from_geom,
+    exposure_units_detailed_all_slots,
+    heat_cost_for_edge,
+    thermal_edge_features,
+)
+from .policy_data import load_stress_policy
+from .stress import (
+    intersection_stress_score,
+    lts_from_osm_tags,
+    stress_costs_for_edge,
+)
 from .retry import sleep_backoff
 from .surface_resolve import apply_surface_resolution
 
@@ -571,9 +581,19 @@ class GraphBuilder:
 
         bearing = np.zeros(n, dtype=np.float64)
         lts_arr = np.ones(n, dtype=np.float64)
+        stress_seg = np.zeros(n, dtype=np.float64)
+        stress_int = np.zeros(n, dtype=np.float64)
         stress_c = np.zeros(n, dtype=np.float64)
+        int_score_arr = np.zeros(n, dtype=np.float64)
+        o_sky = np.zeros(n, dtype=np.float64)
+        v_sh = np.zeros(n, dtype=np.float64)
+        b_sh = np.zeros(n, dtype=np.float64)
+        use_proxy = np.zeros(n, dtype=np.int8)
         heat_by_slot = {s.key: np.zeros(n, dtype=np.float64) for s in TIME_SLOTS}
         exp_by_slot = {s.key: np.zeros(n, dtype=np.float64) for s in TIME_SLOTS}
+
+        pol_stress = load_stress_policy()
+        use_fallback_green = bool(self._settings.disable_satellite_green)
 
         for i in range(n):
             geom = geom_arr[i]
@@ -588,13 +608,36 @@ class GraphBuilder:
             if "highway" not in tags and "highway" in edges_gdf.columns:
                 tags["highway"] = row.get("highway")
 
-            lv = float(lts_from_osm_tags(tags))
+            O, V, B, _ = thermal_edge_features(
+                brg, float(trees[i]), float(grass[i]), tags
+            )
+            o_sky[i] = O
+            v_sh[i] = V
+            b_sh[i] = B
+
+            fb = use_fallback_green or (
+                float(trees[i]) < 0.5 and float(grass[i]) < 0.5
+            )
+            use_proxy[i] = 1 if fb else 0
+
+            lv = float(lts_from_osm_tags(tags, pol_stress))
             lts_arr[i] = lv
             ln = float(len_arr[i])
-            stress_c[i] = stress_cost_for_edge(ln, lv)
+            isc = float(intersection_stress_score(tags, pol_stress))
+            int_score_arr[i] = isc
+            seg, inter, tot = stress_costs_for_edge(
+                ln, lv, isc, pol_stress
+            )
+            stress_seg[i] = seg
+            stress_int[i] = inter
+            stress_c[i] = tot
 
-            exps = exposure_units_for_all_slots(
-                brg, float(trees[i]), float(grass[i]), tags
+            exps = exposure_units_detailed_all_slots(
+                brg,
+                float(trees[i]),
+                float(grass[i]),
+                tags,
+                use_fallback=fb,
             )
 
             for slot in TIME_SLOTS:
@@ -603,7 +646,14 @@ class GraphBuilder:
                 heat_by_slot[slot.key][i] = heat_cost_for_edge(ln, eu)
 
         edges_gdf["edge_bearing_deg"] = bearing
+        edges_gdf["thermal_open_sky_share"] = o_sky
+        edges_gdf["thermal_vegetation_shade_share"] = v_sh
+        edges_gdf["thermal_building_shade_share"] = b_sh
+        edges_gdf["thermal_use_proxy"] = use_proxy
         edges_gdf["stress_lts"] = lts_arr
+        edges_gdf["stress_intersection_score"] = int_score_arr
+        edges_gdf["stress_segment_cost"] = stress_seg
+        edges_gdf["stress_intersection_cost"] = stress_int
         edges_gdf["stress_cost"] = stress_c
         for slot in TIME_SLOTS:
             edges_gdf[f"heat_{slot.key}"] = heat_by_slot[slot.key]
@@ -710,7 +760,14 @@ class GraphBuilder:
             "surface_osm",
             "surface_effective",
             "edge_bearing_deg",
+            "thermal_open_sky_share",
+            "thermal_vegetation_shade_share",
+            "thermal_building_shade_share",
+            "thermal_use_proxy",
             "stress_lts",
+            "stress_intersection_score",
+            "stress_segment_cost",
+            "stress_intersection_cost",
             "stress_cost",
         ]
         for s in TIME_SLOTS:
@@ -748,6 +805,18 @@ class GraphBuilder:
                     data[col] = w.get(col, "unknown") or "unknown"
                 elif col == "stress_lts":
                     data[col] = 1.5
+                elif col == "thermal_use_proxy":
+                    data[col] = 1
+                elif col == "stress_intersection_score":
+                    data[col] = 0.0
+                elif col in (
+                    "thermal_open_sky_share",
+                    "thermal_vegetation_shade_share",
+                    "thermal_building_shade_share",
+                    "stress_segment_cost",
+                    "stress_intersection_cost",
+                ):
+                    data[col] = 0.0
                 elif col in heat_exp_cols:
                     data[col] = 0.0
                 elif col in heat_cost_cols:

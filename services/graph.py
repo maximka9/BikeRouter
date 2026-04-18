@@ -13,15 +13,42 @@ import numpy as np
 import osmnx as ox
 from shapely.geometry import box
 
-from ..config import DEFAULT_COEFFICIENT, OSM_HIGHWAY_FILTER, PROFILES, Settings
+from ..config import (
+    DEFAULT_COEFFICIENT,
+    OSM_HIGHWAY_FILTER,
+    PROFILES,
+    TIME_SLOTS,
+    Settings,
+)
 from ..exceptions import OverpassUnavailableError
 from ..metrics import inc_overpass_subretry
 from .elevation import ElevationService
 from .green import GreenAnalyzer
+from .heat import edge_bearing_deg_from_geom, exposure_units_for_all_slots, heat_cost_for_edge
+from .stress import lts_from_osm_tags, stress_cost_for_edge
 from .retry import sleep_backoff
 from .surface_resolve import apply_surface_resolution
 
 logger = logging.getLogger(__name__)
+
+# Теги OSM для стресса/тепла (каньон по width)
+_OSM_STRESS_TAG_KEYS = (
+    "highway",
+    "lanes",
+    "maxspeed",
+    "cycleway",
+    "cycleway:left",
+    "cycleway:right",
+    "cycleway:both",
+    "sidewalk",
+    "junction",
+    "crossing",
+    "traffic_signals",
+    "segregated",
+    "bicycle",
+    "width",
+    "foot",
+)
 
 
 def _first_value(val: Any) -> Any:
@@ -86,7 +113,25 @@ class GraphBuilder:
         ox.settings.overpass_rate_limit = s.osm_overpass_rate_limit
         chain: List[str] = s.resolved_overpass_endpoints()
         ox.settings.overpass_url = chain[0]
-        for tag in ("surface", "tracktype"):
+        for tag in (
+            "surface",
+            "tracktype",
+            "lanes",
+            "maxspeed",
+            "cycleway",
+            "cycleway:left",
+            "cycleway:right",
+            "cycleway:both",
+            "sidewalk",
+            "junction",
+            "crossing",
+            "traffic_signals",
+            "segregated",
+            "bicycle",
+            "width",
+            "foot",
+            "lit",
+        ):
             if tag not in ox.settings.useful_tags_way:
                 ox.settings.useful_tags_way += [tag]
         logger.info(
@@ -498,6 +543,72 @@ class GraphBuilder:
                 w_full * eff_green, 0
             )
 
+    def enrich_heat_stress_features(self, edges_gdf: gpd.GeoDataFrame) -> None:
+        """Ориентация ребра, LTS/стресс, тепловые штрафы и экспозиция по слотам."""
+        n = len(edges_gdf)
+        if n == 0:
+            return
+        geom_arr = edges_gdf.geometry.values
+        len_arr = (
+            pd.to_numeric(edges_gdf["length"], errors="coerce")
+            .fillna(0.0)
+            .to_numpy(dtype=np.float64)
+        )
+        trees = (
+            pd.to_numeric(edges_gdf.get("trees_percent"), errors="coerce")
+            .fillna(0.0)
+            .to_numpy(dtype=np.float64)
+            if "trees_percent" in edges_gdf.columns
+            else np.zeros(n, dtype=np.float64)
+        )
+        grass = (
+            pd.to_numeric(edges_gdf.get("grass_percent"), errors="coerce")
+            .fillna(0.0)
+            .to_numpy(dtype=np.float64)
+            if "grass_percent" in edges_gdf.columns
+            else np.zeros(n, dtype=np.float64)
+        )
+
+        bearing = np.zeros(n, dtype=np.float64)
+        lts_arr = np.ones(n, dtype=np.float64)
+        stress_c = np.zeros(n, dtype=np.float64)
+        heat_by_slot = {s.key: np.zeros(n, dtype=np.float64) for s in TIME_SLOTS}
+        exp_by_slot = {s.key: np.zeros(n, dtype=np.float64) for s in TIME_SLOTS}
+
+        for i in range(n):
+            geom = geom_arr[i]
+            brg = float(edge_bearing_deg_from_geom(geom))
+            bearing[i] = brg
+            row = edges_gdf.iloc[i]
+            tags = {
+                k: row[k]
+                for k in _OSM_STRESS_TAG_KEYS
+                if k in edges_gdf.columns
+            }
+            if "highway" not in tags and "highway" in edges_gdf.columns:
+                tags["highway"] = row.get("highway")
+
+            lv = float(lts_from_osm_tags(tags))
+            lts_arr[i] = lv
+            ln = float(len_arr[i])
+            stress_c[i] = stress_cost_for_edge(ln, lv)
+
+            exps = exposure_units_for_all_slots(
+                brg, float(trees[i]), float(grass[i]), tags
+            )
+
+            for slot in TIME_SLOTS:
+                eu = float(exps.get(slot.key, 0.0))
+                exp_by_slot[slot.key][i] = eu
+                heat_by_slot[slot.key][i] = heat_cost_for_edge(ln, eu)
+
+        edges_gdf["edge_bearing_deg"] = bearing
+        edges_gdf["stress_lts"] = lts_arr
+        edges_gdf["stress_cost"] = stress_c
+        for slot in TIME_SLOTS:
+            edges_gdf[f"heat_{slot.key}"] = heat_by_slot[slot.key]
+            edges_gdf[f"heat_exposure_{slot.key}"] = exp_by_slot[slot.key]
+
     def upgrade_edges_satellite_weights(
         self, edges_gdf: gpd.GeoDataFrame
     ) -> gpd.GeoDataFrame:
@@ -518,6 +629,7 @@ class GraphBuilder:
         else:
             edges_gdf = self._green._fill_empty_green(edges_gdf)
         self.recompute_green_weights_only(edges_gdf)
+        self.enrich_heat_stress_features(edges_gdf)
         logger.info(
             "Доначитка зелени: готово за %.2f с",
             _time.perf_counter() - t0,
@@ -551,6 +663,7 @@ class GraphBuilder:
         )
         t3 = _time.perf_counter()
         self.recompute_green_weights_only(edges_gdf)
+        self.enrich_heat_stress_features(edges_gdf)
         t4 = _time.perf_counter()
         for profile in PROFILES:
             logger.info(
@@ -596,7 +709,13 @@ class GraphBuilder:
             "green_percent",
             "surface_osm",
             "surface_effective",
+            "edge_bearing_deg",
+            "stress_lts",
+            "stress_cost",
         ]
+        for s in TIME_SLOTS:
+            base_cols.append(f"heat_{s.key}")
+            base_cols.append(f"heat_exposure_{s.key}")
         for p in PROFILES:
             base_cols.extend(
                 [f"weight_{p.key}_full", f"weight_{p.key}_green"]
@@ -608,6 +727,9 @@ class GraphBuilder:
         )
 
         weight_cols = {c for c in avail if c.startswith("weight_")}
+
+        heat_exp_cols = {c for c in avail if c.startswith("heat_exposure_")}
+        heat_cost_cols = {c for c in avail if c.startswith("heat_") and not c.startswith("heat_exposure_")}
 
         for u, v, key, data in G.edges(keys=True, data=True):
             w = lookup.get((u, v, key), {})
@@ -624,6 +746,16 @@ class GraphBuilder:
                     data[col] = w.get(col, "") or ""
                 elif col == "surface_effective":
                     data[col] = w.get(col, "unknown") or "unknown"
+                elif col == "stress_lts":
+                    data[col] = 1.5
+                elif col in heat_exp_cols:
+                    data[col] = 0.0
+                elif col in heat_cost_cols:
+                    data[col] = 0.0
+                elif col == "stress_cost":
+                    data[col] = 0.0
+                elif col == "edge_bearing_deg":
+                    data[col] = 0.0
                 else:
                     data[col] = 0.0
 

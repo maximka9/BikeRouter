@@ -27,6 +27,22 @@ class ModeEnum(str, Enum):
     shortest = "shortest"
 
 
+class RoutingCriterionEnum(str, Enum):
+    """Критерий построения (расширение к существующим режимам)."""
+
+    default = "default"
+    heat = "heat"
+    stress = "stress"
+    heat_stress = "heat_stress"
+
+
+class RoutingPreferenceEnum(str, Enum):
+    balanced = "balanced"
+    safe = "safe"
+    cool = "cool"
+    sport = "sport"
+
+
 # ── Базовые типы ─────────────────────────────────────────────────
 
 
@@ -69,6 +85,22 @@ class AlternativesRequest(BaseModel):
     green_enabled: bool = Field(
         True,
         description="False — только кратчайший и энергетический, без спутника и без зелёного маршрута",
+    )
+    criterion: RoutingCriterionEnum = Field(
+        RoutingCriterionEnum.default,
+        description="default — как раньше (2–3 варианта); heat | stress | heat_stress — новые критерии",
+    )
+    routing_profile: RoutingPreferenceEnum = Field(
+        RoutingPreferenceEnum.balanced,
+        description="Предпочтения тепло/безопасность (коэффициенты в config)",
+    )
+    departure_time: Optional[str] = Field(
+        default=None,
+        description="ISO 8601 локального времени, напр. 2026-07-15T13:00:00 — выбор теплового слота",
+    )
+    time_slot: Optional[str] = Field(
+        default=None,
+        description="Явный слот: morning | noon | evening | night (если задан — важнее departure_time)",
     )
 
 
@@ -170,6 +202,35 @@ class ElevationPoint(BaseModel):
     elevation_m: float
 
 
+class HeatStressMetrics(BaseModel):
+    """Метрики тепловой нагрузки и транспортного стресса вдоль маршрута."""
+
+    time_slot: str = Field(default="", description="morning | noon | evening | night")
+    routing_profile: str = Field(default="", description="balanced | safe | cool | sport")
+    total_heat_cost: float = Field(default=0.0, description="Суммарная тепловая стоимость")
+    exposed_high_length_m: float = Field(
+        default=0.0,
+        description="Длина сегментов с высокой солнечной экспозицией (слот)",
+    )
+    avg_exposure_unit: float = Field(
+        default=0.0,
+        description="Средняя безразмерная экспозиция по длине",
+    )
+    avg_stress_lts: float = Field(default=0.0, description="Средний уровень стресса (1–4)")
+    max_stress_lts: float = Field(default=0.0, description="Максимальный стресс на сегменте")
+    high_stress_length_fraction: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Доля длины с LTS ≥ порога (≈3)",
+    )
+    turn_count: int = Field(default=0, description="Число заметных поворотов")
+    combined_cost: float = Field(
+        default=0.0,
+        description="α·physical + β·heat + γ·stress + δ·turn",
+    )
+
+
 class RouteQualityHints(BaseModel):
     """Предупреждения о полноте OSM и эвристиках вдоль маршрута."""
 
@@ -257,6 +318,10 @@ class RouteResponse(BaseModel):
     quality_hints: Optional[RouteQualityHints] = Field(
         default=None,
         description="Предупреждения о качестве данных OSM и fallback-коэффициентах",
+    )
+    heat_stress: Optional[HeatStressMetrics] = Field(
+        default=None,
+        description="Заполняется для критериев heat, stress, heat_stress",
     )
 
 

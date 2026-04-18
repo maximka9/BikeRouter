@@ -202,6 +202,154 @@ PEDESTRIAN = ModeProfile(
 
 PROFILES = [CYCLIST, PEDESTRIAN]
 
+
+# ---------------------------------------------------------------------------
+# Профиль предпочтений маршрутизации (тепло / безопасность / баланс)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RoutingPreferenceProfile:
+    """Коэффициенты комбинированной стоимости:
+
+    ``cost = alpha * physical + beta * heat + gamma * stress + delta * turn``
+
+    ``physical`` — существующий ``weight_{mode}_full``; ``heat``/``stress`` —
+    безразмерные штрафы на ребро (уже с длиной); ``turn`` — штраф за резкий
+    поворот между рёбрами (масштабируется в :mod:`services.routing`).
+    """
+
+    key: str
+    label: str
+    alpha: float
+    beta: float
+    gamma: float
+    delta: float
+
+
+ROUTING_PREFERENCE_PROFILES: Dict[str, RoutingPreferenceProfile] = {
+    "balanced": RoutingPreferenceProfile(
+        key="balanced",
+        label="Сбалансированный",
+        alpha=1.0,
+        beta=1.0,
+        gamma=1.0,
+        delta=1.0,
+    ),
+    "safe": RoutingPreferenceProfile(
+        key="safe",
+        label="Приоритет безопасности",
+        alpha=1.0,
+        beta=0.7,
+        gamma=1.4,
+        delta=1.2,
+    ),
+    "cool": RoutingPreferenceProfile(
+        key="cool",
+        label="Приоритет теплового комфорта",
+        alpha=1.0,
+        beta=1.5,
+        gamma=0.8,
+        delta=0.9,
+    ),
+    "sport": RoutingPreferenceProfile(
+        key="sport",
+        label="Скорость / меньше штрафа за стресс",
+        alpha=1.0,
+        beta=0.6,
+        gamma=0.5,
+        delta=0.5,
+    ),
+}
+
+
+def routing_preference_profile(key: str) -> RoutingPreferenceProfile:
+    """Профиль по ключу; неизвестный ключ → balanced."""
+    return ROUTING_PREFERENCE_PROFILES.get(
+        (key or "").strip().lower(),
+        ROUTING_PREFERENCE_PROFILES["balanced"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Временные слоты и тепловая модель (номинальное азимутальное солнце, ° от севера)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TimeSlotDef:
+    key: str
+    label: str
+    hour_start: int  # включительно [0..23]
+    hour_end: int  # не включительно; если start>end — интервал через полночь
+    sun_azimuth_deg: float  # упрощённо для средних широт (~53°N, лето)
+    insolation_scale: float  # 0..1 — общая интенсивность для слота
+
+
+TIME_SLOTS: Tuple[TimeSlotDef, ...] = (
+    TimeSlotDef(
+        "morning",
+        "Утро",
+        6,
+        11,
+        sun_azimuth_deg=105.0,
+        insolation_scale=0.55,
+    ),
+    TimeSlotDef(
+        "noon",
+        "Полдень",
+        11,
+        16,
+        sun_azimuth_deg=195.0,
+        insolation_scale=1.0,
+    ),
+    TimeSlotDef(
+        "evening",
+        "Вечер",
+        16,
+        21,
+        sun_azimuth_deg=285.0,
+        insolation_scale=0.65,
+    ),
+    TimeSlotDef(
+        "night",
+        "Ночь / низкая инсоляция",
+        21,
+        6,
+        sun_azimuth_deg=180.0,
+        insolation_scale=0.12,
+    ),
+)
+
+
+def time_slot_for_hour(hour: int) -> TimeSlotDef:
+    """Выбор слота по часу локального времени [0..23]."""
+    h = int(hour) % 24
+    for slot in TIME_SLOTS:
+        if slot.hour_start < slot.hour_end:
+            if slot.hour_start <= h < slot.hour_end:
+                return slot
+        else:
+            # через полночь (night: 21..6)
+            if h >= slot.hour_start or h < slot.hour_end:
+                return slot
+    return TIME_SLOTS[1]
+
+
+def time_slot_key_for_hour(hour: int) -> str:
+    return time_slot_for_hour(hour).key
+
+
+# Масштабы безразмерных тепло/стресс штрафов относительно типичного physical weight
+HEAT_COST_SCALE: float = _env("HEAT_COST_SCALE", 0.35, float)
+STRESS_COST_SCALE: float = _env("STRESS_COST_SCALE", 2.5, float)
+# Базовый штраф за поворот (масштабируется delta из RoutingPreferenceProfile)
+TURN_PENALTY_BASE: float = _env("TURN_PENALTY_BASE", 8.0, float)
+TURN_ANGLE_THRESHOLD_DEG: float = _env("TURN_ANGLE_THRESHOLD_DEG", 40.0, float)
+
+# Версия тепло/стресс слоя для инвалидации кэша графа
+HEAT_STRESS_MODEL_VERSION: str = _env("HEAT_STRESS_MODEL_VERSION", "1", str)
+
 # Верхняя граница **отображаемого** уклона (доля 0–1). На рёбрах графа ``gradient``
 # клипуется до ``max(p.max_gradient) == 0.50``, из‑за чего «макс. уклон» в UI часто
 # был ровно 50%. Для статистики и подсказок используется ``gradient_raw`` и
@@ -453,7 +601,7 @@ OSM_HIGHWAY_FILTER: str = (
 
 # Увеличивайте при изменении формул весов в ``graph.calculate_weights``,
 # ``apply_weights``, подсегментов высот, клипа озеленения и т.п.
-ROUTING_ALGO_VERSION: str = _env("ROUTING_ALGO_VERSION", "1", str)
+ROUTING_ALGO_VERSION: str = _env("ROUTING_ALGO_VERSION", "2", str)
 
 
 def routing_engine_cache_fingerprint() -> str:
@@ -467,12 +615,33 @@ def routing_engine_cache_fingerprint() -> str:
         d["highway"] = dict(sorted(d["highway"].items()))
         d["surface"] = dict(sorted(d["surface"].items()))
         profs.append(d)
+    pref_profiles = {
+        k: asdict(v) for k, v in sorted(ROUTING_PREFERENCE_PROFILES.items())
+    }
+    slots = [
+        {
+            "key": s.key,
+            "hour_start": s.hour_start,
+            "hour_end": s.hour_end,
+            "insolation_scale": s.insolation_scale,
+            "sun_azimuth_deg": s.sun_azimuth_deg,
+            "label": s.label,
+        }
+        for s in TIME_SLOTS
+    ]
     payload = {
         "algo_ver": ROUTING_ALGO_VERSION,
         "default_coefficient": DEFAULT_COEFFICIENT,
+        "heat_cost_scale": HEAT_COST_SCALE,
+        "heat_stress_model_version": HEAT_STRESS_MODEL_VERSION,
         "osm_highway_filter": OSM_HIGHWAY_FILTER,
+        "preference_profiles": pref_profiles,
         "profiles": profs,
+        "stress_cost_scale": STRESS_COST_SCALE,
         "surface_resolve": "v2_osm_hw_tt",
+        "time_slots": slots,
+        "turn_angle_threshold_deg": TURN_ANGLE_THRESHOLD_DEG,
+        "turn_penalty_base": TURN_PENALTY_BASE,
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

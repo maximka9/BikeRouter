@@ -4,12 +4,23 @@ import logging
 import math
 import numbers
 from collections import Counter
-from typing import Any, Dict, List, Optional, Tuple
+from heapq import heappop, heappush
+from itertools import count
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import networkx as nx
 import osmnx as ox
 
-from ..config import MAX_ROUTE_GRADIENT_DISPLAY, ModeProfile
+from ..config import (
+    MAX_ROUTE_GRADIENT_DISPLAY,
+    ModeProfile,
+    RoutingPreferenceProfile,
+    TURN_ANGLE_THRESHOLD_DEG,
+    TURN_PENALTY_BASE,
+    TIME_SLOTS,
+)
+from .heat import angle_diff_deg
+from .stress import stress_metrics_for_route
 from ..exceptions import RouteNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -62,6 +73,11 @@ _GRAPHML_NUMERIC_EDGE_ATTRS = frozenset(
         "grass_percent",
         "green_percent",
         "green_coeff",
+        "edge_bearing_deg",
+        "stress_lts",
+        "stress_cost",
+        *[f"heat_{s.key}" for s in TIME_SLOTS],
+        *[f"heat_exposure_{s.key}" for s in TIME_SLOTS],
     }
 )
 
@@ -85,6 +101,14 @@ def sanitize_multidigraph_routing_weights(G: nx.MultiDiGraph) -> None:
                     d.get("length", 1.0), fallback=1.0
                 ),
             )
+        for attr in list(d.keys()):
+            sa = str(attr)
+            if sa.startswith("heat_") or sa in (
+                "stress_lts",
+                "stress_cost",
+                "edge_bearing_deg",
+            ):
+                d[attr] = coerce_edge_weight_numeric(d.get(attr), fallback=0.0)
         for attr in _GRAPHML_NUMERIC_EDGE_ATTRS:
             if attr not in d:
                 continue
@@ -294,6 +318,312 @@ class RouteService:
         except RouteNotFoundError:
             logger.warning("Маршрут не найден (weight='%s')", weight_key)
             return None
+
+    @staticmethod
+    def combined_edge_weight(
+        edge_data: dict,
+        profile_key: str,
+        time_slot_key: str,
+        pref: RoutingPreferenceProfile,
+    ) -> float:
+        """α·physical + β·heat(slot) + γ·stress (без поворотов)."""
+        phys_k = f"weight_{profile_key}_full"
+        phys = coerce_edge_weight_numeric(
+            edge_data.get(phys_k),
+            fallback=float("inf"),
+        )
+        heat_k = f"heat_{time_slot_key}"
+        h = coerce_edge_weight_numeric(edge_data.get(heat_k), fallback=0.0)
+        st = coerce_edge_weight_numeric(edge_data.get("stress_cost"), fallback=0.0)
+        c = pref.alpha * phys + pref.beta * h + pref.gamma * st
+        if not math.isfinite(c) or c <= 0:
+            return float("inf")
+        return float(c)
+
+    @staticmethod
+    def _multigraph_combined_weight_fn(
+        profile_key: str,
+        time_slot_key: str,
+        pref: RoutingPreferenceProfile,
+    ) -> Callable[..., float]:
+        def wf(_u: Any, _v: Any, dk: Dict[int, dict]) -> float:
+            costs = []
+            for _k, ed in dk.items():
+                costs.append(
+                    RouteService.combined_edge_weight(
+                        ed, profile_key, time_slot_key, pref
+                    )
+                )
+            return min(costs) if costs else float("inf")
+
+        return wf
+
+    def find_route_combined(
+        self,
+        G: nx.MultiDiGraph,
+        start_coords: Tuple[float, float],
+        end_coords: Tuple[float, float],
+        profile_key: str,
+        time_slot_key: str,
+        pref: RoutingPreferenceProfile,
+    ) -> RouteResult:
+        """Кратчайший путь по комбинированному весу (без штрафа за поворот)."""
+        start = ox.distance.nearest_nodes(
+            G, X=start_coords[1], Y=start_coords[0]
+        )
+        end = ox.distance.nearest_nodes(
+            G, X=end_coords[1], Y=end_coords[0]
+        )
+        wf = self._multigraph_combined_weight_fn(
+            profile_key, time_slot_key, pref
+        )
+        try:
+            nodes = nx.shortest_path(G, source=start, target=end, weight=wf)
+        except nx.NetworkXNoPath:
+            raise RouteNotFoundError(f"combined:{time_slot_key}")
+        edges = self._resolve_edge_keys_combined(
+            G, nodes, profile_key, time_slot_key, pref
+        )
+        return RouteResult(nodes, edges, start, end)
+
+    @staticmethod
+    def _resolve_edge_keys_combined(
+        G: nx.MultiDiGraph,
+        nodes: List[int],
+        profile_key: str,
+        time_slot_key: str,
+        pref: RoutingPreferenceProfile,
+    ) -> List[Tuple[int, int, int]]:
+        edges: List[Tuple[int, int, int]] = []
+        for i in range(len(nodes) - 1):
+            u, v = nodes[i], nodes[i + 1]
+            best_key = min(
+                G[u][v],
+                key=lambda k: RouteService.combined_edge_weight(
+                    G[u][v][k], profile_key, time_slot_key, pref
+                ),
+            )
+            edges.append((u, v, best_key))
+        return edges
+
+    @staticmethod
+    def _turn_penalty_at_node(
+        bd_in: float,
+        bd_out: float,
+        pref: RoutingPreferenceProfile,
+    ) -> float:
+        ta = angle_diff_deg(float(bd_in or 0.0), float(bd_out or 0.0))
+        if ta < TURN_ANGLE_THRESHOLD_DEG:
+            return 0.0
+        return float(
+            pref.delta
+            * TURN_PENALTY_BASE
+            * min(1.0, (ta - TURN_ANGLE_THRESHOLD_DEG) / 50.0)
+        )
+
+    def find_route_combined_with_turns(
+        self,
+        G: nx.MultiDiGraph,
+        start_coords: Tuple[float, float],
+        end_coords: Tuple[float, float],
+        profile_key: str,
+        time_slot_key: str,
+        pref: RoutingPreferenceProfile,
+    ) -> RouteResult:
+        """Dijkstra в пространстве состояний (узел, входящее ребро) — штраф за поворот."""
+        start = ox.distance.nearest_nodes(
+            G, X=start_coords[1], Y=start_coords[0]
+        )
+        end = ox.distance.nearest_nodes(
+            G, X=end_coords[1], Y=end_coords[0]
+        )
+
+        State = Tuple[int, Optional[Tuple[int, int, int]]]
+        dist: Dict[State, float] = {}
+        pred: Dict[State, Optional[State]] = {}
+        c = count()
+        fringe: List[Tuple[float, int, State]] = []
+
+        s0: State = (start, None)
+        dist[s0] = 0.0
+        pred[s0] = None
+        heappush(fringe, (0.0, next(c), s0))
+
+        final_state: Optional[State] = None
+
+        while fringe:
+            d, _, st_v = heappop(fringe)
+            if d > dist.get(st_v, float("inf")):
+                continue
+            v, inc_e = st_v
+            if v == end:
+                final_state = st_v
+                break
+
+            for _vv, w, k in G.out_edges(v, keys=True):
+                ed = G[v][w][k]
+                base = self.combined_edge_weight(
+                    ed, profile_key, time_slot_key, pref
+                )
+                if not math.isfinite(base):
+                    continue
+                turn_p = 0.0
+                if inc_e is not None:
+                    pu, pv, pk = inc_e
+                    bd_in = float(G[pu][pv][pk].get("edge_bearing_deg", 0.0))
+                    bd_out = float(ed.get("edge_bearing_deg", 0.0))
+                    turn_p = self._turn_penalty_at_node(bd_in, bd_out, pref)
+                nd = d + base + turn_p
+                new_prev: Tuple[int, int, int] = (v, w, k)
+                st_w: State = (w, new_prev)
+                if nd < dist.get(st_w, float("inf")):
+                    dist[st_w] = nd
+                    pred[st_w] = st_v
+                    heappush(fringe, (nd, next(c), st_w))
+
+        if final_state is None:
+            raise RouteNotFoundError(f"combined_turns:{time_slot_key}")
+
+        edges_rev: List[Tuple[int, int, int]] = []
+        cur: Optional[State] = final_state
+        while cur is not None and cur[1] is not None:
+            edges_rev.append(cur[1])
+            cur = pred.get(cur)
+        edges_rev.reverse()
+        if not edges_rev:
+            raise RouteNotFoundError(f"combined_turns_empty:{time_slot_key}")
+        nodes = [edges_rev[0][0]]
+        for u, v, _k in edges_rev:
+            nodes.append(v)
+        return RouteResult(nodes, edges_rev, start, end)
+
+    @staticmethod
+    def count_significant_turns(
+        G: nx.MultiDiGraph,
+        route: Optional[RouteResult],
+        *,
+        threshold_deg: float = TURN_ANGLE_THRESHOLD_DEG,
+    ) -> int:
+        """Число поворотов между рёбрами (по разнице азимутов)."""
+        if route is None or route.edge_count < 2:
+            return 0
+        n = 0
+        for i in range(route.edge_count - 1):
+            d1 = G.edges[route.edges[i]]
+            d2 = G.edges[route.edges[i + 1]]
+            b1 = float(d1.get("edge_bearing_deg", 0.0) or 0.0)
+            b2 = float(d2.get("edge_bearing_deg", 0.0) or 0.0)
+            if angle_diff_deg(b1, b2) >= threshold_deg:
+                n += 1
+        return n
+
+    @staticmethod
+    def route_segment_costs(
+        G: nx.MultiDiGraph,
+        route: Optional[RouteResult],
+        profile_key: str,
+        time_slot_key: str,
+    ) -> Dict[str, float]:
+        """Суммы physical, heat, stress по выбранному слоту."""
+        z = {
+            "physical": 0.0,
+            "heat": 0.0,
+            "stress": 0.0,
+            "length_m": 0.0,
+        }
+        if route is None:
+            return z
+        phys_k = f"weight_{profile_key}_full"
+        heat_k = f"heat_{time_slot_key}"
+        for i in range(route.edge_count):
+            d = G.edges[route.edges[i]]
+            z["physical"] += coerce_edge_weight_numeric(
+                d.get(phys_k), fallback=0.0
+            )
+            z["heat"] += coerce_edge_weight_numeric(d.get(heat_k), fallback=0.0)
+            z["stress"] += coerce_edge_weight_numeric(
+                d.get("stress_cost"), fallback=0.0
+            )
+            z["length_m"] += float(d.get("length", 0.0) or 0.0)
+        return z
+
+    @staticmethod
+    def route_combined_total(
+        G: nx.MultiDiGraph,
+        route: Optional[RouteResult],
+        profile_key: str,
+        time_slot_key: str,
+        pref: RoutingPreferenceProfile,
+        *,
+        turn_count: int,
+    ) -> float:
+        """Итоговая комбинированная стоимость (с δ·turn)."""
+        seg = RouteService.route_segment_costs(
+            G, route, profile_key, time_slot_key
+        )
+        turn_part = float(pref.delta * TURN_PENALTY_BASE * max(0, turn_count))
+        return float(
+            pref.alpha * seg["physical"]
+            + pref.beta * seg["heat"]
+            + pref.gamma * seg["stress"]
+            + turn_part
+        )
+
+    @staticmethod
+    def route_exposure_metrics(
+        G: nx.MultiDiGraph,
+        route: Optional[RouteResult],
+        time_slot_key: str,
+        *,
+        exposure_threshold: float = 0.45,
+    ) -> Dict[str, float]:
+        """Длина участков с высокой экспозицией для слота."""
+        if route is None:
+            return {"exposed_high_length_m": 0.0, "avg_exposure": 0.0}
+        hk = f"heat_exposure_{time_slot_key}"
+        tlen = 0.0
+        hi = 0.0
+        wsum = 0.0
+        for i in range(route.edge_count):
+            d = G.edges[route.edges[i]]
+            ln = float(d.get("length", 0.0) or 0.0)
+            eu = float(d.get(hk, 0.0) or 0.0)
+            tlen += ln
+            wsum += eu * ln
+            if eu >= exposure_threshold:
+                hi += ln
+        return {
+            "exposed_high_length_m": float(hi),
+            "avg_exposure": float(wsum / tlen) if tlen > 0 else 0.0,
+        }
+
+    @staticmethod
+    def route_stress_levels(
+        G: nx.MultiDiGraph,
+        route: Optional[RouteResult],
+        *,
+        high_threshold: float = 2.5,
+    ) -> Dict[str, float]:
+        """Средний/макс LTS и доля длины с LTS ≥ порога."""
+        if route is None:
+            return {
+                "avg_lts": 1.0,
+                "max_lts": 1.0,
+                "high_stress_fraction": 0.0,
+            }
+        lengths: List[float] = []
+        lts: List[float] = []
+        for i in range(route.edge_count):
+            d = G.edges[route.edges[i]]
+            ln = float(d.get("length", 0.0) or 0.0)
+            lengths.append(ln)
+            lts.append(float(d.get("stress_lts", 1.5) or 1.5))
+        m = stress_metrics_for_route(lengths, lts, high_threshold=high_threshold)
+        return {
+            "avg_lts": m["avg_lts"],
+            "max_lts": m["max_lts"],
+            "high_stress_fraction": float(m["high_stress_fraction"]),
+        }
 
     # ------------------------------------------------------------------
     # Геометрия маршрута

@@ -18,7 +18,14 @@ import networkx as nx
 import osmnx as ox
 
 from .app import Application
-from .config import PROFILES, Settings, routing_engine_cache_fingerprint
+from .config import (
+    PROFILES,
+    TIME_SLOTS,
+    Settings,
+    routing_engine_cache_fingerprint,
+    routing_preference_profile,
+    time_slot_key_for_hour,
+)
 from .exceptions import (
     BikeRouterError,
     PointOutsideZoneError,
@@ -30,6 +37,7 @@ from .models import (
     ElevationMetrics,
     ElevationPoint,
     GreenMetrics,
+    HeatStressMetrics,
     MapLayersGeoJSON,
     RouteQualityHints,
     RouteResponse,
@@ -85,6 +93,27 @@ def _fmt_time(seconds: float) -> str:
         h, m = divmod(m, 60)
         return f"{h} ч {m} мин"
     return f"{m} мин {s} сек"
+
+
+def _resolve_time_slot_key(
+    departure_time: Optional[str],
+    time_slot_override: Optional[str],
+) -> str:
+    """Слот тепловой модели: явный time_slot или час из departure_time (ISO), иначе полдень."""
+    valid = {s.key for s in TIME_SLOTS}
+    if time_slot_override:
+        k = str(time_slot_override).strip().lower()
+        if k in valid:
+            return k
+    if departure_time:
+        raw = str(departure_time).strip()
+        try:
+            iso = raw.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(iso)
+            return time_slot_key_for_hour(dt.hour)
+        except ValueError:
+            pass
+    return "noon"
 
 
 def _raise_route_not_found_after_corridor_expand(
@@ -808,6 +837,8 @@ class RouteEngine:
         variant_label: str = "",
         *,
         graph: Optional[nx.MultiDiGraph] = None,
+        cost_override: Optional[float] = None,
+        heat_stress_metrics: Optional[HeatStressMetrics] = None,
     ) -> RouteResponse:
         """Собрать :class:`RouteResponse` из уже найденного :class:`RouteResult`."""
         profile = _PROFILE_MAP[profile_key]
@@ -821,7 +852,10 @@ class RouteEngine:
         if length > max_m:
             raise RouteTooLongError(length, max_m)
 
-        cost = router.calculate_cost(G, route, cost_weight_key)
+        if cost_override is not None:
+            cost = float(cost_override)
+        else:
+            cost = router.calculate_cost(G, route, cost_weight_key)
         time_s = router.estimate_time(G, route, profile)
         gs = router.green_stats(G, route)
         es = router.elevation_stats(G, route)
@@ -909,6 +943,7 @@ class RouteEngine:
             elevation_profile=elev_points,
             map_layers=map_layers,
             quality_hints=quality_hints,
+            heat_stress=heat_stress_metrics,
         )
 
     def _next_length_alternative(
@@ -1168,6 +1203,197 @@ class RouteEngine:
             graph=G,
         )
 
+    def _make_heat_stress_metrics(
+        self,
+        G: nx.MultiDiGraph,
+        route: RouteResult,
+        profile_key: str,
+        time_slot_key: str,
+        routing_profile_key: str,
+    ) -> HeatStressMetrics:
+        pref = routing_preference_profile(routing_profile_key)
+        router = self._app.router
+        turns = router.count_significant_turns(G, route)
+        seg = router.route_segment_costs(
+            G, route, profile_key, time_slot_key
+        )
+        expm = router.route_exposure_metrics(G, route, time_slot_key)
+        st = router.route_stress_levels(G, route)
+        comb = router.route_combined_total(
+            G,
+            route,
+            profile_key,
+            time_slot_key,
+            pref,
+            turn_count=turns,
+        )
+        return HeatStressMetrics(
+            time_slot=time_slot_key,
+            routing_profile=pref.key,
+            total_heat_cost=round(seg["heat"], 1),
+            exposed_high_length_m=round(expm["exposed_high_length_m"], 1),
+            avg_exposure_unit=round(expm["avg_exposure"], 3),
+            avg_stress_lts=round(st["avg_lts"], 2),
+            max_stress_lts=round(st["max_lts"], 2),
+            high_stress_length_fraction=round(st["high_stress_fraction"], 3),
+            turn_count=turns,
+            combined_cost=round(comb, 1),
+        )
+
+    def _build_criterion_routes(
+        self,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        profile_key: str,
+        G: nx.MultiDiGraph,
+        criterion: str,
+        routing_profile_key: str,
+        time_slot_key: str,
+    ) -> List[RouteResponse]:
+        router = self._app.router
+        pref = routing_preference_profile(routing_profile_key)
+        routes_out: List[RouteResponse] = []
+        crit = criterion.strip().lower()
+
+        if crit == "heat":
+            hk = f"heat_{time_slot_key}"
+            r = router.find_route(G, start, end, hk)
+            seg = router.route_segment_costs(
+                G, r, profile_key, time_slot_key
+            )
+            hm = self._make_heat_stress_metrics(
+                G, r, profile_key, time_slot_key, routing_profile_key
+            )
+            routes_out.append(
+                self._build_route_response(
+                    start,
+                    end,
+                    profile_key,
+                    "heat",
+                    r,
+                    hk,
+                    "Минимальная тепловая нагрузка",
+                    graph=G,
+                    cost_override=seg["heat"],
+                    heat_stress_metrics=hm,
+                )
+            )
+        elif crit == "stress":
+            r = router.find_route(G, start, end, "stress_cost")
+            seg = router.route_segment_costs(
+                G, r, profile_key, time_slot_key
+            )
+            hm = self._make_heat_stress_metrics(
+                G, r, profile_key, time_slot_key, routing_profile_key
+            )
+            routes_out.append(
+                self._build_route_response(
+                    start,
+                    end,
+                    profile_key,
+                    "stress",
+                    r,
+                    "stress_cost",
+                    "Минимальный транспортный стресс",
+                    graph=G,
+                    cost_override=seg["stress"],
+                    heat_stress_metrics=hm,
+                )
+            )
+        elif crit == "heat_stress":
+            if pref.delta > 0:
+                r = router.find_route_combined_with_turns(
+                    G,
+                    start,
+                    end,
+                    profile_key,
+                    time_slot_key,
+                    pref,
+                )
+            else:
+                r = router.find_route_combined(
+                    G,
+                    start,
+                    end,
+                    profile_key,
+                    time_slot_key,
+                    pref,
+                )
+            hm = self._make_heat_stress_metrics(
+                G, r, profile_key, time_slot_key, routing_profile_key
+            )
+            routes_out.append(
+                self._build_route_response(
+                    start,
+                    end,
+                    profile_key,
+                    "heat_stress",
+                    r,
+                    f"weight_{profile_key}_full",
+                    "Тепло и безопасность",
+                    graph=G,
+                    cost_override=hm.combined_cost,
+                    heat_stress_metrics=hm,
+                )
+            )
+        else:
+            raise ValueError(
+                f"Неизвестный критерий: {criterion!r}. "
+                f"Ожидалось heat, stress, heat_stress"
+            )
+
+        rs = router.find_route_safe(G, start, end, "length")
+        if rs is not None:
+            routes_out.append(
+                self._build_route_response(
+                    start,
+                    end,
+                    profile_key,
+                    "shortest",
+                    rs,
+                    f"weight_{profile_key}_full",
+                    "Кратчайший по карте (для сравнения)",
+                    graph=G,
+                )
+            )
+        return routes_out
+
+    def _compute_alternatives_criterion_once(
+        self,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        profile_key: str,
+        *,
+        criterion: str,
+        routing_profile_key: str,
+        time_slot_key: str,
+        green_enabled: bool,
+        corridor_buffer_meters: Optional[float],
+    ) -> List[RouteResponse]:
+        self._ensure_graph_for_corridor(
+            start,
+            end,
+            skip_satellite_green=not green_enabled,
+            corridor_buffer_meters=corridor_buffer_meters,
+        )
+        with self._graph_lock:
+            if not self._loaded or self._graph is None:
+                raise BikeRouterError("Граф не загружен. Вызовите warmup().")
+            G = self._graph
+            bounds = self._bounds
+        assert bounds is not None
+        self._validate_point_on_graph(G, bounds, start, "start")
+        self._validate_point_on_graph(G, bounds, end, "end")
+        return self._build_criterion_routes(
+            start,
+            end,
+            profile_key,
+            G,
+            criterion,
+            routing_profile_key,
+            time_slot_key,
+        )
+
     def compute_alternatives(
         self,
         start: Tuple[float, float],
@@ -1175,14 +1401,86 @@ class RouteEngine:
         profile_key: str,
         *,
         green_enabled: bool = True,
+        criterion: str = "default",
+        routing_profile_key: str = "balanced",
+        departure_time: Optional[str] = None,
+        time_slot_override: Optional[str] = None,
     ) -> AlternativesResponse:
-        """Несколько вариантов; green_enabled=False — 2 маршрута без спутника."""
+        """Несколько вариантов; green_enabled=False — 2 маршрута без спутника.
+
+        При ``criterion`` в {heat, stress, heat_stress} — новые режимы (тепло /
+        стресс / комбинация) с блоком ``heat_stress`` в ответе; кратчайший
+        добавляется для сравнения.
+        """
         profile = _PROFILE_MAP.get(profile_key)
         if profile is None:
             raise ValueError(
                 f"Неизвестный профиль: {profile_key!r}. "
                 f"Допустимые: {list(_PROFILE_MAP)}"
             )
+
+        crit = (criterion or "default").strip().lower()
+        if crit in ("heat", "stress", "heat_stress"):
+            slot_key = _resolve_time_slot_key(
+                departure_time, time_slot_override
+            )
+            inc_route_disk_miss()
+            logger.info(
+                "Alternatives: критерий=%s слот=%s routing_profile=%s",
+                crit,
+                slot_key,
+                routing_profile_key,
+            )
+            s = self._app.settings
+            if not s.use_dynamic_corridor_graph or s.corridor_buffer_meters <= 0:
+                routes_out = self._compute_alternatives_criterion_once(
+                    start,
+                    end,
+                    profile_key,
+                    criterion=crit,
+                    routing_profile_key=routing_profile_key,
+                    time_slot_key=slot_key,
+                    green_enabled=green_enabled,
+                    corridor_buffer_meters=None,
+                )
+            else:
+                base = float(s.corridor_buffer_meters)
+                extra = 0.0
+                attempt = 0
+                step = max(1.0, float(s.auto_expand_step_meters))
+                max_extra = max(0.0, float(s.auto_expand_max_meters))
+                max_attempts = max(1, int(s.auto_expand_max_attempts))
+                routes_out: List[RouteResponse] = []
+                while True:
+                    attempt += 1
+                    eff = base + extra
+                    try:
+                        routes_out = self._compute_alternatives_criterion_once(
+                            start,
+                            end,
+                            profile_key,
+                            criterion=crit,
+                            routing_profile_key=routing_profile_key,
+                            time_slot_key=slot_key,
+                            green_enabled=green_enabled,
+                            corridor_buffer_meters=eff,
+                        )
+                        break
+                    except RouteNotFoundError as e:
+                        at_attempts = attempt >= max_attempts
+                        at_extra_cap = extra + step > max_extra + 1e-6
+                        if at_attempts or at_extra_cap:
+                            _raise_route_not_found_after_corridor_expand(
+                                e,
+                                eff=eff,
+                                base=base,
+                                max_extra=max_extra,
+                                step=step,
+                                attempt=attempt,
+                                max_attempts=max_attempts,
+                            )
+                        extra += step
+            return AlternativesResponse(routes=routes_out)
 
         skip_sat = not green_enabled
         include_green = green_enabled

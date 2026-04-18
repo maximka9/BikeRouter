@@ -317,7 +317,7 @@ class GreenAnalyzer:
                 batch_cap = min(batch_cap, n_need)
 
             n_tg_cache = n_tg_compute = n_tg_fail = 0
-            n_ok_total = 0
+            jpeg_attempted = jpeg_delivered = 0
 
             if n_need > batch_cap:
                 logger.info(
@@ -341,12 +341,28 @@ class GreenAnalyzer:
                         min(start + batch_cap, n_need),
                         n_need,
                     )
-                tile_images, _ = self._tiles.download_batch(chunk_set, zoom)
-                n_ok = len(tile_images)
-                n_ok_total += n_ok
-                if n_ok < len(chunk_set):
+                if self._settings.cache_tile_analysis and not self._settings.force_recalculate:
+                    need_jpeg = {
+                        xy
+                        for xy in chunk_set
+                        if not self._tile_mask_cache_usable_without_image(
+                            xy[0], xy[1], zoom
+                        )
+                    }
+                else:
+                    need_jpeg = set(chunk_set)
+
+                if need_jpeg:
+                    tile_images, _ = self._tiles.download_batch(need_jpeg, zoom)
+                else:
+                    tile_images = {}
+
+                n_dl = len(tile_images)
+                jpeg_attempted += len(need_jpeg)
+                jpeg_delivered += n_dl
+                if need_jpeg and n_dl < len(need_jpeg):
                     self._satellite_warning = (
-                        f"Загружено спутниковых тайлов {n_ok_total} из {n_need} "
+                        f"Загружено спутниковых тайлов {jpeg_delivered} из {jpeg_attempted} "
                         f"(пакет {start // batch_cap + 1}); оценка озеленения может быть неполной."
                     )
                     logger.warning("%s", self._satellite_warning)
@@ -365,9 +381,13 @@ class GreenAnalyzer:
                 del tile_images
                 del part_masks
 
-            if n_ok_total < n_need and self._satellite_warning is None:
+            if (
+                jpeg_attempted > 0
+                and jpeg_delivered < jpeg_attempted
+                and self._satellite_warning is None
+            ):
                 self._satellite_warning = (
-                    f"Загружено спутниковых тайлов {n_ok_total} из {n_need}; "
+                    f"Загружено спутниковых тайлов {jpeg_delivered} из {jpeg_attempted}; "
                     "оценка озеленения по снимку может быть неполной."
                 )
                 logger.warning("%s", self._satellite_warning)
@@ -532,6 +552,14 @@ class GreenAnalyzer:
         sub = os.path.join(self._cache.cache_dir, "tile_green_masks")
         return os.path.join(sub, f"{key}.npz")
 
+    def _tile_mask_cache_usable_without_image(
+        self, tx: int, ty: int, zoom: int
+    ) -> bool:
+        """Есть ли файл маски — тогда JPEG не качаем (разбор .npz в воркере)."""
+        if not self._settings.cache_tile_analysis or self._settings.force_recalculate:
+            return False
+        return os.path.isfile(self._tile_mask_cache_path(tx, ty, zoom))
+
     def _load_green_tile_masks_npz(
         self, tx: int, ty: int, zoom: int
     ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
@@ -630,6 +658,13 @@ class GreenAnalyzer:
         workers = max(1, self._settings.tile_download_threads)
 
         def job(xy: Tuple[int, int]):
+            if (
+                self._settings.cache_tile_analysis
+                and not self._settings.force_recalculate
+            ):
+                cached = self._load_green_tile_masks_npz(xy[0], xy[1], zoom)
+                if cached is not None:
+                    return xy, cached, "cache"
             img = tile_images.get(xy)
             if img is None:
                 return xy, None, "fail"

@@ -12,6 +12,11 @@
 **Слой B (модель):** в ``meta.json`` дополнительно пишется ``routing_algo_fp`` для
 диагностики; маршрутизация и погода работают в runtime поверх уже загруженного графа.
 
+**Слой C (статическое озеленение арены):** ``cache/area_green_edges/<id>/green_edges.pkl``
+и sidecar ``meta.json`` — агрегация зелени по рёбрам один раз; fingerprint без
+погоды/профилей (см. :func:`area_green_edges_content_fingerprint`). Повторный
+precache подмешивает этот слой без повторной агрегации по коридору.
+
 Если изменилась только формула весов в ``graph.calculate_weights``, которая меняет
 сохранённые в GraphML поля, может понадобиться явная пересборка precache — это
 отдельно от hash статики.
@@ -40,6 +45,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AREA_PRECACHE_SCHEMA = "area_precache_v3"
+
+# Статический кэш агрегации зелени по рёбрам арены (без погоды/профилей).
+# Должен совпадать с префиксом в services/green.py (GREEN_EDGES_CACHE_SCHEMA не тот же объект).
+AREA_GREEN_EDGES_SCHEMA = "area_green_edges_v1"
+
+# Должен совпадать с services/green.TILE_VEG_MASK_VERSION (только для fingerprint).
+_TILE_VEG_MASK_VERSION_FP = "ndisexg_v2_tileval"
 
 _SAT_PHASE_STUB = "stub"
 _SAT_PHASE_FULL = "full"
@@ -159,6 +171,159 @@ def graph_green_path(settings: Settings) -> Path:
     return precache_area_dir(settings) / "graph_green.graphml"
 
 
+def area_green_edges_root(settings: Settings) -> Path:
+    return Path(settings.cache_dir) / "area_green_edges"
+
+
+def area_green_edges_arena_dir(settings: Settings) -> Path:
+    """``cache/area_green_edges/<id>/`` — тот же ``id``, что у ``area_precache/<id>/``."""
+    if not settings.has_precache_area_polygon:
+        raise ValueError("нет PRECACHE_AREA_POLYGON_WKT")
+    wkt = settings.precache_area_polygon_wkt_stripped
+    fp = area_static_content_fingerprint(settings)
+    aid = area_precache_directory_id(wkt, settings.precache_area_name, fp)
+    return area_green_edges_root(settings) / aid
+
+
+def area_green_edges_pkl_path(settings: Settings) -> Path:
+    return area_green_edges_arena_dir(settings) / "green_edges.pkl"
+
+
+def area_green_edges_bundle_meta_path(settings: Settings) -> Path:
+    """meta.json слоя area_green_edges (не путать с meta.json в area_precache)."""
+    return area_green_edges_arena_dir(settings) / "meta.json"
+
+
+def area_green_edges_content_fingerprint(settings: Settings) -> str:
+    """Отпечаток только пайплайна зелени (спутник, буфер, TMS, маски) — без scoring/погоды."""
+    payload = {
+        "analyze_corridor": settings.analyze_corridor,
+        "cache_tile_analysis": settings.cache_tile_analysis,
+        "disable_satellite_green": settings.disable_satellite_green,
+        "green_pixel_metric": "v1_sum_M_intersect",
+        "road_buffer_meters": settings.road_buffer_meters,
+        "satellite_zoom": settings.satellite_zoom,
+        "schema": AREA_GREEN_EDGES_SCHEMA,
+        "tile_mask_ver": _TILE_VEG_MASK_VERSION_FP,
+        "tms_server": settings.tms_server,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def load_area_green_edges_bundle_meta(
+    settings: Settings,
+) -> Optional[Dict[str, Any]]:
+    p = area_green_edges_bundle_meta_path(settings)
+    if not p.is_file():
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        logger.warning("area_green_edges: не удалось прочитать meta.json: %s", exc)
+        return None
+
+
+def area_green_edges_bundle_is_valid(
+    settings: Settings, edges_count: int
+) -> bool:
+    """Файлы на месте, fingerprint и число рёбер совпадают с ожиданием."""
+    meta = load_area_green_edges_bundle_meta(settings)
+    if not meta or meta.get("schema") != AREA_GREEN_EDGES_SCHEMA:
+        return False
+    if meta.get("fingerprint") != area_green_edges_content_fingerprint(settings):
+        return False
+    if int(meta.get("edge_count", -1)) != int(edges_count):
+        return False
+    pkl = area_green_edges_pkl_path(settings)
+    return pkl.is_file() and pkl.stat().st_size > 32
+
+
+def save_area_green_edges_bundle(
+    settings: Settings,
+    cache_service: Any,
+    records: Dict[Any, Any],
+    *,
+    edge_count: int,
+    green_fp: str,
+    green_edges_semantic_ok: int,
+    green_edges_quality_ok: bool,
+) -> None:
+    """Сохранить статический edge-cache зелени арены (pickle + sidecar meta)."""
+    d = area_green_edges_arena_dir(settings)
+    d.mkdir(parents=True, exist_ok=True)
+    pkl = area_green_edges_pkl_path(settings)
+    ok = cache_service.save(pkl.as_posix(), records)
+    if not ok:
+        logger.warning("area_green_edges: не удалось записать %s", pkl)
+        return
+    mp = area_green_edges_bundle_meta_path(settings)
+    tmp = mp.with_suffix(".json.tmp")
+    sidecar = {
+        "built_at_utc": datetime.now(timezone.utc).isoformat(),
+        "edge_count": int(edge_count),
+        "fingerprint": green_fp,
+        "green_edges_quality_ok": bool(green_edges_quality_ok),
+        "green_edges_semantic_ok_count": int(green_edges_semantic_ok),
+        "schema": AREA_GREEN_EDGES_SCHEMA,
+    }
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sidecar, f, ensure_ascii=False, indent=2)
+    tmp.replace(mp)
+    logger.info(
+        "area_green_edges: сохранён статический кэш (%d рёбер) в %s",
+        edge_count,
+        d,
+    )
+
+
+def persist_area_green_edges_if_snapshot(
+    application: "Application",
+) -> Dict[str, Any]:
+    """После полного ``calculate_satellite_batch``: записать ``area_green_edges`` и поля для precache meta."""
+    from ..services.green import normalize_edge_index_key
+
+    g = application.green
+    snap = getattr(g, "_last_edge_cache_snapshot", None)
+    if not snap:
+        return {}
+    s = application.settings
+    if not s.has_precache_area_polygon:
+        return {}
+    q = g.last_satellite_quality_report() or {}
+    edge_count = len(snap)
+    gfp = area_green_edges_content_fingerprint(s)
+    n_semantic = int(q.get("edges_semantic_ok", 0))
+    ok_qual = bool(
+        q.get("persistable_for_cache") and q.get("all_edges_semantic_ok", False)
+    )
+    norm = {normalize_edge_index_key(k): dict(v) for k, v in snap.items()}
+    save_area_green_edges_bundle(
+        s,
+        application.cache,
+        norm,
+        edge_count=edge_count,
+        green_fp=gfp,
+        green_edges_semantic_ok=n_semantic,
+        green_edges_quality_ok=ok_qual,
+    )
+    root = Path(s.cache_dir)
+    ar = area_green_edges_arena_dir(s)
+    try:
+        rel = str(ar.relative_to(root))
+    except ValueError:
+        rel = str(ar.name)
+    return {
+        "area_green_edges_fingerprint": gfp,
+        "area_green_edges_rel_path": rel,
+        "area_green_edges_schema": AREA_GREEN_EDGES_SCHEMA,
+        "green_edges_count": int(edge_count),
+        "green_edges_complete": True,
+        "green_edges_quality_ok": ok_qual,
+    }
+
+
 def load_meta(settings: Settings) -> Optional[Dict[str, Any]]:
     p = meta_path(settings)
     if not p.is_file():
@@ -191,6 +356,12 @@ def save_meta(
     invalid_tiles_rejected: int = 0,
     green_edges_semantic_ok_count: int = 0,
     green_from_valid_imagery: Optional[bool] = None,
+    area_green_edges_fingerprint: Optional[str] = None,
+    area_green_edges_rel_path: Optional[str] = None,
+    area_green_edges_schema: Optional[str] = None,
+    green_edges_count: Optional[int] = None,
+    green_edges_complete: Optional[bool] = None,
+    green_edges_quality_ok: Optional[bool] = None,
 ) -> None:
     d = precache_area_dir(settings)
     d.mkdir(parents=True, exist_ok=True)
@@ -235,6 +406,18 @@ def save_meta(
         "stages": stages,
         "wkt": wkt,
     }
+    if area_green_edges_fingerprint is not None:
+        payload["area_green_edges_fingerprint"] = area_green_edges_fingerprint
+    if area_green_edges_rel_path is not None:
+        payload["area_green_edges_rel_path"] = area_green_edges_rel_path
+    if area_green_edges_schema is not None:
+        payload["area_green_edges_schema"] = area_green_edges_schema
+    if green_edges_count is not None:
+        payload["green_edges_count"] = int(green_edges_count)
+    if green_edges_complete is not None:
+        payload["green_edges_complete"] = bool(green_edges_complete)
+    if green_edges_quality_ok is not None:
+        payload["green_edges_quality_ok"] = bool(green_edges_quality_ok)
     mp = meta_path(settings)
     tmp = mp.with_suffix(".json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -360,7 +543,9 @@ def _complete_green_only_from_base(application: "Application", geom: Any) -> Pat
         )
         return precache_area_dir(s)
 
-    logger.info("area_precache: доначитка спутниковой зелени с существующего graph_base…")
+    logger.info(
+        "area_precache: этап 2 — статическое озеленение (graph_green из graph_base)…"
+    )
     G_work = G.copy()
     e2 = gb.to_geodataframe(G_work)
     e2 = gb.upgrade_edges_satellite_weights(e2)
@@ -393,9 +578,10 @@ def _complete_green_only_from_base(application: "Application", geom: Any) -> Pat
     Gg.graph["bike_router_satellite_phase"] = _SAT_PHASE_FULL
     _save_graphml(Gg, graph_green_path(s))
     logger.info(
-        "area_precache: сохранён graph_green.graphml (%d узлов)",
+        "area_precache: этап 3 — сохранён graph_green.graphml (%d узлов)",
         Gg.number_of_nodes(),
     )
+    ag_meta = persist_area_green_edges_if_snapshot(application)
     save_meta(
         s,
         geom,
@@ -407,6 +593,12 @@ def _complete_green_only_from_base(application: "Application", geom: Any) -> Pat
         invalid_tiles_rejected=int(q.get("invalid_tiles_total", 0)),
         green_edges_semantic_ok_count=int(q.get("edges_semantic_ok", 0)),
         green_from_valid_imagery=True,
+        area_green_edges_fingerprint=ag_meta.get("area_green_edges_fingerprint"),
+        area_green_edges_rel_path=ag_meta.get("area_green_edges_rel_path"),
+        area_green_edges_schema=ag_meta.get("area_green_edges_schema"),
+        green_edges_count=ag_meta.get("green_edges_count"),
+        green_edges_complete=ag_meta.get("green_edges_complete"),
+        green_edges_quality_ok=ag_meta.get("green_edges_quality_ok"),
     )
     return precache_area_dir(s)
 
@@ -457,10 +649,10 @@ def build_area_precache(application: Application) -> Path:
     application.elevation.init(test_lat=mid_lat, test_lon=mid_lon)
 
     gb = application.graph_builder
-    logger.info("area_precache: загрузка OSM по полигону арены…")
+    logger.info("area_precache: этап 1 — загрузка OSM по полигону арены…")
     G = gb.load(geom)
     edges = gb.to_geodataframe(G)
-    logger.info("area_precache: расчёт весов phase1 (без спутниковой зелени)…")
+    logger.info("area_precache: этап 1 — расчёт весов phase1 (без спутниковой зелени)…")
     edges = gb.calculate_weights(edges, skip_satellite_green=True)
     G = gb.apply_weights(G, edges)
     G.graph["bike_router_satellite_phase"] = _SAT_PHASE_STUB
@@ -492,7 +684,9 @@ def build_area_precache(application: Application) -> Path:
             green_phase_pending=True,
             green_quality_state="incomplete",
         )
-        logger.info("area_precache: доначитка спутниковой зелени (как в runtime)…")
+        logger.info(
+            "area_precache: этап 2 — статическое озеленение (area_green_edges или полный спутник)…"
+        )
         G_work = G.copy()
         e2 = gb.to_geodataframe(G_work)
         e2 = gb.upgrade_edges_satellite_weights(e2)
@@ -526,9 +720,10 @@ def build_area_precache(application: Application) -> Path:
         _save_graphml(Gg, graph_green_path(s))
         has_green = True
         logger.info(
-            "area_precache: сохранён graph_green.graphml (%d узлов)",
+            "area_precache: этап 3 — сохранён graph_green.graphml (%d узлов)",
             Gg.number_of_nodes(),
         )
+        ag_meta = persist_area_green_edges_if_snapshot(application)
         save_meta(
             s,
             geom,
@@ -540,6 +735,12 @@ def build_area_precache(application: Application) -> Path:
             invalid_tiles_rejected=int(q.get("invalid_tiles_total", 0)),
             green_edges_semantic_ok_count=int(q.get("edges_semantic_ok", 0)),
             green_from_valid_imagery=True,
+            area_green_edges_fingerprint=ag_meta.get("area_green_edges_fingerprint"),
+            area_green_edges_rel_path=ag_meta.get("area_green_edges_rel_path"),
+            area_green_edges_schema=ag_meta.get("area_green_edges_schema"),
+            green_edges_count=ag_meta.get("green_edges_count"),
+            green_edges_complete=ag_meta.get("green_edges_complete"),
+            green_edges_quality_ok=ag_meta.get("green_edges_quality_ok"),
         )
     elif s.precache_area_use_green_graph and s.disable_satellite_green:
         logger.info(

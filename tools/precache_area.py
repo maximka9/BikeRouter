@@ -48,6 +48,10 @@ def main() -> int:
 
     _phase("precache_area: чтение Settings из .env…")
     s = Settings()
+    _phase(
+        "precache_area: этапы — (1) graph_base + phase1, "
+        "(2) area_green_edges / спутник, (3) graph_green — см. логи area_precache…"
+    )
     if not s.has_precache_area_polygon:
         logger.error(
             "Задайте PRECACHE_AREA_POLYGON_WKT в окружении или .env "

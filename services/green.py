@@ -46,6 +46,13 @@ def _edge_cache_covers_all_edges(
     return len(index_arr) > 0
 
 
+def normalize_edge_index_key(idx: Any) -> Any:
+    """Стабильный ключ ребра OSMnx (MultiIndex) для pickle между процессами."""
+    if isinstance(idx, tuple):
+        return tuple(np.asarray(x).item() for x in idx)
+    return np.asarray(idx).item()
+
+
 try:
     from PIL import Image, ImageDraw
 
@@ -82,6 +89,7 @@ class GreenAnalyzer:
         ] = OrderedDict()
         self._tile_mask_read_lru_max: int = 8192
         self._last_satellite_quality: Optional[Dict[str, Any]] = None
+        self._last_edge_cache_snapshot: Optional[Dict[Any, Any]] = None
 
     def consume_satellite_warning(self) -> Optional[str]:
         """Одноразово отдать предупреждение о неполных тайлах (режим green в ответе)."""
@@ -104,6 +112,89 @@ class GreenAnalyzer:
     def last_satellite_quality_report(self) -> Optional[Dict[str, Any]]:
         """Снимок качества для meta.json area precache (может быть None до первого расчёта)."""
         return self._last_satellite_quality
+
+    def try_apply_area_green_edges_cache(self, edges_gdf: gpd.GeoDataFrame) -> bool:
+        """Подставить зелёные признаки из ``cache/area_green_edges/.../green_edges.pkl`` без агрегации.
+
+        Возвращает True, если для текущего графа арены найден валидный статический кэш.
+        """
+        if not self._settings.has_precache_area_polygon:
+            return False
+        if (
+            not self._settings.cache_tile_analysis
+            or self._settings.disable_satellite_green
+            or self._settings.force_recalculate
+        ):
+            return False
+        from .area_graph_cache import (
+            AREA_GREEN_EDGES_SCHEMA,
+            area_green_edges_bundle_is_valid,
+            area_green_edges_content_fingerprint,
+            load_area_green_edges_bundle_meta,
+            area_green_edges_pkl_path,
+        )
+
+        n = len(edges_gdf)
+        if not area_green_edges_bundle_is_valid(self._settings, n):
+            return False
+        side = load_area_green_edges_bundle_meta(self._settings)
+        if not side or side.get("schema") != AREA_GREEN_EDGES_SCHEMA:
+            return False
+        if side.get("fingerprint") != area_green_edges_content_fingerprint(
+            self._settings
+        ):
+            return False
+
+        path = area_green_edges_pkl_path(self._settings).as_posix()
+        raw = self._cache.load(path)
+        if not isinstance(raw, dict) or not raw:
+            return False
+
+        trees_l: list = []
+        grass_l: list = []
+        total_l: list = []
+        n_semantic = 0
+        for idx in edges_gdf.index:
+            nk = normalize_edge_index_key(idx)
+            r = raw.get(nk)
+            if r is None:
+                r = raw.get(idx)  # type: ignore[arg-type]
+            if not isinstance(r, dict):
+                logger.info(
+                    "area_green_edges: нет записи для ребра %s — повторная агрегация",
+                    nk,
+                )
+                return False
+            trees_l.append(float(r.get("trees", 0.0)))
+            grass_l.append(float(r.get("grass", 0.0)))
+            total_l.append(float(r.get("total", 0.0)))
+            if _is_trustworthy_edge_record(r):
+                n_semantic += 1
+
+        edges_gdf["trees_percent"] = trees_l
+        edges_gdf["grass_percent"] = grass_l
+        edges_gdf["green_percent"] = total_l
+        self._apply_green_coefficients(edges_gdf)
+        buf_m = self._settings.road_buffer_meters
+        self._log_green_stats(edges_gdf, buf_m)
+
+        self._last_satellite_quality = {
+            "invalid_tiles_total": 0,
+            "n_tg_fail_total": 0,
+            "edges_semantic_ok": int(n_semantic),
+            "edges_total": int(n),
+            "persistable_for_cache": bool(side.get("green_edges_quality_ok", True)),
+            "all_edges_semantic_ok": n_semantic == n and n > 0,
+        }
+        self._satellite_warning = None
+        logger.info(
+            "Статический кэш area_green_edges: признаки рёбер загружены с диска "
+            "(%d рёбер, семантика ok=%d/%d)",
+            n,
+            n_semantic,
+            n,
+        )
+        return True
 
     # ==================================================================
     # Анализ изображений
@@ -261,8 +352,10 @@ class GreenAnalyzer:
                 "persistable_for_cache": False,
                 "all_edges_semantic_ok": False,
             }
+            self._last_edge_cache_snapshot = None
             return self._fill_empty_green(edges_gdf)
 
+        self._last_edge_cache_snapshot = None
         edge_tiles: dict = {}
         n_edges = len(edges_gdf)
         index_arr = edges_gdf.index.values
@@ -537,6 +630,12 @@ class GreenAnalyzer:
         edges_gdf["green_percent"] = total_l
         self._apply_green_coefficients(edges_gdf)
         self._log_green_stats(edges_gdf, buf_m)
+        if persistable:
+            self._last_edge_cache_snapshot = {
+                normalize_edge_index_key(k): dict(v) for k, v in edge_cache.items()
+            }
+        else:
+            self._last_edge_cache_snapshot = None
         return edges_gdf
 
     # ==================================================================

@@ -662,7 +662,12 @@ class GraphBuilder:
     def upgrade_edges_satellite_weights(
         self, edges_gdf: gpd.GeoDataFrame
     ) -> gpd.GeoDataFrame:
-        """Green-addon: только спутник + ``weight_*_green``; база и ``weight_*_full`` без изменений."""
+        """Green-addon: только спутник + ``weight_*_green``; база и ``weight_*_full`` без изменений.
+
+        При настроенной арене и валидном ``cache/area_green_edges/.../green_edges.pkl``
+        повторная агрегация зелени по коридору не выполняется — подмешиваются
+        сохранённые проценты, затем считаются только динамические веса и тепло/стресс.
+        """
         import time as _time
 
         t0 = _time.perf_counter()
@@ -675,7 +680,14 @@ class GraphBuilder:
             and not self._settings.disable_satellite_green
         )
         if use_satellite:
-            edges_gdf = self._green.calculate_satellite_batch(edges_gdf)
+            applied = (
+                self._settings.has_precache_area_polygon
+                and self._settings.cache_tile_analysis
+                and not self._settings.force_recalculate
+                and self._green.try_apply_area_green_edges_cache(edges_gdf)
+            )
+            if not applied:
+                edges_gdf = self._green.calculate_satellite_batch(edges_gdf)
         else:
             edges_gdf = self._green._fill_empty_green(edges_gdf)
         self.recompute_green_weights_only(edges_gdf)

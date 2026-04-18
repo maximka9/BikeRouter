@@ -32,6 +32,11 @@ def main() -> None:
     _ensure_pkg_path()
     from bike_router.config import Settings
     from bike_router.services.area_graph_cache import (
+        area_green_edges_bundle_is_valid,
+        area_green_edges_bundle_meta_path,
+        area_green_edges_content_fingerprint,
+        area_green_edges_pkl_path,
+        load_area_green_edges_bundle_meta,
         area_precache_directory_id,
         area_static_content_fingerprint,
         meta_path,
@@ -74,6 +79,25 @@ def main() -> None:
     gg = graph_green_path(s)
     print("graph_base.graphml:", "да" if gb.is_file() else "нет", f"({gb.name})")
     print("graph_green.graphml:", "да" if gg.is_file() else "нет", f"({gg.name})")
+    agm = area_green_edges_bundle_meta_path(s)
+    agp = area_green_edges_pkl_path(s)
+    ag_fp = area_green_edges_content_fingerprint(s)
+    ag_side = load_area_green_edges_bundle_meta(s)
+    ec_ag = int(ag_side.get("edge_count", -1)) if ag_side else -1
+    ag_ok = (
+        area_green_edges_bundle_is_valid(s, ec_ag)
+        if ec_ag >= 0
+        else (agm.is_file() and agp.is_file())
+    )
+    print()
+    print("Статический кэш зелени арены (area_green_edges), fingerprint пайплайна:")
+    print(" ", ag_fp)
+    print("area_green_edges meta.json:", "да" if agm.is_file() else "нет", f"({agm.name})")
+    print("area_green_edges green_edges.pkl:", "да" if agp.is_file() else "нет", f"({agp.name})")
+    print(
+        "валидность (размер/edge_count/fingerprint):",
+        "да" if ag_ok else "нет или неполно",
+    )
     print()
 
     root = precache_area_root(s)

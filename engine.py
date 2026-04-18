@@ -543,9 +543,9 @@ class RouteEngine:
             return False
         if not meta_matches_current(meta, s):
             logger.info(
-                "area_precache: fingerprint в meta.json не совпадает с текущими "
-                "настройками (zoom/buffer/TMS/ROUTING_ALGO_VERSION/…) — пересоберите "
-                "precache_area или выровняйте .env"
+                "area_precache: статический fingerprint в meta.json не совпадает "
+                "(полигон/OSM/zoom/TMS/буфер/зелень; schema area_precache_v3) — "
+                "пересоберите precache_area или выровняйте .env"
             )
             return False
         if not precache_area_is_complete(s):
@@ -627,8 +627,8 @@ class RouteEngine:
             return False
         if not meta_matches_current(meta, s):
             logger.info(
-                "Warmup: area_precache на диске не подходит: fingerprint в meta.json "
-                "не совпадает с текущими настройками. Удалите каталог %s или пересоберите кэш.",
+                "Warmup: area_precache на диске не подходит: статический fingerprint "
+                "или schema в meta.json не совпадают. Удалите каталог %s или пересоберите кэш.",
                 graph_base_path(s).parent,
             )
             return False

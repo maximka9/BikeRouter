@@ -2,6 +2,19 @@
 
 Используется при ``GRAPH_CORRIDOR_MODE=true``: если bbox запроса целиком внутри
 заранее подготовленного полигона, граф подгружается с диска без live Overpass.
+
+**Слой A (статический):** каталог ``area_precache/<hash>`` и поле ``fingerprint`` в
+``meta.json`` зависят только от :func:`area_static_content_fingerprint` — полигон
+(через WKT в id), OSM-фильтра, спутника (zoom, TMS, буферы), пайплайна зелени.
+Смена профилей balanced/safe, тепло/стресс, слотов, погоды и прочего scoring **не**
+должна менять этот hash (см. schema ``area_precache_v3``).
+
+**Слой B (модель):** в ``meta.json`` дополнительно пишется ``routing_algo_fp`` для
+диагностики; маршрутизация и погода работают в runtime поверх уже загруженного графа.
+
+Если изменилась только формула весов в ``graph.calculate_weights``, которая меняет
+сохранённые в GraphML поля, может понадобиться явная пересборка precache — это
+отдельно от hash статики.
 """
 
 from __future__ import annotations
@@ -19,29 +32,37 @@ import osmnx as ox
 from shapely.geometry import box
 from shapely.ops import unary_union
 
-from ..config import Settings, routing_engine_cache_fingerprint
-from .corridor_graph_cache import corridor_graph_cache_fingerprint
+from ..config import OSM_HIGHWAY_FILTER, Settings, routing_engine_cache_fingerprint
 
 if TYPE_CHECKING:
     from ..app import Application
 
 logger = logging.getLogger(__name__)
 
-AREA_PRECACHE_SCHEMA = "area_precache_v2"
+AREA_PRECACHE_SCHEMA = "area_precache_v3"
 
 _SAT_PHASE_STUB = "stub"
 _SAT_PHASE_FULL = "full"
 
 
-def area_precache_content_fingerprint(settings: Settings) -> str:
-    """Отпечаток логики весов и зелени для инвалидации каталога арены."""
+def area_static_content_fingerprint(settings: Settings) -> str:
+    """Статический отпечаток арены: OSM, спутник, буферы, пайплайн зелени.
+
+    Не включает ``routing_engine_cache_fingerprint`` (профили, тепло/стресс, слоты),
+    погоду и прочий runtime scoring — чтобы не пересобирать тайлы и OSM при смене
+    только модели маршрутизации.
+    """
     payload = {
-        "algo_fp": routing_engine_cache_fingerprint(),
         "analyze_corridor": settings.analyze_corridor,
+        "buffer_deg": settings.buffer,
         "cache_tile_analysis": settings.cache_tile_analysis,
-        "corridor_ctx": corridor_graph_cache_fingerprint(settings),
+        "corridor_buffer_m": settings.corridor_buffer_meters,
+        "corridor_cache_grid_step_deg": settings.corridor_cache_grid_step_deg,
         "disable_satellite_green": settings.disable_satellite_green,
         "force_recalculate": settings.force_recalculate,
+        "green_pixel_metric": "v1_sum_M_intersect",
+        "green_tile_batch_size": settings.green_tile_batch_size,
+        "osm_highway_filter": OSM_HIGHWAY_FILTER,
         "road_buffer_meters": settings.road_buffer_meters,
         "satellite_zoom": settings.satellite_zoom,
         "schema": AREA_PRECACHE_SCHEMA,
@@ -49,6 +70,11 @@ def area_precache_content_fingerprint(settings: Settings) -> str:
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def area_precache_content_fingerprint(settings: Settings) -> str:
+    """Историческое имя: то же, что :func:`area_static_content_fingerprint`."""
+    return area_static_content_fingerprint(settings)
 
 
 def area_precache_directory_id(

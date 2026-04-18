@@ -1056,6 +1056,7 @@ class RouteEngine:
             cost=round(cost, 1),
             routing_context=rc,
             weather=weather,
+            route_built_at_utc=datetime.now(timezone.utc).isoformat(),
             heat_cost_total=float(hm.total_heat_cost) if hm else 0.0,
             stress_cost_total=float(hm.stress_cost_total) if hm else 0.0,
             exposed_length_m=float(hm.exposed_high_length_m) if hm else 0.0,

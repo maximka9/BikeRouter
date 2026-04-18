@@ -543,6 +543,10 @@ class RouteResponse(BaseModel):
         default=0,
         description="Число значимых поворотов (дублирует heat_stress.turn_count при наличии)",
     )
+    route_built_at_utc: Optional[str] = Field(
+        default=None,
+        description="Момент построения этого варианта на сервере (UTC, ISO 8601); для UI «Построен: …»",
+    )
 
 
 class AlternativesResponse(BaseModel):

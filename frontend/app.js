@@ -69,7 +69,7 @@ const state = {
   mobileSheetDetailExpanded: false,
   /** Мобильная фаза input без маршрутов: false — низкая «полка», true — полная форма */
   mobileInputSheetExpanded: false,
-  /** Учёт озеленения (чекбокс + progressive 3-й маршрут) */
+  /** Озеленение всегда запрашивается с сервера (прогрессивный зелёный вариант). */
   greenEnabled: true,
   /** Критерий и параметры тепла/стресса (см. POST /alternatives/start) */
   criterion: 'default',
@@ -79,9 +79,6 @@ const state = {
   season: 'summer',
   airTemp: '',
   includeCriteriaBundle: false,
-  /** Погода: чекбокс и режим auto|manual */
-  weatherEnabled: false,
-  weatherMode: 'auto',
   /** Ответ criteria_bundle с сервера */
   criteriaBundle: null,
   /** pending=['green'] от API; сбрасывается при пустом pending или при mode===green в routes */
@@ -126,8 +123,6 @@ const dom = {
   startSuggest: $('#start-suggest'),
   endSuggest:   $('#end-suggest'),
   swapBtn:      $('#swap-btn'),
-  locateStartBtn: $('#locate-start-btn'),
-  clearPointsBtn: $('#clear-points-btn'),
   resetRouteBtn: $('#reset-route-btn'),
   buildBtn:     $('#build-btn'),
   buildText:    $('.build-text'),
@@ -147,7 +142,6 @@ const dom = {
   routeProgress: $('#route-progress'),
   routeProgressFill: $('#route-progress-fill'),
   resultsEmpty: $('#results-empty'),
-  mobileLocateBtn: $('#mobile-locate-btn'),
   mapHintToggle: $('#map-hint-toggle'),
   mapHintTooltip: $('#map-hint-tooltip'),
   mobileEditPointsBtn: $('#mobile-edit-points-btn'),
@@ -157,7 +151,6 @@ const dom = {
   mobileDetailTitle: $('#mobile-detail-title'),
   mobileDetailExpandBtn: $('#mobile-detail-expand-btn'),
   sheetHandle: $('#sheet-handle'),
-  greenEnabledCheckbox: $('#green-enabled-checkbox'),
   routingAdvancedDetails: $('#routing-advanced-details'),
   criterionSelect: $('#criterion-select'),
   routingProfileSelect: $('#routing-profile-select'),
@@ -169,16 +162,6 @@ const dom = {
   thermalFields: $('#thermal-fields'),
   seasonAirGroup: $('#season-air-group'),
   criteriaBundlePanel: $('#criteria-bundle-panel'),
-  weatherEnabledCheckbox: $('#weather-enabled-checkbox'),
-  weatherFields: $('#weather-fields'),
-  weatherModeSelect: $('#weather-mode-select'),
-  weatherDatetime: $('#weather-datetime'),
-  weatherManualFields: $('#weather-manual-fields'),
-  wxTemp: $('#wx-temp'),
-  wxPrecip: $('#wx-precip'),
-  wxWind: $('#wx-wind'),
-  wxCloud: $('#wx-cloud'),
-  wxHumid: $('#wx-humid'),
 };
 
 const MQ_MOBILE = typeof window !== 'undefined' ? window.matchMedia('(max-width: 768px)') : null;
@@ -449,38 +432,49 @@ function buildRouteContextStrip(route) {
   return `<p class="route-ctx-strip">${parts.map((t) => escHtml(t)).join(' · ')}</p>`;
 }
 
+/** Короткая дата/время для блока «Погода» (локальное время браузера). */
+function formatRouteBuiltShort(route) {
+  const iso =
+    (route && route.route_built_at_utc && String(route.route_built_at_utc).trim())
+    || (route && route.weather && route.weather.weather_time && String(route.weather.weather_time).trim())
+    || '';
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${dd}.${mm} ${hh}:${mi}`;
+}
+
 function buildWeatherAnalyticsHtml(route) {
   const w = route.weather;
-  if (!w || !w.enabled || typeof w !== 'object') return '';
-  const snap = w.snapshot && typeof w.snapshot === 'object' ? w.snapshot : {};
-  const mult = w.multipliers && typeof w.multipliers === 'object' ? w.multipliers : {};
+  const hasWx = w && w.enabled && typeof w === 'object';
+  const built = formatRouteBuiltShort(route);
+  const snap = hasWx && w.snapshot && typeof w.snapshot === 'object' ? w.snapshot : {};
   const rows = [];
-  if (w.source) {
-    rows.push(`<div class="analytics-row"><span>Источник погоды</span><span>${escHtml(String(w.source))}</span></div>`);
+  if (built) {
+    rows.push(`<div class="analytics-row"><span>Построен</span><span>${escHtml(built)}</span></div>`);
   }
-  if (snap.temperature_c != null && Number.isFinite(Number(snap.temperature_c))) {
-    rows.push(`<div class="analytics-row"><span>Температура</span><span>${Number(snap.temperature_c).toFixed(1)}°C</span></div>`);
+  if (hasWx) {
+    if (snap.temperature_c != null && Number.isFinite(Number(snap.temperature_c))) {
+      rows.push(`<div class="analytics-row"><span>Температура</span><span>${Number(snap.temperature_c).toFixed(1)}°C</span></div>`);
+    }
+    if (snap.precipitation_mm != null && Number.isFinite(Number(snap.precipitation_mm))) {
+      rows.push(`<div class="analytics-row"><span>Осадки</span><span>${Number(snap.precipitation_mm).toFixed(2)} мм/ч</span></div>`);
+    }
+    if (snap.wind_speed_ms != null && Number.isFinite(Number(snap.wind_speed_ms))) {
+      rows.push(`<div class="analytics-row"><span>Ветер</span><span>${Number(snap.wind_speed_ms).toFixed(1)} м/с</span></div>`);
+    }
+    if (snap.cloud_cover_pct != null && Number.isFinite(Number(snap.cloud_cover_pct))) {
+      rows.push(`<div class="analytics-row"><span>Облачность</span><span>${Number(snap.cloud_cover_pct).toFixed(0)}%</span></div>`);
+    }
+    if (snap.humidity_pct != null && Number.isFinite(Number(snap.humidity_pct))) {
+      rows.push(`<div class="analytics-row"><span>Влажность</span><span>${Number(snap.humidity_pct).toFixed(0)}%</span></div>`);
+    }
   }
-  if (snap.precipitation_mm != null && Number.isFinite(Number(snap.precipitation_mm))) {
-    rows.push(`<div class="analytics-row"><span>Осадки</span><span>${Number(snap.precipitation_mm).toFixed(2)} мм/ч</span></div>`);
-  }
-  if (snap.wind_speed_ms != null && Number.isFinite(Number(snap.wind_speed_ms))) {
-    rows.push(`<div class="analytics-row"><span>Ветер</span><span>${Number(snap.wind_speed_ms).toFixed(1)} м/с</span></div>`);
-  }
-  if (snap.cloud_cover_pct != null && Number.isFinite(Number(snap.cloud_cover_pct))) {
-    rows.push(`<div class="analytics-row"><span>Облачность</span><span>${Number(snap.cloud_cover_pct).toFixed(0)}%</span></div>`);
-  }
-  if (snap.humidity_pct != null && Number.isFinite(Number(snap.humidity_pct))) {
-    rows.push(`<div class="analytics-row"><span>Влажность</span><span>${Number(snap.humidity_pct).toFixed(0)}%</span></div>`);
-  }
-  const mk = ['physical', 'heat', 'green', 'stress', 'surface'];
-  const multParts = mk
-    .filter((k) => mult[k] != null && Number.isFinite(Number(mult[k])))
-    .map((k) => `${k}: ×${Number(mult[k]).toFixed(3)}`);
-  if (multParts.length) {
-    rows.push(`<div class="analytics-row weather-mult-row"><span>Множители</span><span>${escHtml(multParts.join(', '))}</span></div>`);
-  }
-  const sum = w.summary_ru ? `<p class="weather-summary">${escHtml(w.summary_ru)}</p>` : '';
+  const sum = hasWx && w.summary_ru ? `<p class="weather-summary">${escHtml(w.summary_ru)}</p>` : '';
   if (!rows.length && !sum) return '';
   return `<div class="route-analytics route-analytics-weather"><h4 class="analytics-title">Погода</h4>${rows.join('')}${sum}</div>`;
 }
@@ -585,15 +579,6 @@ function updateRoutingDetailsLayout() {
   }
 }
 
-function updateWeatherFormVisibility() {
-  const on = !!(dom.weatherEnabledCheckbox && dom.weatherEnabledCheckbox.checked);
-  if (dom.weatherFields) dom.weatherFields.classList.toggle('hidden', !on);
-  state.weatherEnabled = on;
-  const manual = on && dom.weatherModeSelect && dom.weatherModeSelect.value === 'manual';
-  if (dom.weatherManualFields) dom.weatherManualFields.classList.toggle('hidden', !manual);
-  state.weatherMode = dom.weatherModeSelect ? dom.weatherModeSelect.value : 'auto';
-}
-
 function updateRoutingAdvancedUi() {
   state.criterion = dom.criterionSelect ? dom.criterionSelect.value : 'default';
   state.routingProfile = dom.routingProfileSelect ? dom.routingProfileSelect.value : 'balanced';
@@ -607,7 +592,6 @@ function updateRoutingAdvancedUi() {
   }
   const hint = document.getElementById('criterion-hint');
   if (hint) hint.classList.toggle('hidden', c === 'default');
-  updateWeatherFormVisibility();
   updateRoutingDetailsLayout();
 }
 
@@ -617,7 +601,6 @@ function localDatetimeToIso(v) {
 }
 
 function buildAlternativesRequestBody() {
-  const greenEnabled = dom.greenEnabledCheckbox ? dom.greenEnabledCheckbox.checked : true;
   const slot = dom.timeSlotSelect && dom.timeSlotSelect.value.trim();
   let departureTime = null;
   if (dom.departureDatetime && dom.departureDatetime.value) {
@@ -627,11 +610,13 @@ function buildAlternativesRequestBody() {
     start: state.startCoords,
     end: state.endCoords,
     profile: state.profile,
-    green_enabled: greenEnabled,
+    green_enabled: true,
     criterion: state.criterion,
     routing_profile: state.routingProfile,
     season: dom.seasonSelect ? dom.seasonSelect.value : 'summer',
     include_criteria_bundle: !!(dom.criteriaBundleCheckbox && dom.criteriaBundleCheckbox.checked),
+    weather_mode: 'auto',
+    use_live_weather: true,
   };
   if (slot) {
     body.time_slot = slot;
@@ -642,35 +627,6 @@ function buildAlternativesRequestBody() {
   if (atRaw !== '') {
     const t = parseFloat(atRaw.replace(',', '.'));
     if (Number.isFinite(t)) body.air_temperature_c = t;
-  }
-
-  const wxOn = dom.weatherEnabledCheckbox && dom.weatherEnabledCheckbox.checked;
-  if (!wxOn) {
-    body.weather_mode = 'none';
-  } else {
-    const wm = dom.weatherModeSelect ? dom.weatherModeSelect.value : 'auto';
-    body.weather_mode = wm === 'manual' ? 'manual' : 'auto';
-    body.use_live_weather = wm !== 'manual';
-    if (dom.weatherDatetime && dom.weatherDatetime.value) {
-      body.weather_time = localDatetimeToIso(dom.weatherDatetime.value);
-    }
-    if (wm === 'manual') {
-      const optNum = (el) => {
-        if (!el || !String(el.value).trim()) return null;
-        const x = parseFloat(String(el.value).replace(',', '.'));
-        return Number.isFinite(x) ? x : null;
-      };
-      const t0 = optNum(dom.wxTemp);
-      const pr = optNum(dom.wxPrecip);
-      const wi = optNum(dom.wxWind);
-      const cc = optNum(dom.wxCloud);
-      const hu = optNum(dom.wxHumid);
-      if (t0 != null) body.temperature_c = t0;
-      if (pr != null) body.precipitation_mm = pr;
-      if (wi != null) body.wind_speed_ms = wi;
-      if (cc != null) body.cloud_cover_pct = cc;
-      if (hu != null) body.humidity_pct = hu;
-    }
   }
   return body;
 }
@@ -1158,14 +1114,6 @@ function hydrateStateFromUrl() {
     const ea = p.get('ea');
     if (sa) dom.startInput.value = sa;
     if (ea) dom.endInput.value = ea;
-    const g = p.get('green');
-    if (g === '0' || g === 'false') {
-      state.greenEnabled = false;
-      if (dom.greenEnabledCheckbox) dom.greenEnabledCheckbox.checked = false;
-    } else     if (g === '1' || g === 'true') {
-      state.greenEnabled = true;
-      if (dom.greenEnabledCheckbox) dom.greenEnabledCheckbox.checked = true;
-    }
     const cr = p.get('cr');
     if (cr && dom.criterionSelect) {
       const allowed = ['default', 'heat', 'stress', 'heat_stress'];
@@ -1233,10 +1181,6 @@ function syncUrlFromState() {
   if (state.routeList && state.routeList.length) {
     p.set('v', String(state.selectedVariantIndex));
   }
-  const ge =
-    dom.greenEnabledCheckbox && !dom.greenEnabledCheckbox.checked ? '0' : '1';
-  if (ge === '0') p.set('green', '0');
-
   if (dom.criterionSelect && dom.criterionSelect.value && dom.criterionSelect.value !== 'default') {
     p.set('cr', dom.criterionSelect.value);
   }
@@ -1579,51 +1523,11 @@ function setPoint(type, lat, lon) {
   if (!urlSyncSuppressed) syncUrlFromState();
 }
 
-function clearAllPoints() {
-  clearUrlParams();
-  if (markers.start) { markers.start.remove(); markers.start = null; }
-  if (markers.end) { markers.end.remove(); markers.end = null; }
-  state.startCoords = null;
-  state.endCoords = null;
-  dom.startInput.value = '';
-  dom.endInput.value = '';
-  closeSuggest(dom.startSuggest);
-  closeSuggest(dom.endSuggest);
-  clearRoutes();
-  updateBuildBtn();
-}
-
 function resetRouteOnly() {
   state.routes = null;
   clearRoutes();
   updateBuildBtn();
   syncUrlFromState();
-}
-
-function useMyLocationForStart() {
-  if (!navigator.geolocation) {
-    showError('Геолокация не поддерживается браузером');
-    return;
-  }
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      const { latitude, longitude } = pos.coords;
-      state.activeInput = 'start';
-      setPoint('start', latitude, longitude);
-      reverseGeocode(latitude, longitude, 'start');
-      if (map) {
-        map.flyTo({
-          center: [longitude, latitude],
-          zoom: Math.max(map.getZoom(), 15),
-          duration: 800,
-        });
-      }
-    },
-    () => {
-      showError('Не удалось получить координаты. Разрешите доступ к геолокации.');
-    },
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 },
-  );
 }
 
 function swapPoints() {
@@ -1699,8 +1603,7 @@ async function buildRoute() {
   if (!state.startCoords || !state.endCoords || state.loading) return;
 
   const fetchSeq = ++state.routeFetchSeq;
-  const greenEnabled = dom.greenEnabledCheckbox ? dom.greenEnabledCheckbox.checked : true;
-  state.greenEnabled = greenEnabled;
+  state.greenEnabled = true;
   syncUrlFromState();
 
   setLoading(true);
@@ -1777,7 +1680,7 @@ async function buildRoute() {
     syncUrlFromState();
 
     state.jobPendingGreen =
-      greenEnabled && !!(body.pending && body.pending.includes('green'));
+      !!(body.pending && body.pending.includes('green'));
     const pendingGreen = state.jobPendingGreen && body.job_id;
     if (pendingGreen) {
       setLoading(false);
@@ -2116,19 +2019,14 @@ function renderRouteDetailCard(route, routes, idx) {
   const title = escHtml(variantDisplayTitle(route));
   const analyticsHtml = buildRouteAnalyticsBlocks(route);
   const compact = isMobileLayout();
-  const greenOff = !state.greenEnabled;
   const diffBlock = Array.isArray(routes)
     ? (compact ? renderVariantDiffMobile(route, routes, idx) : renderVariantDiff(route, routes, idx))
     : '';
-  const greenSrvNote = greenOff
+  const greenSrvNote = !serverSatelliteGreenEnabled
     ? `<div class="detail-row span-2 green-satellite-off">
-        <p class="green-satellite-off-text">Учёт озеленения отключён — метрики зелени по снимкам для этого запроса не использовались.</p>
-      </div>`
-    : !serverSatelliteGreenEnabled
-      ? `<div class="detail-row span-2 green-satellite-off">
         <p class="green-satellite-off-text">Озеленение по снимкам на сервере выключено (<code>DISABLE_SATELLITE_GREEN</code>). Ниже — нули-заглушки; режим «С учётом озеленения» совпадает с энергетическим по весам.</p>
       </div>`
-      : '';
+    : '';
 
   if (compact) {
     const moreInner = `
@@ -2137,8 +2035,8 @@ function renderRouteDetailCard(route, routes, idx) {
       <div class="detail-grid">
         <div class="detail-row">
           <span class="d-label">Деревья (средн.)</span>
-          <span class="d-val">${greenOff ? '—' : `${g.avg_trees_pct.toFixed(1)}%`}</span>
-          ${!greenOff && !serverSatelliteGreenEnabled ? '<span class="d-note">снимки выкл.</span>' : ''}
+          <span class="d-val">${g.avg_trees_pct.toFixed(1)}%</span>
+          ${!serverSatelliteGreenEnabled ? '<span class="d-note">снимки выкл.</span>' : ''}
         </div>
       </div>
     `;
@@ -2165,7 +2063,7 @@ function renderRouteDetailCard(route, routes, idx) {
         </div>
         <div class="detail-row">
           <span class="d-label">Зелень</span>
-          <span class="d-val" style="color:var(--green)">${greenOff ? '—' : `${g.percent.toFixed(1)}%`}</span>
+          <span class="d-val" style="color:var(--green)">${g.percent.toFixed(1)}%</span>
         </div>
       </div>
       <details class="mobile-route-more">
@@ -2199,13 +2097,13 @@ function renderRouteDetailCard(route, routes, idx) {
       ${greenSrvNote}
       <div class="detail-row">
         <span class="d-label">Озеленение</span>
-        <span class="d-val" style="color:var(--green)">${greenOff ? '—' : `${g.percent.toFixed(1)}%`}</span>
-        <span class="d-note">${greenOff ? 'не учитывалось в запросе' : `доля «зелёных» рёбер${!serverSatelliteGreenEnabled ? ' (снимки выкл.)' : ''}`}</span>
+        <span class="d-val" style="color:var(--green)">${g.percent.toFixed(1)}%</span>
+        <span class="d-note">доля «зелёных» рёбер${!serverSatelliteGreenEnabled ? ' (снимки выкл.)' : ''}</span>
       </div>
       <div class="detail-row">
         <span class="d-label">Деревья (средн.)</span>
-        <span class="d-val">${greenOff ? '—' : `${g.avg_trees_pct.toFixed(1)}%`}</span>
-        ${!greenOff && !serverSatelliteGreenEnabled ? '<span class="d-note">анализ спутниковых тайлов отключён на сервере</span>' : ''}
+        <span class="d-val">${g.avg_trees_pct.toFixed(1)}%</span>
+        ${!serverSatelliteGreenEnabled ? '<span class="d-note">анализ спутниковых тайлов отключён на сервере</span>' : ''}
       </div>
     </div>
   `;
@@ -2270,8 +2168,6 @@ function updateResetRouteBtnVisibility() {
 }
 
 function setToolbarDisabled(on) {
-  if (dom.locateStartBtn) dom.locateStartBtn.disabled = on;
-  if (dom.clearPointsBtn) dom.clearPointsBtn.disabled = on;
   if (dom.resetRouteBtn) dom.resetRouteBtn.disabled = on;
 }
 
@@ -2397,8 +2293,6 @@ function setupEvents() {
   }
   dom.buildBtn.addEventListener('click', buildRoute);
 
-  if (dom.locateStartBtn) dom.locateStartBtn.addEventListener('click', useMyLocationForStart);
-  if (dom.clearPointsBtn) dom.clearPointsBtn.addEventListener('click', clearAllPoints);
   if (dom.resetRouteBtn) dom.resetRouteBtn.addEventListener('click', resetRouteOnly);
   if (dom.fitRoutesBtn) dom.fitRoutesBtn.addEventListener('click', fitAllRoutesInView);
 
@@ -2412,28 +2306,6 @@ function setupEvents() {
       updateTripStatus();
     });
   });
-
-  if (dom.greenEnabledCheckbox) {
-    dom.greenEnabledCheckbox.addEventListener('change', () => {
-      state.greenEnabled = dom.greenEnabledCheckbox.checked;
-      syncUrlFromState();
-    });
-  }
-  if (dom.weatherEnabledCheckbox) {
-    dom.weatherEnabledCheckbox.addEventListener('change', () => {
-      updateWeatherFormVisibility();
-      syncUrlFromState();
-    });
-  }
-  if (dom.weatherModeSelect) {
-    dom.weatherModeSelect.addEventListener('change', () => {
-      updateWeatherFormVisibility();
-      syncUrlFromState();
-    });
-  }
-  if (dom.weatherDatetime) {
-    dom.weatherDatetime.addEventListener('change', () => syncUrlFromState());
-  }
 
   if (dom.criterionSelect) {
     dom.criterionSelect.addEventListener('change', () => {
@@ -2532,9 +2404,6 @@ function setupEvents() {
     });
   }
 
-  if (dom.mobileLocateBtn) {
-    dom.mobileLocateBtn.addEventListener('click', () => useMyLocationForStart());
-  }
   if (dom.mobileEditPointsBtn) {
     dom.mobileEditPointsBtn.addEventListener('click', () => mobileEditPoints());
   }

@@ -7,7 +7,7 @@
 
   <!-- MapLibre и шрифты с того же origin — иначе на LAN/мобильной сети вкладка может «вечно» ждать unpkg/Google Fonts -->
   <link href="/static/vendor/maplibre/maplibre-gl.css?v=20260430-1" rel="stylesheet">
-  <link href="/static/style.css?v=20260430-12" rel="stylesheet">
+  <link href="/static/style.css?v=20260418-ui" rel="stylesheet">
 </head>
 <body>
 
@@ -77,10 +77,6 @@
         </div>
         <button type="button" class="addr-search-btn" data-field="end" title="Найти адрес" aria-label="Найти адрес куда">Найти</button>
       </div>
-      <div class="addr-toolbar">
-        <button type="button" id="locate-start-btn" class="toolbar-btn" title="Поставить старт в текущие координаты">Моё местоположение</button>
-        <button type="button" id="clear-points-btn" class="toolbar-btn toolbar-btn-muted" title="Убрать обе точки и начать заново">Очистить точки</button>
-      </div>
     </div>
   </section>
 
@@ -90,38 +86,6 @@
     <div class="toggle-group" id="profile-toggle">
       <button class="toggle-btn active" data-value="cyclist">🚴 Велосипедист</button>
       <button class="toggle-btn" data-value="pedestrian">🚶 Пешеход</button>
-    </div>
-    <label class="green-enabled-label">
-      <input type="checkbox" id="green-enabled-checkbox" checked />
-      <span>Учитывать озеленение</span>
-    </label>
-    <p class="geocode-hint green-enabled-hint">Выключите, чтобы построить только два варианта (кратчайший и по энергии) без спутника и без маршрута «с учётом озеленения».</p>
-
-    <label class="green-enabled-label">
-      <input type="checkbox" id="weather-enabled-checkbox" />
-      <span>Учитывать погоду</span>
-    </label>
-    <div id="weather-fields" class="weather-fields hidden">
-      <label class="field-label" for="weather-mode-select">Режим погоды</label>
-      <select id="weather-mode-select" class="field-control">
-        <option value="auto">Авто (Open-Meteo по координатам и времени)</option>
-        <option value="manual">Вручную</option>
-      </select>
-      <label class="field-label" for="weather-datetime">Время для погоды (необязательно)</label>
-      <input type="datetime-local" id="weather-datetime" class="field-control" autocomplete="off" />
-      <p class="geocode-hint">Если пусто — используется время выезда или текущий момент на сервере.</p>
-      <div id="weather-manual-fields" class="weather-manual-fields hidden">
-        <label class="field-label" for="wx-temp">Температура °C</label>
-        <input type="number" id="wx-temp" class="field-control" inputmode="decimal" step="0.1" placeholder="20" />
-        <label class="field-label" for="wx-precip">Осадки мм/ч</label>
-        <input type="number" id="wx-precip" class="field-control" inputmode="decimal" step="0.1" placeholder="0" />
-        <label class="field-label" for="wx-wind">Ветер м/с</label>
-        <input type="number" id="wx-wind" class="field-control" inputmode="decimal" step="0.1" placeholder="3" />
-        <label class="field-label" for="wx-cloud">Облачность %</label>
-        <input type="number" id="wx-cloud" class="field-control" inputmode="decimal" step="1" placeholder="50" />
-        <label class="field-label" for="wx-humid">Влажность %</label>
-        <input type="number" id="wx-humid" class="field-control" inputmode="decimal" step="1" placeholder="60" />
-      </div>
     </div>
 
     <details id="routing-advanced-details" class="panel routing-advanced-details" open>
@@ -231,7 +195,6 @@
     <button type="button" class="map-context-menu-item" role="menuitem" data-which="end">Точка сюда</button>
   </div>
   <div class="map-overlay-ui">
-    <button type="button" id="mobile-locate-btn" class="mobile-map-fab" title="Моё местоположение" aria-label="Поставить старт в текущие координаты">📍</button>
     <div id="map-legend" class="map-legend hidden" aria-hidden="true"></div>
     <button type="button" id="fit-routes-btn" class="map-fit-btn" disabled title="Показать все построенные варианты в кадре">Показать весь маршрут</button>
   </div>
@@ -244,6 +207,6 @@
 </div>
 
 <script src="/static/vendor/maplibre/maplibre-gl.js?v=20260430-1"></script>
-<script src="/static/app.js?v=20260430-13"></script>
+<script src="/static/app.js?v=20260418-ui"></script>
 </body>
 </html>

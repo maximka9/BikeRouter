@@ -7,7 +7,7 @@
 
   <!-- MapLibre и шрифты с того же origin — иначе на LAN/мобильной сети вкладка может «вечно» ждать unpkg/Google Fonts -->
   <link href="/static/vendor/maplibre/maplibre-gl.css?v=20260430-1" rel="stylesheet">
-  <link href="/static/style.css?v=20260430-11" rel="stylesheet">
+  <link href="/static/style.css?v=20260430-12" rel="stylesheet">
 </head>
 <body>
 
@@ -96,6 +96,58 @@
       <span>Учитывать озеленение</span>
     </label>
     <p class="geocode-hint green-enabled-hint">Выключите, чтобы построить только два варианта (кратчайший и по энергии) без спутника и без маршрута «с учётом озеленения».</p>
+
+    <details id="routing-advanced-details" class="panel routing-advanced-details" open>
+      <summary class="routing-advanced-summary">Тепло и безопасность</summary>
+      <div class="routing-advanced-body">
+        <label class="field-label" for="criterion-select">Критерий маршрута</label>
+        <select id="criterion-select" class="field-control" aria-describedby="criterion-hint">
+          <option value="default">Обычный (как раньше)</option>
+          <option value="heat">Минимальная тепловая нагрузка</option>
+          <option value="stress">Минимальный транспортный стресс</option>
+          <option value="heat_stress">Тепло и безопасность (комбинированно)</option>
+        </select>
+        <p id="criterion-hint" class="geocode-hint routing-field-hint">Для тепловых режимов укажите время или слот суток.</p>
+
+        <label class="field-label" for="routing-profile-select">Профиль предпочтений</label>
+        <select id="routing-profile-select" class="field-control">
+          <option value="balanced">Сбалансированный</option>
+          <option value="safe">Безопасность</option>
+          <option value="cool">Прохлада</option>
+          <option value="sport">Спорт</option>
+        </select>
+
+        <div id="thermal-fields" class="thermal-fields hidden">
+          <label class="field-label" for="departure-datetime">Время отправления</label>
+          <input type="datetime-local" id="departure-datetime" class="field-control" autocomplete="off" />
+
+          <label class="field-label" for="time-slot-select">Временной слот</label>
+          <select id="time-slot-select" class="field-control">
+            <option value="">— не задан (из времени выезда) —</option>
+            <option value="morning">Утро</option>
+            <option value="noon">Полдень</option>
+            <option value="evening">Вечер</option>
+            <option value="night">Ночь</option>
+          </select>
+
+          <div id="season-air-group" class="season-air-group">
+            <label class="field-label" for="season-select">Сезон</label>
+            <select id="season-select" class="field-control">
+              <option value="summer">Лето</option>
+              <option value="spring_autumn">Весна или осень</option>
+            </select>
+
+            <label class="field-label" for="air-temp-input">Температура воздуха, °C</label>
+            <input type="number" id="air-temp-input" class="field-control" inputmode="decimal" step="0.1" placeholder="необязательно" />
+          </div>
+        </div>
+
+        <label class="field-label checkbox-label">
+          <input type="checkbox" id="criteria-bundle-checkbox" />
+          <span>Сравнить критерии (несколько вариантов в одном ответе)</span>
+        </label>
+      </div>
+    </details>
   </section>
   </div><!-- .mobile-step-scroll -->
 
@@ -114,6 +166,7 @@
 
   <!-- Результаты: несколько вариантов маршрута -->
   <section id="results" class="results hidden" aria-hidden="true">
+    <div id="criteria-bundle-panel" class="criteria-bundle-panel hidden" aria-live="polite"></div>
     <div id="results-empty" class="results-empty hidden" aria-hidden="true"></div>
     <div class="mobile-results-nav mobile-only">
       <button type="button" id="mobile-edit-points-btn" class="mobile-text-btn">Точки</button>
@@ -164,6 +217,6 @@
 </div>
 
 <script src="/static/vendor/maplibre/maplibre-gl.js?v=20260430-1"></script>
-<script src="/static/app.js?v=20260430-12"></script>
+<script src="/static/app.js?v=20260430-13"></script>
 </body>
 </html>

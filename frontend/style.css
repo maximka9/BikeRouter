@@ -1628,4 +1628,181 @@ div.desktop-only { display: block; }
   .mobile-map-fab {
     display: none !important;
   }
+
+  .routing-advanced-details {
+    border: none;
+    padding: 0;
+    margin-top: 10px;
+  }
+  .routing-advanced-details > summary.routing-advanced-summary {
+    display: none;
+  }
+  .routing-advanced-details > .routing-advanced-body {
+    padding: 0;
+  }
+}
+
+/* Тепло / безопасность — форма */
+.routing-advanced-details {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+}
+
+.routing-advanced-summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text);
+  list-style: none;
+  padding: 4px 0;
+}
+
+.routing-advanced-summary::-webkit-details-marker {
+  display: none;
+}
+
+.routing-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-sec);
+  margin-top: 4px;
+}
+
+.field-control {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  background: #fff;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  margin-top: 6px;
+}
+
+.checkbox-label input {
+  margin-top: 3px;
+}
+
+.routing-field-hint {
+  margin-top: -4px !important;
+}
+
+.season-air-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Аналитика в карточке */
+.route-analytics-wrap {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  background: #f1f5f9;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.route-ctx-strip {
+  font-size: 12px;
+  color: var(--text-sec);
+  margin-bottom: 8px;
+  line-height: 1.45;
+}
+
+.route-analytics {
+  margin-top: 10px;
+}
+
+.route-analytics:first-of-type {
+  margin-top: 0;
+}
+
+.analytics-title {
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.analytics-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.analytics-row span:first-child {
+  color: var(--text-sec);
+}
+
+.analytics-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+/* Сравнение критериев */
+.criteria-bundle-panel {
+  margin-bottom: 14px;
+  padding: 12px;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: var(--radius);
+}
+
+.criteria-bundle-panel.hidden {
+  display: none;
+}
+
+.criteria-bundle-title {
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.criteria-bundle-table-wrap {
+  overflow-x: auto;
+}
+
+.criteria-bundle-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.criteria-bundle-table th,
+.criteria-bundle-table td {
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.criteria-bundle-table thead th {
+  background: #fef3c7;
+  font-weight: 600;
+}
+
+.criteria-bundle-hint {
+  font-size: 11px;
+  color: var(--text-sec);
+  margin-top: 8px;
+  line-height: 1.4;
 }

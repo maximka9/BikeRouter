@@ -28,6 +28,8 @@ class JobRecord:
     pending: List[str] = field(default_factory=list)
     error: Optional[Dict[str, Any]] = None
     green_warning: Optional[str] = None
+    """Сериализованный criteria_bundle (JSON-маршруты по ключам критериев)."""
+    criteria_bundle: Optional[Dict[str, List[Dict[str, Any]]]] = None
     created_at: float = field(default_factory=time.time)
     mut: threading.Lock = field(default_factory=threading.Lock)
 

@@ -124,12 +124,41 @@ class AlternativesRequest(BaseModel):
 
 
 class AlternativesStartRequest(BaseModel):
-    """Старт progressive-расчёта (два маршрута сразу, зелёный в фоне при green_enabled)."""
+    """Старт progressive-расчёта (два маршрута сразу, зелёный в фоне при green_enabled).
+
+    Поля тепла/стресса совпадают с :class:`AlternativesRequest` — передаются в движок,
+    если не используется только ускоренная фаза 1 (классические варианты + зелёный в фоне).
+    """
 
     start: LatLon
     end: LatLon
     profile: ProfileEnum = ProfileEnum.cyclist
     green_enabled: bool = True
+    criterion: RoutingCriterionEnum = Field(
+        RoutingCriterionEnum.default,
+        description="Критерий построения (как в POST /alternatives)",
+    )
+    routing_profile: RoutingPreferenceEnum = Field(
+        RoutingPreferenceEnum.balanced,
+        description="Профиль предпочтений тепло/безопасность",
+    )
+    departure_time: Optional[str] = Field(
+        default=None,
+        description="ISO 8601 локального времени выезда",
+    )
+    time_slot: Optional[str] = Field(
+        default=None,
+        description="Явный слот (важнее departure_time, если задан)",
+    )
+    season: SeasonEnum = Field(SeasonEnum.summer, description="Сезон для множителя тепла")
+    air_temperature_c: Optional[float] = Field(
+        default=None,
+        description="Температура воздуха °C (опционально)",
+    )
+    include_criteria_bundle: bool = Field(
+        default=False,
+        description="Сравнение нескольких критериев в ответе",
+    )
 
 
 class AlternativesStartResponse(BaseModel):
@@ -143,6 +172,10 @@ class AlternativesStartResponse(BaseModel):
         default_factory=list,
         description="Например [\"green\"] пока считается третий вариант",
     )
+    criteria_bundle: Optional[Dict[str, List["RouteResponse"]]] = Field(
+        default=None,
+        description="При include_criteria_bundle — набор маршрутов по критериям",
+    )
 
 
 class AlternativesJobResponse(BaseModel):
@@ -154,6 +187,10 @@ class AlternativesJobResponse(BaseModel):
     green_warning: Optional[str] = Field(
         default=None,
         description="Если зелёный маршрут не удалось добавить",
+    )
+    criteria_bundle: Optional[Dict[str, List["RouteResponse"]]] = Field(
+        default=None,
+        description="Сравнение критериев (если было в запросе)",
     )
 
 

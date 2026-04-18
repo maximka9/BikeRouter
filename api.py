@@ -19,7 +19,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import requests
 from fastapi import FastAPI, HTTPException, Query
@@ -59,6 +59,37 @@ from .services.geocoding import GeocodingService
 logger = logging.getLogger(__name__)
 reqlog = logging.getLogger("bike_router.alternatives")
 routelog = logging.getLogger("bike_router.routing")
+
+
+def _serialize_criteria_bundle(
+    bundle: Optional[Dict[str, List[RouteResponse]]],
+) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    if not bundle:
+        return None
+    return {
+        k: [r.model_dump(mode="json") for r in lst]
+        for k, lst in bundle.items()
+    }
+
+
+def _parse_stored_criteria_bundle(
+    raw: Optional[Dict[str, List[Dict[str, Any]]]],
+) -> Optional[Dict[str, List[RouteResponse]]]:
+    if not raw:
+        return None
+    return {
+        k: [RouteResponse.model_validate(x) for x in lst]
+        for k, lst in raw.items()
+    }
+
+
+def _use_progressive_phase1(req: AlternativesStartRequest) -> bool:
+    """Ускоренная фаза: кратчайший + энергия, зелёный в фоне (без тепловых критериев)."""
+    return (
+        req.green_enabled
+        and req.criterion.value == "default"
+        and not req.include_criteria_bundle
+    )
 
 
 def _run_green_job_thread(
@@ -355,67 +386,121 @@ async def alternatives(req: AlternativesRequest):
     tags=["Routing"],
 )
 async def alternatives_start(req: AlternativesStartRequest):
-    """Сначала 1–2 маршрута; при ``green_enabled`` в фоне добавляется зелёный."""
+    """Сначала 1–2 маршрута или полный расчёт; при необходимости зелёный в фоне."""
     job_id = new_job_id()
     t0 = time.perf_counter()
     st = (req.start.lat, req.start.lon)
     en = (req.end.lat, req.end.lon)
     pk = req.profile.value
-    reqlog.info("alternatives_start job_id=%s green_enabled=%s", job_id, req.green_enabled)
+    reqlog.info(
+        "alternatives_start job_id=%s green=%s criterion=%s criteria_bundle=%s",
+        job_id,
+        req.green_enabled,
+        req.criterion.value,
+        req.include_criteria_bundle,
+    )
     try:
-        if not req.green_enabled:
-            out = engine.compute_alternatives(st, en, pk, green_enabled=False)
+        if _use_progressive_phase1(req):
+            routes_phase1 = engine.compute_alternatives_phase1_two_routes(st, en, pk)
             ms = (time.perf_counter() - t0) * 1000
             reqlog.info(
-                "alternatives_start job_id=%s sync_done routes=%d duration_ms=%.1f",
+                "alternatives_start job_id=%s phase1 routes=%d duration_ms=%.1f",
                 job_id,
-                len(out.routes),
+                len(routes_phase1),
                 ms,
             )
             alternatives_job_store.create(
                 job_id,
                 JobRecord(
                     job_id=job_id,
-                    status="done",
-                    routes=[r.model_dump(mode="json") for r in out.routes],
-                    pending=[],
-                ),
-            )
-            return AlternativesStartResponse(
-                job_id=job_id,
-                status="done",
-                routes=list(out.routes),
-                pending=[],
-            )
-
-        routes_phase1 = engine.compute_alternatives_phase1_two_routes(st, en, pk)
-        ms = (time.perf_counter() - t0) * 1000
-        reqlog.info(
-            "alternatives_start job_id=%s partial routes=%d duration_ms=%.1f",
-            job_id,
-            len(routes_phase1),
-            ms,
-        )
-        alternatives_job_store.create(
-            job_id,
-                JobRecord(
-                    job_id=job_id,
                     status=AJS.RUNNING_GREEN.value,
                     routes=[r.model_dump(mode="json") for r in routes_phase1],
                     pending=["green"],
+                    criteria_bundle=None,
                 ),
+            )
+            threading.Thread(
+                target=_run_green_job_thread,
+                args=(job_id, st, en, pk),
+                name=f"alt-green-{job_id[:8]}",
+                daemon=True,
+            ).start()
+            return AlternativesStartResponse(
+                job_id=job_id,
+                status=AJS.RUNNING_GREEN.value,
+                routes=routes_phase1,
+                pending=["green"],
+                criteria_bundle=None,
+            )
+
+        out = engine.compute_alternatives(
+            start=st,
+            end=en,
+            profile_key=pk,
+            green_enabled=req.green_enabled,
+            criterion=req.criterion.value,
+            routing_profile_key=req.routing_profile.value,
+            departure_time=req.departure_time,
+            time_slot_override=req.time_slot,
+            season=req.season.value,
+            air_temperature_c=req.air_temperature_c,
+            include_criteria_bundle=req.include_criteria_bundle,
         )
-        threading.Thread(
-            target=_run_green_job_thread,
-            args=(job_id, st, en, pk),
-            name=f"alt-green-{job_id[:8]}",
-            daemon=True,
-        ).start()
+        routes = list(out.routes)
+        cb = out.criteria_bundle
+        cb_dump = _serialize_criteria_bundle(cb)
+        ms = (time.perf_counter() - t0) * 1000
+        reqlog.info(
+            "alternatives_start job_id=%s sync routes=%d duration_ms=%.1f",
+            job_id,
+            len(routes),
+            ms,
+        )
+
+        has_green = any(getattr(r, "mode", "") == "green" for r in routes)
+        needs_green_thread = bool(req.green_enabled and not has_green)
+
+        if needs_green_thread:
+            alternatives_job_store.create(
+                job_id,
+                JobRecord(
+                    job_id=job_id,
+                    status=AJS.RUNNING_GREEN.value,
+                    routes=[r.model_dump(mode="json") for r in routes],
+                    pending=["green"],
+                    criteria_bundle=cb_dump,
+                ),
+            )
+            threading.Thread(
+                target=_run_green_job_thread,
+                args=(job_id, st, en, pk),
+                name=f"alt-green-{job_id[:8]}",
+                daemon=True,
+            ).start()
+            return AlternativesStartResponse(
+                job_id=job_id,
+                status=AJS.RUNNING_GREEN.value,
+                routes=routes,
+                pending=["green"],
+                criteria_bundle=cb,
+            )
+
+        alternatives_job_store.create(
+            job_id,
+            JobRecord(
+                job_id=job_id,
+                status="done",
+                routes=[r.model_dump(mode="json") for r in routes],
+                pending=[],
+                criteria_bundle=cb_dump,
+            ),
+        )
         return AlternativesStartResponse(
             job_id=job_id,
-            status=AJS.RUNNING_GREEN.value,
-            routes=routes_phase1,
-            pending=["green"],
+            status="done",
+            routes=routes,
+            pending=[],
+            criteria_bundle=cb,
         )
     except BikeRouterError as exc:
         ms = (time.perf_counter() - t0) * 1000
@@ -455,7 +540,9 @@ async def alternatives_job_status(job_id: str):
         status = rec.status
         err = rec.error
         gw = rec.green_warning
+        cb_stored = rec.criteria_bundle
     routes = [RouteResponse.model_validate(x) for x in routes_raw]
+    criteria_bundle = _parse_stored_criteria_bundle(cb_stored)
     if status in (AJS.DONE.value, AJS.FAILED.value, AJS.RUNNING_GREEN.value):
         reqlog.debug(
             "alternatives_job poll job_id=%s status=%s routes=%d pending=%s",
@@ -478,6 +565,7 @@ async def alternatives_job_status(job_id: str):
         pending=pending,
         error=ErrorDetail.model_validate(err) if err else None,
         green_warning=gw,
+        criteria_bundle=criteria_bundle,
     )
 
 

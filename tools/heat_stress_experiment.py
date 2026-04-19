@@ -5,7 +5,7 @@
     python -m bike_router.tools.heat_stress_experiment
 
 По умолчанию читает координаты из .env (START_LAT, …) и вызывает
-``RouteEngine.compute_alternatives`` для нескольких критериев и слотов времени.
+``RouteEngine.compute_alternatives`` (единый ответ со всеми вариантами) по слотам времени.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 
 def _ensure_pkg_path() -> None:
@@ -34,57 +34,37 @@ def main() -> None:
     eng.warmup()
 
     slots = ["morning", "noon", "evening"]
-    criteria: List[Tuple[str, str]] = [
-        ("default", "balanced"),
-        ("heat", "cool"),
-        ("stress", "safe"),
-        ("heat_stress", "safe"),
-    ]
 
     rows: List[Dict[str, Any]] = []
-    for crit, rprof in criteria:
-        for slot in slots:
-            try:
-                if crit == "default":
-                    out = eng.compute_alternatives(
-                        start,
-                        end,
-                        "cyclist",
-                        green_enabled=True,
-                    )
-                else:
-                    out = eng.compute_alternatives(
-                        start,
-                        end,
-                        "cyclist",
-                        green_enabled=True,
-                        criterion=crit,
-                        routing_profile_key=rprof,
-                        time_slot_override=slot,
-                    )
-                for r in out.routes:
-                    hs = r.heat_stress
-                    rows.append(
-                        {
-                            "criterion": crit,
-                            "time_slot": slot,
-                            "routing_profile": rprof,
-                            "mode": r.mode,
-                            "length_m": r.length_m,
-                            "heat_total": hs.total_heat_cost if hs else None,
-                            "avg_lts": hs.avg_stress_lts if hs else None,
-                            "combined": hs.combined_cost if hs else None,
-                            "turns": hs.turn_count if hs else None,
-                        }
-                    )
-            except Exception as exc:
+    for slot in slots:
+        try:
+            out = eng.compute_alternatives(
+                start,
+                end,
+                "cyclist",
+                green_enabled=True,
+                time_slot_override=slot,
+            )
+            for r in out.routes:
+                hs = r.heat_stress
                 rows.append(
                     {
-                        "criterion": crit,
                         "time_slot": slot,
-                        "error": str(exc),
+                        "mode": r.mode,
+                        "length_m": r.length_m,
+                        "heat_total": hs.total_heat_cost if hs else None,
+                        "avg_lts": hs.avg_stress_lts if hs else None,
+                        "combined": hs.combined_cost if hs else None,
+                        "turns": hs.turn_count if hs else None,
                     }
                 )
+        except Exception as exc:
+            rows.append(
+                {
+                    "time_slot": slot,
+                    "error": str(exc),
+                }
+            )
 
     print(json.dumps(rows, ensure_ascii=False, indent=2))
 

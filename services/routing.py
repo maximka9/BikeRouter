@@ -12,6 +12,7 @@ import networkx as nx
 import osmnx as ox
 
 from ..config import (
+    MAX_ROUTE_GRADIENT_DISPLAY,
     ModeProfile,
     RoutingPreferenceProfile,
     TURN_ANGLE_THRESHOLD_DEG,
@@ -69,9 +70,14 @@ def _edge_gradient_abs_raw(edge_data: dict) -> float:
     return abs(float(raw or 0.0))
 
 
+def _edge_gradient_abs_capped(edge_data: dict) -> float:
+    """Доля 0…1 для UI и агрегатов: обрезка выбросов DEM на коротких рёбрах."""
+    return min(_edge_gradient_abs_raw(edge_data), float(MAX_ROUTE_GRADIENT_DISPLAY))
+
+
 def _edge_gradient_abs_for_display(edge_data: dict) -> float:
-    """Уклон для отображения вдоль маршрута (сырое значение, без искусственного 49%)."""
-    return _edge_gradient_abs_raw(edge_data)
+    """Уклон для подписей сегментов и статистики (см. ``MAX_ROUTE_GRADIENT_DISPLAY``)."""
+    return _edge_gradient_abs_capped(edge_data)
 
 
 def coerce_edge_weight_numeric(val: Any, *, fallback: float = float("inf")) -> float:
@@ -974,7 +980,7 @@ class RouteService:
 
         for i in range(route.edge_count):
             d = G.edges[route.edges[i]]
-            g = _edge_gradient_abs_raw(d)
+            g = _edge_gradient_abs_capped(d)
             grads.append(g)
             climb += d.get("edge_climb", 0.0)
             descent += d.get("edge_descent", 0.0)

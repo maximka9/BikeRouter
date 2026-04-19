@@ -47,15 +47,15 @@ def main() -> None:
                 end,
                 "cyclist",
                 green_enabled=True,
-                criterion="heat_stress",
-                routing_profile_key="balanced",
                 time_slot_override="noon",
-                season="summer",
                 weather_mode="manual",
                 use_live_weather=False,
                 **wx,
             )
-            r0 = out.routes[0] if out.routes else None
+            r0 = next(
+                (r for r in out.routes if r.mode == "heat_stress"),
+                out.routes[0] if out.routes else None,
+            )
             hs = r0.heat_stress if r0 else None
             g = r0.green if r0 else None
             rows.append(

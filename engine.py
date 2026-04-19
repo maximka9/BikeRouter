@@ -1942,13 +1942,9 @@ class RouteEngine:
         profile_key: str,
         *,
         green_enabled: bool = True,
-        criterion: str = "default",
-        routing_profile_key: str = "balanced",
         departure_time: Optional[str] = None,
         time_slot_override: Optional[str] = None,
-        season: str = "summer",
         air_temperature_c: Optional[float] = None,
-        include_criteria_bundle: bool = False,
         weather_mode: str = "none",
         use_live_weather: bool = False,
         weather_time: Optional[str] = None,
@@ -1960,13 +1956,9 @@ class RouteEngine:
     ) -> AlternativesResponse:
         """Все доступные варианты сразу: кратчайший, энергия, зелёный, тепло, стресс, тепло+безопасность.
 
-        Поля ``criterion``, ``routing_profile_key``, ``include_criteria_bundle`` и
-        ``season`` из запроса сохраняются для совместимости API, но не задают отдельный
-        пользовательский режим: внутри всегда используется профиль предпочтений
-        ``balanced``,         ответ без ``criteria_bundle``.
+        Внутри для тепло/стресс комбинаций используется профиль предпочтений
+        ``balanced`` (см. ``routing_preference_profile`` в config).
         """
-        _ = (criterion, routing_profile_key, include_criteria_bundle, season)
-
         profile = _PROFILE_MAP.get(profile_key)
         if profile is None:
             raise ValueError(

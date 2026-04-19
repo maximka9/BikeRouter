@@ -296,13 +296,9 @@ async def alternatives(req: AlternativesRequest):
             end=(req.end.lat, req.end.lon),
             profile_key=req.profile.value,
             green_enabled=req.green_enabled,
-            criterion=req.criterion.value,
-            routing_profile_key=req.routing_profile.value,
             departure_time=req.departure_time,
             time_slot_override=req.time_slot,
-            season=req.season.value,
             air_temperature_c=req.air_temperature_c,
-            include_criteria_bundle=req.include_criteria_bundle,
             weather_mode=req.weather_mode,
             use_live_weather=req.use_live_weather,
             weather_time=req.weather_time,
@@ -397,11 +393,9 @@ async def alternatives_start(req: AlternativesStartRequest):
     en = (req.end.lat, req.end.lon)
     pk = req.profile.value
     reqlog.info(
-        "alternatives_start job_id=%s green=%s criterion=%s criteria_bundle=%s",
+        "alternatives_start job_id=%s green=%s",
         job_id,
         req.green_enabled,
-        req.criterion.value,
-        req.include_criteria_bundle,
     )
     try:
         if _use_progressive_phase1(req):
@@ -442,13 +436,9 @@ async def alternatives_start(req: AlternativesStartRequest):
             end=en,
             profile_key=pk,
             green_enabled=req.green_enabled,
-            criterion=req.criterion.value,
-            routing_profile_key=req.routing_profile.value,
             departure_time=req.departure_time,
             time_slot_override=req.time_slot,
-            season=req.season.value,
             air_temperature_c=req.air_temperature_c,
-            include_criteria_bundle=req.include_criteria_bundle,
             weather_mode=req.weather_mode,
             use_live_weather=req.use_live_weather,
             weather_time=req.weather_time,

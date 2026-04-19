@@ -27,22 +27,6 @@ class ModeEnum(str, Enum):
     shortest = "shortest"
 
 
-class RoutingCriterionEnum(str, Enum):
-    """Критерий построения (расширение к существующим режимам)."""
-
-    default = "default"
-    heat = "heat"
-    stress = "stress"
-    heat_stress = "heat_stress"
-
-
-class RoutingPreferenceEnum(str, Enum):
-    balanced = "balanced"
-    safe = "safe"
-    cool = "cool"
-    sport = "sport"
-
-
 class SeasonEnum(str, Enum):
     """Сезон для температурного множителя (см. policies/heat_season.json)."""
 
@@ -93,14 +77,6 @@ class AlternativesRequest(BaseModel):
         True,
         description="False — только кратчайший и энергетический, без спутника и без зелёного маршрута",
     )
-    criterion: RoutingCriterionEnum = Field(
-        RoutingCriterionEnum.default,
-        description="default — как раньше (2–3 варианта); heat | stress | heat_stress — новые критерии",
-    )
-    routing_profile: RoutingPreferenceEnum = Field(
-        RoutingPreferenceEnum.balanced,
-        description="Предпочтения тепло/безопасность (коэффициенты в config)",
-    )
     departure_time: Optional[str] = Field(
         default=None,
         description="ISO 8601 локального времени, напр. 2026-07-15T13:00:00 — выбор теплового слота",
@@ -116,10 +92,6 @@ class AlternativesRequest(BaseModel):
     air_temperature_c: Optional[float] = Field(
         default=None,
         description="Опционально: температура воздуха °C для поправки тепловой модели",
-    )
-    include_criteria_bundle: bool = Field(
-        default=False,
-        description="Если true — в ответе criteria_bundle со сравнением нескольких критериев",
     )
     weather_mode: str = Field(
         default="none",
@@ -141,24 +113,12 @@ class AlternativesRequest(BaseModel):
 
 
 class AlternativesStartRequest(BaseModel):
-    """Старт progressive-расчёта (два маршрута сразу, зелёный в фоне при green_enabled).
-
-    Поля тепла/стресса совпадают с :class:`AlternativesRequest` — передаются в движок,
-    если не используется только ускоренная фаза 1 (классические варианты + зелёный в фоне).
-    """
+    """Запрос на расчёт набора маршрутов (см. :class:`AlternativesRequest`)."""
 
     start: LatLon
     end: LatLon
     profile: ProfileEnum = ProfileEnum.cyclist
     green_enabled: bool = True
-    criterion: RoutingCriterionEnum = Field(
-        RoutingCriterionEnum.default,
-        description="Критерий построения (как в POST /alternatives)",
-    )
-    routing_profile: RoutingPreferenceEnum = Field(
-        RoutingPreferenceEnum.balanced,
-        description="Профиль предпочтений тепло/безопасность",
-    )
     departure_time: Optional[str] = Field(
         default=None,
         description="ISO 8601 локального времени выезда",
@@ -171,10 +131,6 @@ class AlternativesStartRequest(BaseModel):
     air_temperature_c: Optional[float] = Field(
         default=None,
         description="Температура воздуха °C (опционально)",
-    )
-    include_criteria_bundle: bool = Field(
-        default=False,
-        description="Сравнение нескольких критериев в ответе",
     )
     weather_mode: str = Field(default="none")
     use_live_weather: bool = False
@@ -227,8 +183,14 @@ class ElevationMetrics(BaseModel):
 
     climb_m: float = Field(..., description="Суммарный набор высоты (м)")
     descent_m: float = Field(..., description="Суммарный спуск (м)")
-    max_gradient_pct: float = Field(..., description="Макс. уклон (%)")
-    avg_gradient_pct: float = Field(..., description="Средний уклон (%)")
+    max_gradient_pct: float = Field(
+        ...,
+        description="Макс. уклон по рёбрам (%), с обрезкой выбросов DEM (см. MAX_ROUTE_GRADIENT_DISPLAY)",
+    )
+    avg_gradient_pct: float = Field(
+        ...,
+        description="Средний |уклон| по рёбрам (%), с той же обрезкой",
+    )
     max_above_start_m: float = Field(
         ..., description="Макс. подъём относительно старта (м)"
     )
@@ -311,7 +273,7 @@ class RoutingContextMeta(BaseModel):
     routing_profile: str = ""
     criterion: str = Field(
         default="",
-        description="Критерий построения: default | heat | stress | heat_stress",
+        description="Служебная метка режима построения (например heat, full)",
     )
     air_temperature_c: Optional[float] = None
     heat_context_multiplier: float = 1.0
@@ -365,7 +327,10 @@ class HeatStressMetrics(BaseModel):
 
     time_slot: str = Field(default="", description="morning | noon | evening | night")
     season: str = Field(default="summer", description="summer | spring_autumn")
-    routing_profile: str = Field(default="", description="balanced | safe | cool | sport")
+    routing_profile: str = Field(
+        default="",
+        description="Ключ профиля α/β/γ/δ в config (внутренняя воспроизводимость)",
+    )
     total_heat_cost: float = Field(
         default=0.0,
         description="Суммарная тепловая стоимость с учётом κ (сезон/T)",

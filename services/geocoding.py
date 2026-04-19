@@ -49,23 +49,52 @@ class NominatimProvider(GeocodingProvider):
 
     BASE = "https://nominatim.openstreetmap.org"
     HEADERS = {"User-Agent": "bike-router/3.0 (student-thesis-project)"}
+    # viewbox: west, north, east, south (Самара и окрестности) — приоритет выдачи
+    _SAMARA_VIEWBOX = "49.70,53.45,50.75,52.85"
+    _SAMARA_LAT = 53.195878
+    _SAMARA_LON = 50.151612
 
     def forward(self, query: str, limit: int) -> List[GeocodingResult]:
         resp = requests.get(
             f"{self.BASE}/search",
-            params={"q": query, "format": "jsonv2", "limit": limit},
+            params={
+                "q": query,
+                "format": "jsonv2",
+                "limit": limit,
+                "countrycodes": "ru",
+                "viewbox": self._SAMARA_VIEWBOX,
+                "bounded": "0",
+                "dedupe": "1",
+                "addressdetails": "1",
+            },
             headers=self.HEADERS,
             timeout=10,
         )
         resp.raise_for_status()
-        return [
+        raw = resp.json()
+        out = [
             GeocodingResult(
                 lat=float(r["lat"]),
                 lon=float(r["lon"]),
                 display_name=r.get("display_name", ""),
             )
-            for r in resp.json()
+            for r in raw
         ]
+        return self._prioritize_samara(out)
+
+    @classmethod
+    def _prioritize_samara(cls, results: List[GeocodingResult]) -> List[GeocodingResult]:
+        """Самара в названии и ближе к центру города — выше в списке."""
+
+        def key(r: GeocodingResult) -> Tuple[int, float]:
+            name = (r.display_name or "").lower()
+            in_city = 0 if ("самара" in name or "samara" in name) else 1
+            dlat = r.lat - cls._SAMARA_LAT
+            dlon = r.lon - cls._SAMARA_LON
+            dist2 = dlat * dlat + dlon * dlon
+            return (in_city, dist2)
+
+        return sorted(results, key=key)
 
     def reverse(self, lat: float, lon: float) -> Optional[GeocodingResult]:
         resp = requests.get(

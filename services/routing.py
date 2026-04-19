@@ -12,7 +12,6 @@ import networkx as nx
 import osmnx as ox
 
 from ..config import (
-    MAX_ROUTE_GRADIENT_DISPLAY,
     ModeProfile,
     RoutingPreferenceProfile,
     TURN_ANGLE_THRESHOLD_DEG,
@@ -62,13 +61,17 @@ def effective_edge_components(
     return phys_eff, heat_eff, st_eff
 
 
-def _edge_gradient_abs_for_display(edge_data: dict) -> float:
-    """Физический уклон ребра для UI: ``gradient_raw``, иначе ``gradient``; не выше порога."""
+def _edge_gradient_abs_raw(edge_data: dict) -> float:
+    """Максимальный уклон по реальному ``gradient_raw`` (без клипа 50% для весов)."""
     raw = edge_data.get("gradient_raw")
     if raw is None:
         raw = edge_data.get("gradient", 0.0)
-    g = abs(float(raw or 0.0))
-    return min(g, MAX_ROUTE_GRADIENT_DISPLAY)
+    return abs(float(raw or 0.0))
+
+
+def _edge_gradient_abs_for_display(edge_data: dict) -> float:
+    """Уклон для отображения вдоль маршрута (сырое значение, без искусственного 49%)."""
+    return _edge_gradient_abs_raw(edge_data)
 
 
 def coerce_edge_weight_numeric(val: Any, *, fallback: float = float("inf")) -> float:
@@ -971,7 +974,7 @@ class RouteService:
 
         for i in range(route.edge_count):
             d = G.edges[route.edges[i]]
-            g = _edge_gradient_abs_for_display(d)
+            g = _edge_gradient_abs_raw(d)
             grads.append(g)
             climb += d.get("edge_climb", 0.0)
             descent += d.get("edge_descent", 0.0)

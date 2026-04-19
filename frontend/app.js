@@ -74,10 +74,6 @@ const state = {
   /** Критерий и параметры тепла/стресса (см. POST /alternatives/start) */
   criterion: 'default',
   routingProfile: 'balanced',
-  departureDatetime: '',
-  timeSlot: '',
-  season: 'summer',
-  airTemp: '',
   includeCriteriaBundle: false,
   /** Ответ criteria_bundle с сервера */
   criteriaBundle: null,
@@ -88,6 +84,9 @@ const state = {
 };
 
 const N_ROUTE_LAYERS = 3;
+/** Задержка перед запросом подсказок геокодера (мс). */
+const GEO_SUGGEST_DEBOUNCE_MS = 320;
+const geoSuggestTimers = { start: null, end: null };
 
 const markers = { start: null, end: null };
 let map;
@@ -154,13 +153,7 @@ const dom = {
   routingAdvancedDetails: $('#routing-advanced-details'),
   criterionSelect: $('#criterion-select'),
   routingProfileSelect: $('#routing-profile-select'),
-  departureDatetime: $('#departure-datetime'),
-  timeSlotSelect: $('#time-slot-select'),
-  seasonSelect: $('#season-select'),
-  airTempInput: $('#air-temp-input'),
   criteriaBundleCheckbox: $('#criteria-bundle-checkbox'),
-  thermalFields: $('#thermal-fields'),
-  seasonAirGroup: $('#season-air-group'),
   criteriaBundlePanel: $('#criteria-bundle-panel'),
 };
 
@@ -392,91 +385,31 @@ function variantDisplayTitle(route) {
   return raw || 'Вариант';
 }
 
-function slotLabelRu(key) {
-  const k = {
-    morning: 'утро',
-    noon: 'полдень',
-    evening: 'вечер',
-    night: 'ночь',
-  };
-  return k[key] || key || '';
-}
-
-function seasonLabelRu(s) {
-  if (s === 'spring_autumn') return 'весна или осень';
-  if (s === 'summer') return 'лето';
-  return s || '';
-}
-
-function routingProfileLabelRu(p) {
-  const m = {
-    balanced: 'сбалансированный',
-    safe: 'безопасность',
-    cool: 'прохлада',
-    sport: 'спорт',
-  };
-  return m[p] || p || '';
-}
-
 function buildRouteContextStrip(route) {
   const rc = route.routing_context;
   if (!rc || typeof rc !== 'object') return '';
-  const parts = [];
-  if (rc.time_slot) parts.push(`время суток: ${slotLabelRu(rc.time_slot)}`);
-  if (rc.season) parts.push(`сезон: ${seasonLabelRu(rc.season)}`);
-  if (rc.air_temperature_c != null && Number.isFinite(Number(rc.air_temperature_c))) {
-    parts.push(`температура: ${Number(rc.air_temperature_c).toFixed(0)}°C`);
+  if (rc.criterion && String(rc.criterion).trim()) {
+    const c = String(rc.criterion).trim();
+    const labels = {
+      default: 'критерий: обычный',
+      heat: 'критерий: тепловой комфорт',
+      stress: 'критерий: минимальный стресс',
+      heat_stress: 'критерий: тепло и безопасность',
+    };
+    const line = labels[c] || `критерий: ${c}`;
+    return `<p class="route-ctx-strip">${escHtml(line)}</p>`;
   }
-  if (rc.routing_profile) parts.push(`профиль: ${routingProfileLabelRu(rc.routing_profile)}`);
-  if (!parts.length) return '';
-  return `<p class="route-ctx-strip">${parts.map((t) => escHtml(t)).join(' · ')}</p>`;
-}
-
-/** Короткая дата/время для блока «Погода» (локальное время браузера). */
-function formatRouteBuiltShort(route) {
-  const iso =
-    (route && route.route_built_at_utc && String(route.route_built_at_utc).trim())
-    || (route && route.weather && route.weather.weather_time && String(route.weather.weather_time).trim())
-    || '';
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mi = String(d.getMinutes()).padStart(2, '0');
-  return `${dd}.${mm} ${hh}:${mi}`;
+  return '';
 }
 
 function buildWeatherAnalyticsHtml(route) {
   const w = route.weather;
   const hasWx = w && w.enabled && typeof w === 'object';
-  const built = formatRouteBuiltShort(route);
-  const snap = hasWx && w.snapshot && typeof w.snapshot === 'object' ? w.snapshot : {};
-  const rows = [];
-  if (built) {
-    rows.push(`<div class="analytics-row"><span>Построен</span><span>${escHtml(built)}</span></div>`);
-  }
-  if (hasWx) {
-    if (snap.temperature_c != null && Number.isFinite(Number(snap.temperature_c))) {
-      rows.push(`<div class="analytics-row"><span>Температура</span><span>${Number(snap.temperature_c).toFixed(1)}°C</span></div>`);
-    }
-    if (snap.precipitation_mm != null && Number.isFinite(Number(snap.precipitation_mm))) {
-      rows.push(`<div class="analytics-row"><span>Осадки</span><span>${Number(snap.precipitation_mm).toFixed(2)} мм/ч</span></div>`);
-    }
-    if (snap.wind_speed_ms != null && Number.isFinite(Number(snap.wind_speed_ms))) {
-      rows.push(`<div class="analytics-row"><span>Ветер</span><span>${Number(snap.wind_speed_ms).toFixed(1)} м/с</span></div>`);
-    }
-    if (snap.cloud_cover_pct != null && Number.isFinite(Number(snap.cloud_cover_pct))) {
-      rows.push(`<div class="analytics-row"><span>Облачность</span><span>${Number(snap.cloud_cover_pct).toFixed(0)}%</span></div>`);
-    }
-    if (snap.humidity_pct != null && Number.isFinite(Number(snap.humidity_pct))) {
-      rows.push(`<div class="analytics-row"><span>Влажность</span><span>${Number(snap.humidity_pct).toFixed(0)}%</span></div>`);
-    }
-  }
-  const sum = hasWx && w.summary_ru ? `<p class="weather-summary">${escHtml(w.summary_ru)}</p>` : '';
-  if (!rows.length && !sum) return '';
-  return `<div class="route-analytics route-analytics-weather"><h4 class="analytics-title">Погода</h4>${rows.join('')}${sum}</div>`;
+  const text = hasWx && w.summary_ru ? String(w.summary_ru).trim() : '';
+  if (!text) return '';
+  const lines = text.split(/\n+/).map((ln) => ln.trim()).filter(Boolean);
+  const body = lines.map((ln) => `<p class="weather-summary-line">${escHtml(ln)}</p>`).join('');
+  return `<div class="route-analytics route-analytics-weather"><h4 class="analytics-title">Погода</h4>${body}</div>`;
 }
 
 function buildThermalAnalyticsHtml(route) {
@@ -582,53 +515,21 @@ function updateRoutingDetailsLayout() {
 function updateRoutingAdvancedUi() {
   state.criterion = dom.criterionSelect ? dom.criterionSelect.value : 'default';
   state.routingProfile = dom.routingProfileSelect ? dom.routingProfileSelect.value : 'balanced';
-  state.season = dom.seasonSelect ? dom.seasonSelect.value : 'summer';
-  const c = state.criterion;
-  const needThermal = c !== 'default';
-  if (dom.thermalFields) dom.thermalFields.classList.toggle('hidden', !needThermal);
-  if (dom.seasonAirGroup) {
-    const heatish = c === 'heat' || c === 'heat_stress';
-    dom.seasonAirGroup.classList.toggle('hidden', !heatish);
-  }
-  const hint = document.getElementById('criterion-hint');
-  if (hint) hint.classList.toggle('hidden', c === 'default');
   updateRoutingDetailsLayout();
 }
 
-function localDatetimeToIso(v) {
-  if (!v || typeof v !== 'string') return null;
-  return v.length === 16 ? `${v}:00` : v;
-}
-
 function buildAlternativesRequestBody() {
-  const slot = dom.timeSlotSelect && dom.timeSlotSelect.value.trim();
-  let departureTime = null;
-  if (dom.departureDatetime && dom.departureDatetime.value) {
-    departureTime = localDatetimeToIso(dom.departureDatetime.value);
-  }
-  const body = {
+  return {
     start: state.startCoords,
     end: state.endCoords,
     profile: state.profile,
     green_enabled: true,
     criterion: state.criterion,
     routing_profile: state.routingProfile,
-    season: dom.seasonSelect ? dom.seasonSelect.value : 'summer',
     include_criteria_bundle: !!(dom.criteriaBundleCheckbox && dom.criteriaBundleCheckbox.checked),
     weather_mode: 'auto',
     use_live_weather: true,
   };
-  if (slot) {
-    body.time_slot = slot;
-  } else if (departureTime) {
-    body.departure_time = departureTime;
-  }
-  const atRaw = dom.airTempInput && dom.airTempInput.value.trim();
-  if (atRaw !== '') {
-    const t = parseFloat(atRaw.replace(',', '.'));
-    if (Number.isFinite(t)) body.air_temperature_c = t;
-  }
-  return body;
 }
 
 function renderCriteriaBundlePanel() {
@@ -1130,28 +1031,6 @@ function hydrateStateFromUrl() {
         dom.routingProfileSelect.value = rp;
       }
     }
-    const ts = p.get('ts');
-    if (ts != null && dom.timeSlotSelect) {
-      state.timeSlot = ts;
-      dom.timeSlotSelect.value = ts;
-    }
-    const dep = p.get('dep');
-    if (dep && dom.departureDatetime) {
-      const raw = decodeURIComponent(dep);
-      if (raw.length >= 16) dom.departureDatetime.value = raw.slice(0, 16);
-    }
-    const sn = p.get('sn');
-    if (sn && dom.seasonSelect) {
-      if (sn === 'summer' || sn === 'spring_autumn') {
-        state.season = sn;
-        dom.seasonSelect.value = sn;
-      }
-    }
-    const at = p.get('at');
-    if (at != null && dom.airTempInput) {
-      dom.airTempInput.value = at;
-      state.airTemp = at;
-    }
     const icb = p.get('icb');
     if (icb === '1' && dom.criteriaBundleCheckbox) {
       dom.criteriaBundleCheckbox.checked = true;
@@ -1186,18 +1065,6 @@ function syncUrlFromState() {
   }
   if (dom.routingProfileSelect && dom.routingProfileSelect.value && dom.routingProfileSelect.value !== 'balanced') {
     p.set('rp', dom.routingProfileSelect.value);
-  }
-  if (dom.timeSlotSelect && dom.timeSlotSelect.value) {
-    p.set('ts', dom.timeSlotSelect.value);
-  }
-  if (dom.departureDatetime && dom.departureDatetime.value) {
-    p.set('dep', encodeURIComponent(dom.departureDatetime.value));
-  }
-  if (dom.seasonSelect && dom.seasonSelect.value && dom.seasonSelect.value !== 'summer') {
-    p.set('sn', dom.seasonSelect.value);
-  }
-  if (dom.airTempInput && dom.airTempInput.value.trim() !== '') {
-    p.set('at', dom.airTempInput.value.trim());
   }
   if (dom.criteriaBundleCheckbox && dom.criteriaBundleCheckbox.checked) {
     p.set('icb', '1');
@@ -1314,7 +1181,7 @@ function updateTripStatus() {
     if (!s && !e) {
       dom.tripStatus.textContent = m
         ? 'Старт и финиш — тап по карте или адрес.'
-        : 'Укажите старт и финиш — клик по карте или поиск адреса (Enter / «Найти»).';
+        : 'Укажите старт и финиш — клик по карте или ввод адреса (подсказки при наборе).';
       dom.tripStatus.className = 'trip-status trip-status-idle';
       return;
     }
@@ -1346,23 +1213,28 @@ function updateTripStatus() {
   }
 }
 
-/* ═══════════ Geocoding (явный запрос: кнопка / Enter — без автодополнения при вводе) ═══ */
+/* ═══════════ Geocoding: автоподсказки с debounce + Enter ═══ */
 
-async function runAddressSearch(type) {
+async function runAddressSearch(type, options = {}) {
+  const silent = options.silent === true;
   const input = type === 'start' ? dom.startInput : dom.endInput;
   const suggest = type === 'start' ? dom.startSuggest : dom.endSuggest;
   const btn = document.querySelector(`.addr-search-btn[data-field="${type}"]`);
   const q = input.value.trim();
   if (q.length < 3) {
     closeSuggest(suggest);
-    showToast('Введите не меньше 3 символов для поиска.', 'warn', 5000);
+    if (!silent) {
+      showToast('Введите не меньше 3 символов для поиска.', 'warn', 5000);
+    }
     return;
   }
   if (btn) {
     btn.disabled = true;
     btn.classList.add('is-busy');
   }
-  showToast('Ищем адрес…', 'info', 2500);
+  if (!silent) {
+    showToast('Ищем адрес…', 'info', 2500);
+  }
   try {
     const res = await fetch(`${API}/geocode?q=${encodeURIComponent(q)}&limit=5`);
     let body = null;
@@ -1386,7 +1258,7 @@ async function runAddressSearch(type) {
       showToast(
         'Ничего не найдено. Уточните запрос (улица, дом, город) или выберите точку на карте.',
         'warn',
-        8000,
+        silent ? 4000 : 8000,
       );
       return;
     }
@@ -1412,7 +1284,20 @@ async function runAddressSearch(type) {
 function setupGeoInput(inputEl, suggestEl, type) {
   inputEl.addEventListener('input', () => {
     const q = inputEl.value.trim();
-    if (q.length < 3) closeSuggest(suggestEl);
+    if (q.length < 3) {
+      closeSuggest(suggestEl);
+      if (geoSuggestTimers[type]) {
+        clearTimeout(geoSuggestTimers[type]);
+        geoSuggestTimers[type] = null;
+      }
+      updateMobileRouteCompact();
+      return;
+    }
+    if (geoSuggestTimers[type]) clearTimeout(geoSuggestTimers[type]);
+    geoSuggestTimers[type] = setTimeout(() => {
+      geoSuggestTimers[type] = null;
+      runAddressSearch(type, { silent: true });
+    }, GEO_SUGGEST_DEBOUNCE_MS);
     updateMobileRouteCompact();
   });
 
@@ -1437,7 +1322,11 @@ function setupGeoInput(inputEl, suggestEl, type) {
       return;
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      runAddressSearch(type);
+      if (geoSuggestTimers[type]) {
+        clearTimeout(geoSuggestTimers[type]);
+        geoSuggestTimers[type] = null;
+      }
+      runAddressSearch(type, { silent: false });
       return;
     } else if (e.key === 'Escape') {
       closeSuggest(suggestEl);
@@ -1954,36 +1843,7 @@ function buildVariantTabs(routes) {
 function renderVariantDiffMobile(route, routes, idx) {
   const base = routes[0];
   if (!base || routes.length < 2) return '';
-  if (idx === 0) {
-    return '<p class="variant-diff variant-diff-baseline mobile-diff-one">Опорный — кратчайший по длине.</p>';
-  }
-  const parts = [];
-  const dl = route.length_m - base.length_m;
-  if (Math.abs(dl) >= 1) {
-    parts.push(dl > 0 ? `+${fmtDist(dl)}` : `−${fmtDist(-dl)}`);
-  }
-  const dc = route.elevation.climb_m - base.elevation.climb_m;
-  if (Math.abs(dc) >= 3) {
-    parts.push(dc > 0 ? `+${dc.toFixed(0)} м набора` : `−${(-dc).toFixed(0)} м набора`);
-  }
-  if (state.greenEnabled) {
-    const dg = route.green.percent - base.green.percent;
-    if (Math.abs(dg) >= 0.5) {
-      const sign = dg > 0 ? '+' : '';
-      parts.push(`${sign}${dg.toFixed(0)} п.п. зелени`);
-    }
-  }
-  const text = parts.length ? parts.join(' · ') : 'Близко к опорному.';
-  return `<p class="variant-diff mobile-diff-one"><strong>К опорному:</strong> ${escHtml(text)}</p>`;
-}
-
-function renderVariantDiff(route, routes, idx) {
-  const base = routes[0];
-  if (!base || routes.length < 2) return '';
-  const baseName = escHtml(base.variant_label || base.mode);
-  if (idx === 0) {
-    return `<p class="variant-diff variant-diff-baseline">Опорный вариант «${baseName}» — <strong>кратчайший по длине на карте</strong> среди предложенных. Остальные строки в таблице отличаются от него (длина, время, рельеф, зелень и т.д.).</p>`;
-  }
+  if (idx === 0) return '';
   const parts = [];
   const dl = route.length_m - base.length_m;
   if (Math.abs(dl) >= 1) {
@@ -1991,7 +1851,34 @@ function renderVariantDiff(route, routes, idx) {
   }
   const dt = route.time_s - base.time_s;
   if (Math.abs(dt) >= 30) {
-    parts.push(dt > 0 ? `≈ на ${Math.round(dt / 60)} мин дольше по времени` : `≈ на ${Math.round(-dt / 60)} мин быстрее`);
+    parts.push(dt > 0 ? `≈ на ${Math.round(dt / 60)} мин дольше` : `≈ на ${Math.round(-dt / 60)} мин быстрее`);
+  }
+  const dc = route.elevation.climb_m - base.elevation.climb_m;
+  if (Math.abs(dc) >= 3) {
+    parts.push(dc > 0 ? `набор на ${dc.toFixed(0)} м больше` : `набор на ${(-dc).toFixed(0)} м меньше`);
+  }
+  if (state.greenEnabled) {
+    const dg = route.green.percent - base.green.percent;
+    if (Math.abs(dg) >= 0.5) {
+      parts.push(dg > 0 ? `озеленение выше на ${dg.toFixed(1)} п.п.` : `озеленение ниже на ${(-dg).toFixed(1)} п.п.`);
+    }
+  }
+  const text = parts.length ? parts.join(' · ') : 'Близко к кратчайшему по длине.';
+  return `<p class="variant-diff mobile-diff-one">${escHtml(text)}</p>`;
+}
+
+function renderVariantDiff(route, routes, idx) {
+  const base = routes[0];
+  if (!base || routes.length < 2) return '';
+  if (idx === 0) return '';
+  const parts = [];
+  const dl = route.length_m - base.length_m;
+  if (Math.abs(dl) >= 1) {
+    parts.push(dl > 0 ? `длиннее на ${fmtDist(dl)}` : `короче на ${fmtDist(-dl)}`);
+  }
+  const dt = route.time_s - base.time_s;
+  if (Math.abs(dt) >= 30) {
+    parts.push(dt > 0 ? `примерно на ${Math.round(dt / 60)} мин дольше` : `примерно на ${Math.round(-dt / 60)} мин быстрее`);
   }
   const dc = route.elevation.climb_m - base.elevation.climb_m;
   if (Math.abs(dc) >= 5) {
@@ -2007,10 +1894,8 @@ function renderVariantDiff(route, routes, idx) {
       parts.push(dg > 0 ? `озеленение выше на ${dg.toFixed(1)} п.п.` : `озеленение ниже на ${(-dg).toFixed(1)} п.п.`);
     }
   }
-  const text = parts.length
-    ? parts.join('; ') + '.'
-    : 'По ключевым метрикам близок к кратчайшему варианту; подробности — в таблице сравнения и карточке.';
-  return `<p class="variant-diff"><strong>Чем отличается от кратчайшего «${baseName}»:</strong> ${text}</p>`;
+  const text = parts.length ? parts.join('; ') + '.' : 'Близко к кратчайшему по длине.';
+  return `<p class="variant-diff">${escHtml(text)}</p>`;
 }
 
 function renderRouteDetailCard(route, routes, idx) {
@@ -2224,10 +2109,6 @@ function setupEvents() {
   dom.startInput.addEventListener('focus', () => expandMobileInputSheet());
   dom.endInput.addEventListener('focus', () => expandMobileInputSheet());
 
-  document.querySelectorAll('.addr-search-btn').forEach((btn) => {
-    btn.addEventListener('click', () => runAddressSearch(btn.dataset.field));
-  });
-
   dom.swapBtn.addEventListener('click', swapPoints);
   if (dom.sheetHandle) {
     const TH = 40;
@@ -2318,21 +2199,6 @@ function setupEvents() {
       state.routingProfile = dom.routingProfileSelect.value;
       syncUrlFromState();
     });
-  }
-  if (dom.departureDatetime) {
-    dom.departureDatetime.addEventListener('change', () => syncUrlFromState());
-  }
-  if (dom.timeSlotSelect) {
-    dom.timeSlotSelect.addEventListener('change', () => syncUrlFromState());
-  }
-  if (dom.seasonSelect) {
-    dom.seasonSelect.addEventListener('change', () => {
-      state.season = dom.seasonSelect.value;
-      syncUrlFromState();
-    });
-  }
-  if (dom.airTempInput) {
-    dom.airTempInput.addEventListener('change', () => syncUrlFromState());
   }
   if (dom.criteriaBundleCheckbox) {
     dom.criteriaBundleCheckbox.addEventListener('change', () => {

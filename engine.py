@@ -136,28 +136,30 @@ def _weather_summary_ru(snap: WeatherSnapshot, wp: WeatherWeightParams) -> str:
     if not wp.enabled:
         return "Погода не учитывалась при выборе путей."
     m = wp.mults
-    parts: List[str] = []
-    if m.physical > 1.04:
-        parts.append("рельеф и покрытие «дороже» из‑за погоды")
-    elif m.physical < 0.97:
-        parts.append("физическая часть стоимости слегка снижена")
-    if m.heat > 1.05:
-        parts.append("тепловой дискомфорт усилен")
-    elif m.heat < 0.97:
-        parts.append("тепловая нагрузка ниже обычной для слота")
-    if m.green > 1.06:
-        parts.append("тень и зелёные участки дают больший бонус")
-    elif m.green < 0.96:
-        parts.append("влияние озеленения на комфорт ослаблено")
-    if m.stress > 1.05:
-        parts.append("транспортный стресс и риск выше")
-    if m.surface > 1.05:
-        parts.append("покрытие штрафуется сильнее (влага/скользкость)")
-    if snap.precipitation_mm > 0.3:
-        parts.append("осадки увеличивают «цену» подъёмов и плохого покрытия")
-    if not parts:
+    lines: List[str] = []
+    if m.physical > 1.02:
+        lines.append(f"рельеф и покрытие дороже на {_pct_deviation(m.physical)}%")
+    elif m.physical < 0.98:
+        lines.append(f"рельеф и покрытие дешевле на {_pct_deviation(m.physical)}%")
+    if m.heat > 1.02:
+        lines.append(f"тепловая нагрузка выше обычной для слота на {_pct_deviation(m.heat)}%")
+    elif m.heat < 0.98:
+        lines.append(f"тепловая нагрузка ниже обычной для слота на {_pct_deviation(m.heat)}%")
+    if m.green > 1.02:
+        lines.append(f"влияние озеленения на комфорт сильнее на {_pct_deviation(m.green)}%")
+    elif m.green < 0.98:
+        lines.append(f"влияние озеленения на комфорт слабее на {_pct_deviation(m.green)}%")
+    if m.stress > 1.02:
+        lines.append(f"транспортный стресс выше на {_pct_deviation(m.stress)}%")
+    elif m.stress < 0.98:
+        lines.append(f"транспортный стресс ниже на {_pct_deviation(m.stress)}%")
+    if m.surface > 1.02:
+        lines.append(f"учёт покрытия строже на {_pct_deviation(m.surface)}%")
+    if snap.precipitation_mm > 0.3 and not lines:
+        lines.append("осадки усиливают штрафы за подъёмы и скользкое покрытие")
+    if not lines:
         return "Погодные поправки близки к нейтральным."
-    return "; ".join(parts)
+    return "\n".join(lines)
 
 
 def _build_weather_route_context(
@@ -250,6 +252,18 @@ def _resolve_time_slot_key(
         except ValueError:
             pass
     return "noon"
+
+
+def _infer_season_from_month(month_1_12: int) -> str:
+    """Лето — июнь–август; иначе весна/осень (как в SeasonEnum)."""
+    if month_1_12 in (6, 7, 8):
+        return "summer"
+    return "spring_autumn"
+
+
+def _pct_deviation(mult: float) -> int:
+    """Отклонение множителя от 1.0 в процентах (округление)."""
+    return int(round(abs(float(mult) - 1.0) * 100.0))
 
 
 def _raise_route_not_found_after_corridor_expand(
@@ -1206,6 +1220,10 @@ class RouteEngine:
         time_slot_key: str = "noon",
         heat_context_mult: float = 1.0,
         weather_ctx: Optional[WeatherRouteContext] = None,
+        enrich_heat_stress_metrics: bool = False,
+        routing_profile_key: str = "balanced",
+        season: str = "summer",
+        air_temperature_c: Optional[float] = None,
     ) -> List[RouteResponse]:
         """Собрать варианты; порядок в ответе — кратчайший, полный, зелёный (если есть)."""
         profile = _PROFILE_MAP[profile_key]
@@ -1251,6 +1269,24 @@ class RouteEngine:
         if rg is not None:
             exclude.add(tuple(rg.edges))
 
+        def _bundle_hm(
+            route_rr: RouteResult, physical_weight_key: str
+        ) -> Optional[HeatStressMetrics]:
+            if not enrich_heat_stress_metrics:
+                return None
+            return self._make_heat_stress_metrics(
+                G,
+                route_rr,
+                profile_key,
+                time_slot_key,
+                routing_profile_key,
+                season=season,
+                air_temperature_c=air_temperature_c,
+                heat_mult=heat_context_mult,
+                weather=weather,
+                physical_weight_key=physical_weight_key,
+            )
+
         routes_out: List[RouteResponse] = []
         if include_green_route and rg is not None:
             seg_full = router.route_segment_costs(
@@ -1282,6 +1318,7 @@ class RouteEngine:
                     _VARIANT_LABEL_DEFAULT["full"],
                     graph=G,
                     cost_override=round(seg_full["physical"], 1),
+                    heat_stress_metrics=_bundle_hm(rf, w_full),
                     weather=weather_ctx,
                 )
             )
@@ -1296,6 +1333,7 @@ class RouteEngine:
                     _VARIANT_LABEL_DEFAULT["green"],
                     graph=G,
                     cost_override=round(seg_green["physical"], 1),
+                    heat_stress_metrics=_bundle_hm(rg, w_green),
                     weather=weather_ctx,
                 )
             )
@@ -1328,6 +1366,7 @@ class RouteEngine:
                         if seg_full is not None
                         else None
                     ),
+                    heat_stress_metrics=_bundle_hm(rf, w_full),
                     weather=weather_ctx,
                 )
             )
@@ -1344,6 +1383,7 @@ class RouteEngine:
                     w_full,
                     _VARIANT_LABEL_DEFAULT["shortest"],
                     graph=G,
+                    heat_stress_metrics=_bundle_hm(rs, w_full),
                     weather=weather_ctx,
                 )
             )
@@ -1360,6 +1400,7 @@ class RouteEngine:
                         w_full,
                         "Альтернативный путь",
                         graph=G,
+                        heat_stress_metrics=_bundle_hm(alt, w_full),
                         weather=weather_ctx,
                     )
                 )
@@ -1379,6 +1420,10 @@ class RouteEngine:
         time_slot_key: str = "noon",
         heat_context_mult: float = 1.0,
         weather_ctx: Optional[WeatherRouteContext] = None,
+        enrich_heat_stress_metrics: bool = False,
+        routing_profile_key: str = "balanced",
+        season: str = "summer",
+        air_temperature_c: Optional[float] = None,
     ) -> List[RouteResponse]:
         self._ensure_graph_for_corridor(
             start,
@@ -1404,6 +1449,10 @@ class RouteEngine:
             time_slot_key=time_slot_key,
             heat_context_mult=heat_context_mult,
             weather_ctx=weather_ctx,
+            enrich_heat_stress_metrics=enrich_heat_stress_metrics,
+            routing_profile_key=routing_profile_key,
+            season=season,
+            air_temperature_c=air_temperature_c,
         )
 
     def compute_green_route_addon(
@@ -1871,30 +1920,41 @@ class RouteEngine:
             )
 
         crit = (criterion or "default").strip().lower()
-        season_val = (season or "summer").lower()
-        slot_key = _resolve_time_slot_key(departure_time, time_slot_override)
-        hm_default = heat_context_multiplier(
-            season_val, slot_key, air_temperature_c
-        )
+        now_utc = datetime.now(timezone.utc)
+        dep_for_weather = departure_time
+        if crit in ("heat", "stress", "heat_stress"):
+            dep_for_weather = departure_time or now_utc.replace(microsecond=0).isoformat()
+
         w_snap, wsrc, wp = _resolve_route_weather(
             start,
             end,
             request_mode=weather_mode,
             use_live_weather=use_live_weather,
             weather_time=weather_time,
-            departure_time=departure_time,
+            departure_time=dep_for_weather,
             temperature_c=temperature_c,
             precipitation_mm=precipitation_mm,
             wind_speed_ms=wind_speed_ms,
             cloud_cover_pct=cloud_cover_pct,
             humidity_pct=humidity_pct,
         )
+        season_val = (season or "summer").lower()
+        air_eff: Optional[float] = air_temperature_c
+        dep_eff: Optional[str] = departure_time
+        if crit in ("heat", "stress", "heat_stress"):
+            season_val = _infer_season_from_month(now_utc.month)
+            dep_eff = dep_for_weather
+            if air_eff is None:
+                air_eff = float(w_snap.temperature_c)
+
+        slot_key = _resolve_time_slot_key(dep_eff, time_slot_override)
+        hm_default = heat_context_multiplier(season_val, slot_key, air_eff)
         disp_mode = _engine_weather_mode(weather_mode, use_live_weather)
         weather_ctx = _build_weather_route_context(
             request_mode=disp_mode,
             use_live_weather=use_live_weather,
             weather_time=weather_time,
-            departure_time=departure_time,
+            departure_time=dep_eff,
             snap=w_snap,
             source=wsrc,
             wp=wp,
@@ -1920,7 +1980,7 @@ class RouteEngine:
                     green_enabled=green_enabled,
                     corridor_buffer_meters=None,
                     season=season_val,
-                    air_temperature_c=air_temperature_c,
+                    air_temperature_c=air_eff,
                     weather=wp,
                     weather_ctx=weather_ctx,
                 )
@@ -1946,7 +2006,7 @@ class RouteEngine:
                             green_enabled=green_enabled,
                             corridor_buffer_meters=eff,
                             season=season_val,
-                            air_temperature_c=air_temperature_c,
+                            air_temperature_c=air_eff,
                             weather=wp,
                             weather_ctx=weather_ctx,
                         )
@@ -1982,6 +2042,10 @@ class RouteEngine:
                     time_slot_key=slot_key,
                     heat_context_mult=hm_default,
                     weather_ctx=weather_ctx,
+                    enrich_heat_stress_metrics=True,
+                    routing_profile_key=routing_profile_key,
+                    season=season_val,
+                    air_temperature_c=air_eff,
                 )
                 for sub in ("heat", "stress", "heat_stress"):
                     criteria_bundle[sub] = self._build_criterion_routes(
@@ -1993,7 +2057,7 @@ class RouteEngine:
                         routing_profile_key,
                         slot_key,
                         season=season_val,
-                        air_temperature_c=air_temperature_c,
+                        air_temperature_c=air_eff,
                         weather=wp,
                         weather_ctx=weather_ctx,
                     )
@@ -2043,6 +2107,10 @@ class RouteEngine:
                 time_slot_key=slot_key,
                 heat_context_mult=hm_default,
                 weather_ctx=weather_ctx,
+                enrich_heat_stress_metrics=include_criteria_bundle,
+                routing_profile_key=routing_profile_key,
+                season=season_val,
+                air_temperature_c=air_eff,
             )
         else:
             base = float(s.corridor_buffer_meters)
@@ -2066,6 +2134,10 @@ class RouteEngine:
                         time_slot_key=slot_key,
                         heat_context_mult=hm_default,
                         weather_ctx=weather_ctx,
+                        enrich_heat_stress_metrics=include_criteria_bundle,
+                        routing_profile_key=routing_profile_key,
+                        season=season_val,
+                        air_temperature_c=air_eff,
                     )
                     logger.info(
                         "auto_expand_corridor attempt=%d corridor_m=%.0f "
@@ -2122,7 +2194,7 @@ class RouteEngine:
                     routing_profile_key,
                     slot_key,
                     season=season_val,
-                    air_temperature_c=air_temperature_c,
+                    air_temperature_c=air_eff,
                     weather=wp,
                     weather_ctx=weather_ctx,
                 )

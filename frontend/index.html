@@ -7,7 +7,7 @@
 
   <!-- MapLibre и шрифты с того же origin — иначе на LAN/мобильной сети вкладка может «вечно» ждать unpkg/Google Fonts -->
   <link href="/static/vendor/maplibre/maplibre-gl.css?v=20260430-1" rel="stylesheet">
-  <link href="/static/style.css?v=20260418-ui" rel="stylesheet">
+  <link href="/static/style.css?v=20260418-ui2" rel="stylesheet">
 </head>
 <body>
 
@@ -49,10 +49,10 @@
 
   <div id="mobile-step-plan" class="mobile-step-plan">
   <div class="mobile-step-scroll">
-  <!-- Адреса: поиск по кнопке / Enter (не автоподсказка при каждом символе — политика Nominatim) -->
+  <!-- Адреса: автоподсказки при наборе (debounce), приоритет Самары на сервере -->
   <section class="panel">
-    <p class="geocode-hint desktop-only">Введите адрес и нажмите «Найти» или Enter — один запрос к геокодеру, без автодополнения при наборе.</p>
-    <p class="geocode-hint mobile-only mobile-geocode-short">Адрес — «Найти» или Enter. Точку на карте — тап.</p>
+    <p class="geocode-hint desktop-only">Начните вводить адрес — появятся подсказки. Можно выбрать из списка или указать точку на карте.</p>
+    <p class="geocode-hint mobile-only mobile-geocode-short">Адрес — подсказки при наборе. Точку на карте — тап.</p>
     <div class="addr-group">
       <div class="addr-row addr-row-ext">
         <span class="addr-dot start"></span>
@@ -60,7 +60,6 @@
           <input id="start-input" type="text" placeholder="Откуда" autocomplete="off">
           <ul id="start-suggest" class="suggest-list"></ul>
         </div>
-        <button type="button" class="addr-search-btn" data-field="start" title="Найти адрес" aria-label="Найти адрес откуда">Найти</button>
       </div>
 
       <button id="swap-btn" class="swap-btn" title="Поменять местами">
@@ -75,7 +74,6 @@
           <input id="end-input" type="text" placeholder="Куда" autocomplete="off">
           <ul id="end-suggest" class="suggest-list"></ul>
         </div>
-        <button type="button" class="addr-search-btn" data-field="end" title="Найти адрес" aria-label="Найти адрес куда">Найти</button>
       </div>
     </div>
   </section>
@@ -92,13 +90,13 @@
       <summary class="routing-advanced-summary">Тепло и безопасность</summary>
       <div class="routing-advanced-body">
         <label class="field-label" for="criterion-select">Критерий маршрута</label>
-        <select id="criterion-select" class="field-control" aria-describedby="criterion-hint">
+        <select id="criterion-select" class="field-control">
           <option value="default">Обычный (как раньше)</option>
           <option value="heat">Минимальная тепловая нагрузка</option>
           <option value="stress">Минимальный транспортный стресс</option>
           <option value="heat_stress">Тепло и безопасность (комбинированно)</option>
         </select>
-        <p id="criterion-hint" class="geocode-hint routing-field-hint">Для тепловых режимов укажите время или слот суток.</p>
+        <p class="geocode-hint routing-field-hint">Для тепловых критериев время, сезон и погода подставляются автоматически (текущий момент и прогноз).</p>
 
         <label class="field-label" for="routing-profile-select">Профиль предпочтений</label>
         <select id="routing-profile-select" class="field-control">
@@ -107,31 +105,6 @@
           <option value="cool">Прохлада</option>
           <option value="sport">Спорт</option>
         </select>
-
-        <div id="thermal-fields" class="thermal-fields hidden">
-          <label class="field-label" for="departure-datetime">Время отправления</label>
-          <input type="datetime-local" id="departure-datetime" class="field-control" autocomplete="off" />
-
-          <label class="field-label" for="time-slot-select">Временной слот</label>
-          <select id="time-slot-select" class="field-control">
-            <option value="">— не задан (из времени выезда) —</option>
-            <option value="morning">Утро</option>
-            <option value="noon">Полдень</option>
-            <option value="evening">Вечер</option>
-            <option value="night">Ночь</option>
-          </select>
-
-          <div id="season-air-group" class="season-air-group">
-            <label class="field-label" for="season-select">Сезон</label>
-            <select id="season-select" class="field-control">
-              <option value="summer">Лето</option>
-              <option value="spring_autumn">Весна или осень</option>
-            </select>
-
-            <label class="field-label" for="air-temp-input">Температура воздуха, °C</label>
-            <input type="number" id="air-temp-input" class="field-control" inputmode="decimal" step="0.1" placeholder="необязательно" />
-          </div>
-        </div>
 
         <label class="field-label checkbox-label">
           <input type="checkbox" id="criteria-bundle-checkbox" />
@@ -207,6 +180,6 @@
 </div>
 
 <script src="/static/vendor/maplibre/maplibre-gl.js?v=20260430-1"></script>
-<script src="/static/app.js?v=20260418-ui"></script>
+<script src="/static/app.js?v=20260418-ui2"></script>
 </body>
 </html>

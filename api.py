@@ -83,13 +83,9 @@ def _parse_stored_criteria_bundle(
     }
 
 
-def _use_progressive_phase1(req: AlternativesStartRequest) -> bool:
-    """Ускоренная фаза: кратчайший + энергия, зелёный в фоне (без тепловых критериев)."""
-    return (
-        req.green_enabled
-        and req.criterion.value == "default"
-        and not req.include_criteria_bundle
-    )
+def _use_progressive_phase1(_req: AlternativesStartRequest) -> bool:
+    """Раньше: кратчайший + энергия, зелёный в фоне. Сейчас всегда полный ответ одним запросом."""
+    return False
 
 
 def _run_green_job_thread(

@@ -100,6 +100,16 @@ _VARIANT_LABEL_DEFAULT = {
     "shortest": "Кратчайший по карте",
 }
 
+# Порядок вариантов в ответе API / единый пользовательский сценарий
+_UNIFIED_ROUTE_ORDER = (
+    "shortest",
+    "full",
+    "green",
+    "heat",
+    "stress",
+    "heat_stress",
+)
+
 # Минимизация только физической части веса с погодными множителями (режим full/green).
 _WEATHER_PHYSICAL_ROUTING_PREF = RoutingPreferenceProfile(
     key="weather_physical",
@@ -1678,7 +1688,7 @@ class RouteEngine:
                     "heat",
                     r,
                     hk,
-                    "Минимальная тепловая нагрузка",
+                    "С учётом теплового комфорта",
                     graph=G,
                     cost_override=seg["heat"],
                     heat_stress_metrics=metrics,
@@ -1725,7 +1735,7 @@ class RouteEngine:
                     "stress",
                     r,
                     "stress_cost",
-                    "Минимальный транспортный стресс",
+                    "С учётом безопасности (минимальный стресс)",
                     graph=G,
                     cost_override=seg["stress"],
                     heat_stress_metrics=metrics,
@@ -1785,7 +1795,7 @@ class RouteEngine:
                     "heat_stress",
                     r,
                     f"weight_{profile_key}_full",
-                    "Тепло и безопасность",
+                    "С учётом тепла и безопасности",
                     graph=G,
                     cost_override=metrics.combined_cost,
                     heat_stress_metrics=metrics,
@@ -1883,6 +1893,48 @@ class RouteEngine:
             weather_ctx=weather_ctx,
         )
 
+    @staticmethod
+    def _order_unified_routes(routes: List[RouteResponse]) -> List[RouteResponse]:
+        """Один маршрут на mode; порядок — см. _UNIFIED_ROUTE_ORDER."""
+        by_mode: Dict[str, RouteResponse] = {}
+        for r in routes:
+            if r.mode not in by_mode:
+                by_mode[r.mode] = r
+        return [by_mode[m] for m in _UNIFIED_ROUTE_ORDER if m in by_mode]
+
+    def _annotate_unified_routes(self, routes: List[RouteResponse]) -> List[RouteResponse]:
+        """Пояснение для теплового варианта и короткое сравнение длины с кратчайшим."""
+        by_mode = {r.mode: r for r in routes}
+        shortest = by_mode.get("shortest")
+        base_len = float(shortest.length_m) if shortest else None
+        out: List[RouteResponse] = []
+        for r in routes:
+            note: Optional[str] = None
+            if r.mode == "heat":
+                note = (
+                    "В отличие от зелёного маршрута, этот вариант учитывает не только "
+                    "озеленение, но и текущую погоду и тепловую нагрузку."
+                )
+            effect: Optional[str] = None
+            if base_len is not None and r.mode != "shortest":
+                delta = float(r.length_m) - base_len
+                if delta >= 30.0:
+                    effect = (
+                        f"Длинее кратчайшего по сети примерно на "
+                        f"{int(round(delta))} м."
+                    )
+                elif delta <= -30.0:
+                    effect = (
+                        f"Короче кратчайшего по сети примерно на "
+                        f"{int(round(-delta))} м."
+                    )
+            out.append(
+                r.model_copy(
+                    update={"variant_note_ru": note, "effect_summary_ru": effect}
+                )
+            )
+        return out
+
     def compute_alternatives(
         self,
         start: Tuple[float, float],
@@ -1906,12 +1958,15 @@ class RouteEngine:
         cloud_cover_pct: Optional[float] = None,
         humidity_pct: Optional[float] = None,
     ) -> AlternativesResponse:
-        """Несколько вариантов; green_enabled=False — 2 маршрута без спутника.
+        """Все доступные варианты сразу: кратчайший, энергия, зелёный, тепло, стресс, тепло+безопасность.
 
-        При ``criterion`` в {heat, stress, heat_stress} — новые режимы (тепло /
-        стресс / комбинация) с блоком ``heat_stress`` в ответе; кратчайший
-        добавляется для сравнения.
+        Поля ``criterion``, ``routing_profile_key``, ``include_criteria_bundle`` и
+        ``season`` из запроса сохраняются для совместимости API, но не задают отдельный
+        пользовательский режим: внутри всегда используется профиль предпочтений
+        ``balanced``,         ответ без ``criteria_bundle``.
         """
+        _ = (criterion, routing_profile_key, include_criteria_bundle, season)
+
         profile = _PROFILE_MAP.get(profile_key)
         if profile is None:
             raise ValueError(
@@ -1919,11 +1974,9 @@ class RouteEngine:
                 f"Допустимые: {list(_PROFILE_MAP)}"
             )
 
-        crit = (criterion or "default").strip().lower()
+        rp_internal = "balanced"
         now_utc = datetime.now(timezone.utc)
-        dep_for_weather = departure_time
-        if crit in ("heat", "stress", "heat_stress"):
-            dep_for_weather = departure_time or now_utc.replace(microsecond=0).isoformat()
+        dep_for_weather = departure_time or now_utc.replace(microsecond=0).isoformat()
 
         w_snap, wsrc, wp = _resolve_route_weather(
             start,
@@ -1938,165 +1991,40 @@ class RouteEngine:
             cloud_cover_pct=cloud_cover_pct,
             humidity_pct=humidity_pct,
         )
-        season_val = (season or "summer").lower()
+        season_val = _infer_season_from_month(now_utc.month)
         air_eff: Optional[float] = air_temperature_c
-        dep_eff: Optional[str] = departure_time
-        if crit in ("heat", "stress", "heat_stress"):
-            season_val = _infer_season_from_month(now_utc.month)
-            dep_eff = dep_for_weather
-            if air_eff is None:
-                air_eff = float(w_snap.temperature_c)
+        if air_eff is None:
+            air_eff = float(w_snap.temperature_c)
 
-        slot_key = _resolve_time_slot_key(dep_eff, time_slot_override)
+        slot_key = _resolve_time_slot_key(dep_for_weather, time_slot_override)
         hm_default = heat_context_multiplier(season_val, slot_key, air_eff)
         disp_mode = _engine_weather_mode(weather_mode, use_live_weather)
         weather_ctx = _build_weather_route_context(
             request_mode=disp_mode,
             use_live_weather=use_live_weather,
             weather_time=weather_time,
-            departure_time=dep_eff,
+            departure_time=dep_for_weather,
             snap=w_snap,
             source=wsrc,
             wp=wp,
         )
-        if crit in ("heat", "stress", "heat_stress"):
-            inc_route_disk_miss()
-            logger.info(
-                "Alternatives: критерий=%s слот=%s routing_profile=%s season=%s",
-                crit,
-                slot_key,
-                routing_profile_key,
-                season_val,
-            )
-            s = self._app.settings
-            if not s.use_dynamic_corridor_graph or s.corridor_buffer_meters <= 0:
-                routes_out = self._compute_alternatives_criterion_once(
-                    start,
-                    end,
-                    profile_key,
-                    criterion=crit,
-                    routing_profile_key=routing_profile_key,
-                    time_slot_key=slot_key,
-                    green_enabled=green_enabled,
-                    corridor_buffer_meters=None,
-                    season=season_val,
-                    air_temperature_c=air_eff,
-                    weather=wp,
-                    weather_ctx=weather_ctx,
-                )
-            else:
-                base = float(s.corridor_buffer_meters)
-                extra = 0.0
-                attempt = 0
-                step = max(1.0, float(s.auto_expand_step_meters))
-                max_extra = max(0.0, float(s.auto_expand_max_meters))
-                max_attempts = max(1, int(s.auto_expand_max_attempts))
-                routes_out: List[RouteResponse] = []
-                while True:
-                    attempt += 1
-                    eff = base + extra
-                    try:
-                        routes_out = self._compute_alternatives_criterion_once(
-                            start,
-                            end,
-                            profile_key,
-                            criterion=crit,
-                            routing_profile_key=routing_profile_key,
-                            time_slot_key=slot_key,
-                            green_enabled=green_enabled,
-                            corridor_buffer_meters=eff,
-                            season=season_val,
-                            air_temperature_c=air_eff,
-                            weather=wp,
-                            weather_ctx=weather_ctx,
-                        )
-                        break
-                    except RouteNotFoundError as e:
-                        at_attempts = attempt >= max_attempts
-                        at_extra_cap = extra + step > max_extra + 1e-6
-                        if at_attempts or at_extra_cap:
-                            _raise_route_not_found_after_corridor_expand(
-                                e,
-                                eff=eff,
-                                base=base,
-                                max_extra=max_extra,
-                                step=step,
-                                attempt=attempt,
-                                max_attempts=max_attempts,
-                            )
-                        extra += step
-            criteria_bundle: Optional[Dict[str, List[RouteResponse]]] = None
-            if include_criteria_bundle:
-                with self._graph_lock:
-                    if not self._loaded or self._graph is None:
-                        raise BikeRouterError("Граф не загружен. Вызовите warmup().")
-                    G = self._graph
-                criteria_bundle = {}
-                criteria_bundle["default"] = self._collect_alternative_routes(
-                    start,
-                    end,
-                    profile_key,
-                    include_green_route=green_enabled,
-                    graph=G,
-                    weather=wp,
-                    time_slot_key=slot_key,
-                    heat_context_mult=hm_default,
-                    weather_ctx=weather_ctx,
-                    enrich_heat_stress_metrics=True,
-                    routing_profile_key=routing_profile_key,
-                    season=season_val,
-                    air_temperature_c=air_eff,
-                )
-                for sub in ("heat", "stress", "heat_stress"):
-                    criteria_bundle[sub] = self._build_criterion_routes(
-                        start,
-                        end,
-                        profile_key,
-                        G,
-                        sub,
-                        routing_profile_key,
-                        slot_key,
-                        season=season_val,
-                        air_temperature_c=air_eff,
-                        weather=wp,
-                        weather_ctx=weather_ctx,
-                    )
-            return AlternativesResponse(
-                routes=routes_out, criteria_bundle=criteria_bundle
-            )
-
-        skip_sat = not green_enabled
-        include_green = green_enabled
-
-        cached = None
-        if not include_criteria_bundle and not wp.enabled:
-            cached = self._route_disk_cache.get(
-                start, end, profile_key, green_enabled=green_enabled
-            )
-        if cached is not None:
-            try:
-                inc_route_disk_hit()
-                logger.info(
-                    "Alternatives: hit дискового кэша (профиль %s green=%s)",
-                    profile_key,
-                    green_enabled,
-                )
-                return AlternativesResponse.model_validate(cached)
-            except Exception:
-                logger.debug("Route disk cache invalid, recalculating")
 
         inc_route_disk_miss()
         logger.info(
-            "Alternatives: расчёт профиль=%s green_enabled=%s",
+            "Alternatives (unified): профиль=%s green=%s slot=%s season=%s",
             profile_key,
             green_enabled,
+            slot_key,
+            season_val,
         )
 
         s = self._app.settings
-        routes_out: List[RouteResponse]
+        skip_sat = not green_enabled
+        include_green = green_enabled
+        routes_base: List[RouteResponse]
 
         if not s.use_dynamic_corridor_graph or s.corridor_buffer_meters <= 0:
-            routes_out = self._compute_alternatives_once(
+            routes_base = self._compute_alternatives_once(
                 start,
                 end,
                 profile_key,
@@ -2107,13 +2035,13 @@ class RouteEngine:
                 time_slot_key=slot_key,
                 heat_context_mult=hm_default,
                 weather_ctx=weather_ctx,
-                enrich_heat_stress_metrics=include_criteria_bundle,
-                routing_profile_key=routing_profile_key,
+                enrich_heat_stress_metrics=False,
+                routing_profile_key=rp_internal,
                 season=season_val,
                 air_temperature_c=air_eff,
             )
         else:
-            base = float(s.corridor_buffer_meters)
+            base_buf = float(s.corridor_buffer_meters)
             extra = 0.0
             attempt = 0
             step = max(1.0, float(s.auto_expand_step_meters))
@@ -2121,9 +2049,9 @@ class RouteEngine:
             max_attempts = max(1, int(s.auto_expand_max_attempts))
             while True:
                 attempt += 1
-                eff = base + extra
+                eff = base_buf + extra
                 try:
-                    routes_out = self._compute_alternatives_once(
+                    routes_base = self._compute_alternatives_once(
                         start,
                         end,
                         profile_key,
@@ -2134,8 +2062,8 @@ class RouteEngine:
                         time_slot_key=slot_key,
                         heat_context_mult=hm_default,
                         weather_ctx=weather_ctx,
-                        enrich_heat_stress_metrics=include_criteria_bundle,
-                        routing_profile_key=routing_profile_key,
+                        enrich_heat_stress_metrics=False,
+                        routing_profile_key=rp_internal,
                         season=season_val,
                         air_temperature_c=air_eff,
                     )
@@ -2144,7 +2072,7 @@ class RouteEngine:
                         "result=ok routes=%d",
                         attempt,
                         eff,
-                        len(routes_out),
+                        len(routes_base),
                     )
                     break
                 except RouteNotFoundError as e:
@@ -2169,7 +2097,7 @@ class RouteEngine:
                         _raise_route_not_found_after_corridor_expand(
                             e,
                             eff=eff,
-                            base=base,
+                            base=base_buf,
                             max_extra=max_extra,
                             step=step,
                             attempt=attempt,
@@ -2177,42 +2105,43 @@ class RouteEngine:
                         )
                     extra += step
 
-        criteria_bundle: Optional[Dict[str, List[RouteResponse]]] = None
-        if include_criteria_bundle:
-            with self._graph_lock:
-                if not self._loaded or self._graph is None:
-                    raise BikeRouterError("Граф не загружен. Вызовите warmup().")
-                G = self._graph
-            criteria_bundle = {"default": routes_out}
-            for sub in ("heat", "stress", "heat_stress"):
-                criteria_bundle[sub] = self._build_criterion_routes(
+        with self._graph_lock:
+            if not self._loaded or self._graph is None:
+                raise BikeRouterError("Граф не загружен. Вызовите warmup().")
+            G = self._graph
+
+        extra_routes: List[RouteResponse] = []
+        for sub in ("heat", "stress", "heat_stress"):
+            try:
+                lst = self._build_criterion_routes(
                     start,
                     end,
                     profile_key,
                     G,
                     sub,
-                    routing_profile_key,
+                    rp_internal,
                     slot_key,
                     season=season_val,
                     air_temperature_c=air_eff,
                     weather=wp,
                     weather_ctx=weather_ctx,
                 )
-        out = AlternativesResponse(
-            routes=routes_out, criteria_bundle=criteria_bundle
-        )
-        if not include_criteria_bundle and not wp.enabled:
-            try:
-                self._route_disk_cache.put(
-                    start,
-                    end,
-                    profile_key,
-                    [r.model_dump(mode="json") for r in out.routes],
-                    green_enabled=green_enabled,
+                if lst:
+                    extra_routes.append(lst[0])
+            except RouteNotFoundError as e:
+                logger.info(
+                    "Alternatives unified: режим %s недоступен (нет пути): %s",
+                    sub,
+                    e,
                 )
-            except Exception as exc:
-                logger.debug("Route cache store skipped: %s", exc)
-        return out
+            except BikeRouterError as e:
+                logger.warning(
+                    "Alternatives unified: режим %s — ошибка: %s", sub, e
+                )
+
+        merged = self._order_unified_routes(list(routes_base) + extra_routes)
+        merged = self._annotate_unified_routes(merged)
+        return AlternativesResponse(routes=merged, criteria_bundle=None)
 
     def compute_alternatives_phase1_two_routes(
         self,

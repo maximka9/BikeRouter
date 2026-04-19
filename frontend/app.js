@@ -69,21 +69,16 @@ const state = {
   mobileSheetDetailExpanded: false,
   /** Мобильная фаза input без маршрутов: false — низкая «полка», true — полная форма */
   mobileInputSheetExpanded: false,
-  /** Озеленение всегда запрашивается с сервера (прогрессивный зелёный вариант). */
+  /** Озеленение всегда запрашивается с сервера. */
   greenEnabled: true,
-  /** Критерий и параметры тепла/стресса (см. POST /alternatives/start) */
-  criterion: 'default',
-  routingProfile: 'balanced',
-  includeCriteriaBundle: false,
-  /** Ответ criteria_bundle с сервера */
-  criteriaBundle: null,
   /** pending=['green'] от API; сбрасывается при пустом pending или при mode===green в routes */
   jobPendingGreen: false,
   /** Инкремент при сбросе — отмена фонового poll */
   routeFetchSeq: 0,
 };
 
-const N_ROUTE_LAYERS = 3;
+/** Слои линий на карте: до 6 вариантов + запас. */
+const N_ROUTE_LAYERS = 8;
 /** Задержка перед запросом подсказок геокодера (мс). */
 const GEO_SUGGEST_DEBOUNCE_MS = 320;
 const geoSuggestTimers = { start: null, end: null };
@@ -150,11 +145,6 @@ const dom = {
   mobileDetailTitle: $('#mobile-detail-title'),
   mobileDetailExpandBtn: $('#mobile-detail-expand-btn'),
   sheetHandle: $('#sheet-handle'),
-  routingAdvancedDetails: $('#routing-advanced-details'),
-  criterionSelect: $('#criterion-select'),
-  routingProfileSelect: $('#routing-profile-select'),
-  criteriaBundleCheckbox: $('#criteria-bundle-checkbox'),
-  criteriaBundlePanel: $('#criteria-bundle-panel'),
 };
 
 const MQ_MOBILE = typeof window !== 'undefined' ? window.matchMedia('(max-width: 768px)') : null;
@@ -381,141 +371,42 @@ function variantDisplayTitle(route) {
   const m = route && route.mode;
   if (m === 'heat') return 'Маршрут с учётом теплового комфорта';
   if (m === 'heat_stress') return 'Маршрут с учётом тепла и безопасности';
+  if (m === 'stress') return 'Маршрут с учётом безопасности (минимальный стресс)';
   const raw = String(route?.variant_label || route?.mode || '').trim();
   return raw || 'Вариант';
 }
 
-function buildRouteContextStrip(route) {
-  const rc = route.routing_context;
-  if (!rc || typeof rc !== 'object') return '';
-  if (rc.criterion && String(rc.criterion).trim()) {
-    const c = String(rc.criterion).trim();
-    const labels = {
-      default: 'критерий: обычный',
-      heat: 'критерий: тепловой комфорт',
-      stress: 'критерий: минимальный стресс',
-      heat_stress: 'критерий: тепло и безопасность',
-    };
-    const line = labels[c] || `критерий: ${c}`;
-    return `<p class="route-ctx-strip">${escHtml(line)}</p>`;
-  }
-  return '';
-}
-
 function buildWeatherAnalyticsHtml(route) {
   const w = route.weather;
-  const hasWx = w && w.enabled && typeof w === 'object';
-  const text = hasWx && w.summary_ru ? String(w.summary_ru).trim() : '';
+  if (!w || typeof w !== 'object') return '';
+  const text = w.summary_ru ? String(w.summary_ru).trim() : '';
   if (!text) return '';
   const lines = text.split(/\n+/).map((ln) => ln.trim()).filter(Boolean);
   const body = lines.map((ln) => `<p class="weather-summary-line">${escHtml(ln)}</p>`).join('');
   return `<div class="route-analytics route-analytics-weather"><h4 class="analytics-title">Погода</h4>${body}</div>`;
 }
 
-function buildThermalAnalyticsHtml(route) {
-  const hs = route.heat_stress;
-  const hasFlat =
-    (route.heat_cost_total != null && Number(route.heat_cost_total) > 0)
-    || (route.exposed_length_m != null && Number(route.exposed_length_m) > 0)
-    || (route.vegetation_shade_share != null && Number(route.vegetation_shade_share) > 0)
-    || (route.building_shade_share != null && Number(route.building_shade_share) > 0)
-    || (hs && (hs.total_heat_cost > 0 || hs.exposed_open_unfavorable_length_m > 0));
-  const m = route.mode;
-  if (!hasFlat && m !== 'heat' && m !== 'heat_stress') return '';
-
-  const ht = hs && hs.total_heat_cost != null ? hs.total_heat_cost : route.heat_cost_total;
-  const expOpen = hs && hs.exposed_open_unfavorable_length_m != null
-    ? hs.exposed_open_unfavorable_length_m
-    : route.exposed_length_m;
-  const veg = route.vegetation_shade_share != null
-    ? (Number(route.vegetation_shade_share) * 100).toFixed(0)
-    : (hs && hs.vegetation_shade_share != null ? (Number(hs.vegetation_shade_share) * 100).toFixed(0) : null);
-  const bld = route.building_shade_share != null
-    ? (Number(route.building_shade_share) * 100).toFixed(0)
-    : (hs && hs.building_shade_share != null ? (Number(hs.building_shade_share) * 100).toFixed(0) : null);
-
-  const rows = [];
-  if (ht != null && Number.isFinite(Number(ht))) {
-    rows.push(`<div class="analytics-row"><span>Тепловая нагрузка (оценка)</span><span>${Number(ht).toFixed(1)}</span></div>`);
+function buildVariantNotesHtml(route) {
+  const parts = [];
+  if (route.variant_note_ru && String(route.variant_note_ru).trim()) {
+    parts.push(`<p class="route-variant-note">${escHtml(String(route.variant_note_ru).trim())}</p>`);
   }
-  if (expOpen != null && Number.isFinite(Number(expOpen)) && Number(expOpen) > 0) {
-    rows.push(`<div class="analytics-row"><span>Длина открытых перегреваемых участков</span><span>${fmtDist(Number(expOpen))}</span></div>`);
+  if (route.effect_summary_ru && String(route.effect_summary_ru).trim()) {
+    parts.push(`<p class="route-effect-summary">${escHtml(String(route.effect_summary_ru).trim())}</p>`);
   }
-  if (veg != null) {
-    rows.push(`<div class="analytics-row"><span>Доля тени от растительности</span><span>${veg}%</span></div>`);
-  }
-  if (bld != null) {
-    rows.push(`<div class="analytics-row"><span>Доля тени от зданий (оценка)</span><span>${bld}%</span></div>`);
-  }
-  if (!rows.length) return '';
-
-  let breakdown = '';
-  if (hs && hs.combined_breakdown && typeof hs.combined_breakdown === 'object') {
-    const b = hs.combined_breakdown;
-    breakdown = `<div class="analytics-sub">Разложение: физ. ${escHtml(String(b.physical ?? '—'))} · тепло ${escHtml(String(b.heat_effective ?? '—'))} · стресс ${escHtml(String(b.stress ?? '—'))} · повороты ${escHtml(String(b.turn_penalty ?? '—'))}</div>`;
-  }
-
-  return `<div class="route-analytics route-analytics-thermal"><h4 class="analytics-title">Тепловой комфорт</h4>${rows.join('')}${breakdown}</div>`;
-}
-
-function buildStressAnalyticsHtml(route) {
-  const hs = route.heat_stress;
-  const m = route.mode;
-  const has =
-    (route.stress_cost_total != null && Number(route.stress_cost_total) > 0)
-    || (hs && (hs.avg_stress_lts > 0 || hs.stressful_intersections_count > 0))
-    || m === 'stress'
-    || m === 'heat_stress';
-  if (!has && !hs) return '';
-
-  const avg = hs && hs.avg_stress_lts != null ? hs.avg_stress_lts : null;
-  const mx = hs && hs.max_stress_lts != null ? hs.max_stress_lts : null;
-  const nInt = route.stressful_intersections_count != null
-    ? route.stressful_intersections_count
-    : (hs && hs.stressful_intersections_count != null ? hs.stressful_intersections_count : null);
-  const nHi = route.high_stress_segments_count != null
-    ? route.high_stress_segments_count
-    : (hs && hs.high_stress_segments_count != null ? hs.high_stress_segments_count : null);
-  const turns = route.turn_count_analytics != null
-    ? route.turn_count_analytics
-    : (hs && hs.turn_count != null ? hs.turn_count : null);
-
-  const rows = [];
-  if (avg != null) rows.push(`<div class="analytics-row"><span>Средний уровень стресса</span><span>${Number(avg).toFixed(2)}</span></div>`);
-  if (mx != null) rows.push(`<div class="analytics-row"><span>Максимальный стресс</span><span>${Number(mx).toFixed(2)}</span></div>`);
-  if (nInt != null) rows.push(`<div class="analytics-row"><span>Стрессовые пересечения</span><span>${escHtml(String(nInt))}</span></div>`);
-  if (nHi != null) rows.push(`<div class="analytics-row"><span>Участки высокого стресса</span><span>${escHtml(String(nHi))}</span></div>`);
-  if (turns != null) rows.push(`<div class="analytics-row"><span>Заметные повороты</span><span>${escHtml(String(turns))}</span></div>`);
-  if (route.stress_cost_total != null && Number.isFinite(Number(route.stress_cost_total))) {
-    rows.push(`<div class="analytics-row"><span>Суммарный стресс (оценка)</span><span>${Number(route.stress_cost_total).toFixed(1)}</span></div>`);
-  }
-  if (!rows.length) return '';
-  return `<div class="route-analytics route-analytics-stress"><h4 class="analytics-title">Безопасность и стресс</h4>${rows.join('')}</div>`;
+  if (!parts.length) return '';
+  return `<div class="route-analytics route-analytics-notes">${parts.join('')}</div>`;
 }
 
 function buildRouteAnalyticsBlocks(route) {
-  const ctx = buildRouteContextStrip(route);
+  const notes = buildVariantNotesHtml(route);
   const wx = buildWeatherAnalyticsHtml(route);
-  const th = buildThermalAnalyticsHtml(route);
-  const st = buildStressAnalyticsHtml(route);
-  if (!ctx && !wx && !th && !st) return '';
-  return `<div class="route-analytics-wrap">${ctx}${wx}${th}${st}</div>`;
+  if (!notes && !wx) return '';
+  return `<div class="route-analytics-wrap">${notes}${wx}</div>`;
 }
 
 function updateRoutingDetailsLayout() {
-  const det = dom.routingAdvancedDetails;
-  if (!det) return;
-  if (isMobileLayout()) {
-    if (!det.dataset.userTouched) det.removeAttribute('open');
-  } else {
-    det.setAttribute('open', 'open');
-  }
-}
-
-function updateRoutingAdvancedUi() {
-  state.criterion = dom.criterionSelect ? dom.criterionSelect.value : 'default';
-  state.routingProfile = dom.routingProfileSelect ? dom.routingProfileSelect.value : 'balanced';
-  updateRoutingDetailsLayout();
+  /* расширенные настройки маршрута убраны из UI */
 }
 
 function buildAlternativesRequestBody() {
@@ -524,71 +415,9 @@ function buildAlternativesRequestBody() {
     end: state.endCoords,
     profile: state.profile,
     green_enabled: true,
-    criterion: state.criterion,
-    routing_profile: state.routingProfile,
-    include_criteria_bundle: !!(dom.criteriaBundleCheckbox && dom.criteriaBundleCheckbox.checked),
     weather_mode: 'auto',
     use_live_weather: true,
   };
-}
-
-function renderCriteriaBundlePanel() {
-  const el = dom.criteriaBundlePanel;
-  if (!el) return;
-  const bundle = state.criteriaBundle;
-  if (!bundle || typeof bundle !== 'object') {
-    el.classList.add('hidden');
-    el.innerHTML = '';
-    return;
-  }
-  const keys = Object.keys(bundle);
-  if (!keys.length) {
-    el.classList.add('hidden');
-    el.innerHTML = '';
-    return;
-  }
-  el.classList.remove('hidden');
-  const keyLabels = {
-    default: 'Обычный',
-    heat: 'Тепловой комфорт',
-    stress: 'Минимальный стресс',
-    heat_stress: 'Тепло и безопасность',
-  };
-  const rows = keys.map((key) => {
-    const routes = bundle[key];
-    const r0 = routes && routes[0];
-    if (!r0) return '';
-    const lab = keyLabels[key] || key;
-    const h = r0.heat_cost_total != null && Number.isFinite(Number(r0.heat_cost_total))
-      ? Number(r0.heat_cost_total).toFixed(1)
-      : '—';
-    const s = r0.stress_cost_total != null && Number.isFinite(Number(r0.stress_cost_total))
-      ? Number(r0.stress_cost_total).toFixed(1)
-      : '—';
-    return `<tr><th scope="row">${escHtml(lab)}</th><td>${fmtDist(r0.length_m)}</td><td>${h}</td><td>${s}</td></tr>`;
-  }).join('');
-  el.innerHTML = `
-    <h3 class="criteria-bundle-title">Сравнение критериев</h3>
-    <div class="criteria-bundle-table-wrap">
-      <table class="criteria-bundle-table">
-        <thead><tr><th scope="col">Критерий</th><th>Длина</th><th>Тепло (сумма)</th><th>Стресс (сумма)</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>
-    <p class="criteria-bundle-hint">Первый вариант в каждой колонке — основной для этого критерия; внизу — полные карточки для выбранного режима.</p>`;
-}
-
-/** Порядок в UI: сначала кратчайший по длине на карте, остальные — в исходном порядке API. */
-function orderRoutesShortestFirst(routes) {
-  if (!routes || routes.length <= 1) return routes || [];
-  return routes
-    .map((r, i) => ({ r, i }))
-    .sort((a, b) => {
-      const d = a.r.length_m - b.r.length_m;
-      if (Math.abs(d) < 1e-3) return a.i - b.i;
-      return d;
-    })
-    .map(({ r }) => r);
 }
 
 function initMap() {
@@ -985,11 +814,6 @@ function clearRoutes() {
   state.jobPendingGreen = false;
   state.mobileSheetDetailExpanded = false;
   state.mobileInputSheetExpanded = false;
-  state.criteriaBundle = null;
-  if (dom.criteriaBundlePanel) {
-    dom.criteriaBundlePanel.classList.add('hidden');
-    dom.criteriaBundlePanel.innerHTML = '';
-  }
   if (dom.resultsEmpty) {
     dom.resultsEmpty.classList.add('hidden');
     dom.resultsEmpty.setAttribute('aria-hidden', 'true');
@@ -1015,27 +839,6 @@ function hydrateStateFromUrl() {
     const ea = p.get('ea');
     if (sa) dom.startInput.value = sa;
     if (ea) dom.endInput.value = ea;
-    const cr = p.get('cr');
-    if (cr && dom.criterionSelect) {
-      const allowed = ['default', 'heat', 'stress', 'heat_stress'];
-      if (allowed.includes(cr)) {
-        state.criterion = cr;
-        dom.criterionSelect.value = cr;
-      }
-    }
-    const rp = p.get('rp');
-    if (rp && dom.routingProfileSelect) {
-      const ok = ['balanced', 'safe', 'cool', 'sport'];
-      if (ok.includes(rp)) {
-        state.routingProfile = rp;
-        dom.routingProfileSelect.value = rp;
-      }
-    }
-    const icb = p.get('icb');
-    if (icb === '1' && dom.criteriaBundleCheckbox) {
-      dom.criteriaBundleCheckbox.checked = true;
-      state.includeCriteriaBundle = true;
-    }
   } finally {
     urlSyncSuppressed = false;
   }
@@ -1060,16 +863,6 @@ function syncUrlFromState() {
   if (state.routeList && state.routeList.length) {
     p.set('v', String(state.selectedVariantIndex));
   }
-  if (dom.criterionSelect && dom.criterionSelect.value && dom.criterionSelect.value !== 'default') {
-    p.set('cr', dom.criterionSelect.value);
-  }
-  if (dom.routingProfileSelect && dom.routingProfileSelect.value && dom.routingProfileSelect.value !== 'balanced') {
-    p.set('rp', dom.routingProfileSelect.value);
-  }
-  if (dom.criteriaBundleCheckbox && dom.criteriaBundleCheckbox.checked) {
-    p.set('icb', '1');
-  }
-
   const qs = p.toString();
   const path = window.location.pathname || '/';
   const newUrl = qs ? `${path}?${qs}` : path;
@@ -1509,11 +1302,7 @@ async function buildRoute() {
   }, ROUTE_SLOW_HINT_MS);
 
   async function applyRoutesPayload(data, prefer) {
-    if (Array.isArray(data.routes) && data.routes.length) {
-      data.routes = orderRoutesShortestFirst(data.routes);
-    }
     state.routes = data;
-    state.criteriaBundle = data.criteria_bundle != null ? data.criteria_bundle : null;
 
     const rlist = data.routes || [];
     let idx = 0;
@@ -1563,7 +1352,6 @@ async function buildRoute() {
 
     const data = {
       routes: body.routes || [],
-      criteria_bundle: body.criteria_bundle != null ? body.criteria_bundle : null,
     };
     await applyRoutesPayload(data, prefer);
     syncUrlFromState();
@@ -1627,7 +1415,6 @@ async function buildRoute() {
           await applyRoutesPayload(
             {
               routes: jd.routes || [],
-              criteria_bundle: jd.criteria_bundle != null ? jd.criteria_bundle : null,
             },
             state.selectedVariantIndex,
           );
@@ -1641,7 +1428,6 @@ async function buildRoute() {
         await applyRoutesPayload(
           {
             routes: jd.routes || [],
-            criteria_bundle: jd.criteria_bundle != null ? jd.criteria_bundle : null,
           },
           state.selectedVariantIndex,
         );
@@ -1703,7 +1489,6 @@ async function refreshSatelliteGreenFlag() {
 
 async function showResults(data, preferredVariantIndex = null) {
   await refreshSatelliteGreenFlag();
-  renderCriteriaBundlePanel();
   const routes = data.routes || [];
   dom.results.classList.remove('hidden');
   dom.results.setAttribute('aria-hidden', 'false');
@@ -2188,33 +1973,6 @@ function setupEvents() {
     });
   });
 
-  if (dom.criterionSelect) {
-    dom.criterionSelect.addEventListener('change', () => {
-      updateRoutingAdvancedUi();
-      syncUrlFromState();
-    });
-  }
-  if (dom.routingProfileSelect) {
-    dom.routingProfileSelect.addEventListener('change', () => {
-      state.routingProfile = dom.routingProfileSelect.value;
-      syncUrlFromState();
-    });
-  }
-  if (dom.criteriaBundleCheckbox) {
-    dom.criteriaBundleCheckbox.addEventListener('change', () => {
-      state.includeCriteriaBundle = dom.criteriaBundleCheckbox.checked;
-      syncUrlFromState();
-    });
-  }
-  if (dom.routingAdvancedDetails) {
-    const sm = dom.routingAdvancedDetails.querySelector('summary');
-    if (sm) {
-      sm.addEventListener('click', () => {
-        dom.routingAdvancedDetails.dataset.userTouched = '1';
-      });
-    }
-  }
-
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.addr-input-wrap')) {
       closeSuggest(dom.startSuggest);
@@ -2300,10 +2058,6 @@ async function loadHealth() {
 
 document.addEventListener('DOMContentLoaded', () => {
   hydrateStateFromUrl();
-  if (isMobileLayout() && dom.routingAdvancedDetails) {
-    dom.routingAdvancedDetails.removeAttribute('open');
-  }
-  updateRoutingAdvancedUi();
   initMap();
   setupEvents();
   loadHealth();

@@ -488,6 +488,14 @@ class RouteResponse(BaseModel):
         default="",
         description="Человекочитаемая подпись варианта (для UI)",
     )
+    variant_note_ru: Optional[str] = Field(
+        default=None,
+        description="Краткое пояснение режима (например, отличие теплового от зелёного)",
+    )
+    effect_summary_ru: Optional[str] = Field(
+        default=None,
+        description="Краткое сравнение с базовым (кратчайшим) маршрутом, без чисел модели",
+    )
     geometry: List[List[float]] = Field(
         ..., description="Полилиния маршрута [[lat, lon], ...]"
     )

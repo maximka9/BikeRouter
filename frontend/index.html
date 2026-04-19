@@ -86,32 +86,6 @@
       <button class="toggle-btn" data-value="pedestrian">🚶 Пешеход</button>
     </div>
 
-    <details id="routing-advanced-details" class="panel routing-advanced-details" open>
-      <summary class="routing-advanced-summary">Тепло и безопасность</summary>
-      <div class="routing-advanced-body">
-        <label class="field-label" for="criterion-select">Критерий маршрута</label>
-        <select id="criterion-select" class="field-control">
-          <option value="default">Обычный (как раньше)</option>
-          <option value="heat">Минимальная тепловая нагрузка</option>
-          <option value="stress">Минимальный транспортный стресс</option>
-          <option value="heat_stress">Тепло и безопасность (комбинированно)</option>
-        </select>
-        <p class="geocode-hint routing-field-hint">Для тепловых критериев время, сезон и погода подставляются автоматически (текущий момент и прогноз).</p>
-
-        <label class="field-label" for="routing-profile-select">Профиль предпочтений</label>
-        <select id="routing-profile-select" class="field-control">
-          <option value="balanced">Сбалансированный</option>
-          <option value="safe">Безопасность</option>
-          <option value="cool">Прохлада</option>
-          <option value="sport">Спорт</option>
-        </select>
-
-        <label class="field-label checkbox-label">
-          <input type="checkbox" id="criteria-bundle-checkbox" />
-          <span>Сравнить критерии (несколько вариантов в одном ответе)</span>
-        </label>
-      </div>
-    </details>
   </section>
   </div><!-- .mobile-step-scroll -->
 
@@ -130,7 +104,6 @@
 
   <!-- Результаты: несколько вариантов маршрута -->
   <section id="results" class="results hidden" aria-hidden="true">
-    <div id="criteria-bundle-panel" class="criteria-bundle-panel hidden" aria-live="polite"></div>
     <div id="results-empty" class="results-empty hidden" aria-hidden="true"></div>
     <div class="mobile-results-nav mobile-only">
       <button type="button" id="mobile-edit-points-btn" class="mobile-text-btn">Точки</button>
@@ -180,6 +153,6 @@
 </div>
 
 <script src="/static/vendor/maplibre/maplibre-gl.js?v=20260430-1"></script>
-<script src="/static/app.js?v=20260418-ui2"></script>
+<script src="/static/app.js?v=20260419-unified-routes"></script>
 </body>
 </html>

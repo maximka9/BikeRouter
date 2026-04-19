@@ -1733,7 +1733,50 @@ div.desktop-only { display: block; }
   gap: 8px;
 }
 
-/* Аналитика в карточке */
+/* Единый блок «Почему этот маршрут» */
+.route-why-block {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  background: #f0f9ff;
+  border-radius: var(--radius);
+  border: 1px solid #bae6fd;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.route-why-block h4 {
+  font-size: 12px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  color: var(--text-sec);
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.route-why-block ul {
+  margin: 0;
+  padding-left: 1.1em;
+}
+
+.route-why-block li {
+  margin-bottom: 4px;
+}
+
+.route-why-block li:last-child {
+  margin-bottom: 0;
+}
+
+.route-detail-card--mobile-compact .route-why-block {
+  font-size: 12px;
+  padding: 8px 10px;
+}
+
+.route-detail-card--mobile-compact .route-why-block h4 {
+  font-size: 11px;
+}
+
+/* Аналитика в карточке (legacy-обёртка) */
 .route-analytics-wrap {
   margin: 10px 0 12px;
   padding: 10px 12px;

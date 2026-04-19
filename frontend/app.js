@@ -93,18 +93,33 @@ let urlSyncSuppressed = false;
 
 /* ── Route colors per profile ──────────────────────────────────── */
 
-const COLORS = {
+/** Цвет линии на карте и кружка в списке: фиксированная палитра по режиму (6 вариантов). */
+const ROUTE_COLORS = {
   cyclist: {
-    full: '#2874a6',
+    shortest: '#c0392b',
+    full: '#21618c',
     green: '#1e8449',
-    shortest: '#ca6f1e',
+    heat: '#e67e22',
+    stress: '#922b21',
+    heat_stress: '#6c3483',
   },
   pedestrian: {
-    full: '#b8570a',
-    green: '#6c3483',
-    shortest: '#117864',
+    shortest: '#0e6655',
+    full: '#b7950b',
+    green: '#17a589',
+    heat: '#d68910',
+    stress: '#a93226',
+    heat_stress: '#5b2c6f',
   },
 };
+
+function routeLineColor(route, index) {
+  const pal = ROUTE_COLORS[state.profile] || ROUTE_COLORS.cyclist;
+  const m = route && route.mode;
+  if (m && pal[m]) return pal[m];
+  const keys = Object.keys(pal);
+  return pal[keys[index % keys.length]];
+}
 
 /* ═══════════ DOM ═══════════════════════════════════════════════ */
 
@@ -253,12 +268,14 @@ function syncMobileSheetUi() {
 
 function applyRouteHighlightEqual(nActive) {
   if (!map) return;
+  const OP = 0.52;
+  const W = 6;
   for (let i = 0; i < N_ROUTE_LAYERS; i++) {
     const lid = `route-layer-${i}`;
     if (!map.getLayer(lid)) continue;
     if (i >= nActive) continue;
-    map.setPaintProperty(lid, 'line-opacity', 0.9);
-    map.setPaintProperty(lid, 'line-width', 6);
+    map.setPaintProperty(lid, 'line-opacity', OP);
+    map.setPaintProperty(lid, 'line-width', W);
     map.setPaintProperty(lid, 'line-blur', 0);
   }
 }
@@ -354,18 +371,6 @@ function mobileEditPoints() {
 
 /* ═══════════ Map ══════════════════════════════════════════════ */
 
-function lineColorForMode(mode) {
-  const thermal = {
-    heat: '#d35400',
-    stress: '#c0392b',
-    heat_stress: '#6c3483',
-  };
-  if (thermal[mode]) return thermal[mode];
-  const pal = COLORS[state.profile];
-  if (mode === 'shortest') return pal.shortest;
-  if (mode === 'green') return pal.green;
-  return pal.full;
-}
 
 function variantDisplayTitle(route) {
   const m = route && route.mode;
@@ -376,33 +381,53 @@ function variantDisplayTitle(route) {
   return raw || 'Вариант';
 }
 
-function buildWeatherAnalyticsHtml(route) {
+/** Один блок пояснений: сравнение с кратчайшим, погода, режим (не более 3–4 строк). */
+function buildWhyThisRouteBlock(route, routes) {
+  if (!route || !routes || routes.length < 1) return '';
+  const base = routes.find((x) => x.mode === 'shortest');
+  const lines = [];
+  if (base && route.mode && route.mode !== 'shortest') {
+    const parts = [];
+    const dl = route.length_m - base.length_m;
+    if (Math.abs(dl) >= 8) {
+      parts.push(dl > 0 ? `на ${fmtDist(dl)} длиннее кратчайшего` : `на ${fmtDist(-dl)} короче`);
+    }
+    const dc = route.elevation.climb_m - base.elevation.climb_m;
+    if (Math.abs(dc) >= 4) {
+      parts.push(dc > 0 ? `набор на ${dc.toFixed(0)} м больше` : `набор на ${(-dc).toFixed(0)} м меньше`);
+    }
+    if (parts.length) lines.push(parts.join(', '));
+  }
   const w = route.weather;
-  if (!w || typeof w !== 'object') return '';
-  const text = w.summary_ru ? String(w.summary_ru).trim() : '';
-  if (!text) return '';
-  const lines = text.split(/\n+/).map((ln) => ln.trim()).filter(Boolean);
-  const body = lines.map((ln) => `<p class="weather-summary-line">${escHtml(ln)}</p>`).join('');
-  return `<div class="route-analytics route-analytics-weather"><h4 class="analytics-title">Погода</h4>${body}</div>`;
-}
-
-function buildVariantNotesHtml(route) {
-  const parts = [];
-  if (route.variant_note_ru && String(route.variant_note_ru).trim()) {
-    parts.push(`<p class="route-variant-note">${escHtml(String(route.variant_note_ru).trim())}</p>`);
+  if (w && w.summary_ru && String(w.summary_ru).trim()) {
+    const first = String(w.summary_ru).trim().split(/\n+/)[0];
+    const short = first.length > 110 ? `${first.slice(0, 107)}…` : first;
+    lines.push(short);
   }
-  if (route.effect_summary_ru && String(route.effect_summary_ru).trim()) {
-    parts.push(`<p class="route-effect-summary">${escHtml(String(route.effect_summary_ru).trim())}</p>`);
+  const m = route.mode;
+  if (m === 'heat') {
+    const vn = route.variant_note_ru && String(route.variant_note_ru).trim();
+    if (vn) {
+      lines.push(vn.length > 130 ? `${vn.slice(0, 127)}…` : vn);
+    }
+  } else if (m === 'stress') {
+    lines.push('Упор на менее напряжённые участки и пересечения.');
+  } else if (m === 'heat_stress') {
+    lines.push('Баланс теплового комфорта и безопасности движения.');
   }
-  if (!parts.length) return '';
-  return `<div class="route-analytics route-analytics-notes">${parts.join('')}</div>`;
-}
-
-function buildRouteAnalyticsBlocks(route) {
-  const notes = buildVariantNotesHtml(route);
-  const wx = buildWeatherAnalyticsHtml(route);
-  if (!notes && !wx) return '';
-  return `<div class="route-analytics-wrap">${notes}${wx}</div>`;
+  const maxLines = isMobileLayout() ? 3 : 4;
+  let trimmed = lines.slice(0, maxLines);
+  if (isMobileLayout()) {
+    while (trimmed.length > 1 && trimmed.join(' ').length > 260) {
+      trimmed = trimmed.slice(0, -1);
+    }
+    if (trimmed.length === 1 && trimmed[0].length > 260) {
+      trimmed = [`${trimmed[0].slice(0, 257)}…`];
+    }
+  }
+  if (!trimmed.length) return '';
+  const li = trimmed.map((t) => `<li>${escHtml(t)}</li>`).join('');
+  return `<div class="route-why-block"><h4>Почему этот маршрут</h4><ul>${li}</ul></div>`;
 }
 
 function updateRoutingDetailsLayout() {
@@ -748,7 +773,7 @@ function displayRoutes(data) {
       map.setPaintProperty(
         `route-layer-${i}`,
         'line-color',
-        lineColorForMode(routes[i].mode),
+        routeLineColor(routes[i], i),
       );
       map.setLayoutProperty(`route-layer-${i}`, 'visibility', 'visible');
     } else {
@@ -769,14 +794,26 @@ function displayRoutes(data) {
 
 function applyRouteHighlight(selectedIdx, nActive) {
   if (!map) return;
+  const OP_ON = 0.96;
+  const OP_OFF = 0.38;
+  const W_ON = 9;
+  const W_OFF = 5;
   for (let i = 0; i < N_ROUTE_LAYERS; i++) {
     const lid = `route-layer-${i}`;
     if (!map.getLayer(lid)) continue;
     if (i >= nActive) continue;
     const on = i === selectedIdx;
-    map.setPaintProperty(lid, 'line-opacity', on ? 1 : 0.5);
-    map.setPaintProperty(lid, 'line-width', on ? 8 : 6);
+    map.setPaintProperty(lid, 'line-opacity', on ? OP_ON : OP_OFF);
+    map.setPaintProperty(lid, 'line-width', on ? W_ON : W_OFF);
     map.setPaintProperty(lid, 'line-blur', 0);
+  }
+  if (nActive > 0 && selectedIdx >= 0 && selectedIdx < nActive) {
+    const topLid = `route-layer-${selectedIdx}`;
+    try {
+      map.moveLayer(topLid);
+    } catch (_) {
+      /* слой может быть недоступен при смене стиля */
+    }
   }
 }
 
@@ -1558,7 +1595,7 @@ function selectVariant(idx, routes) {
 
   const r = routes[idx];
   renderRouteDetailCard(r, routes, idx);
-  renderElevChartForRoute(r);
+  renderElevChartForRoute(r, idx);
   applyRouteHighlight(idx, routes.length);
   updateOverlays(r);
   renderMapLegend(routes);
@@ -1596,7 +1633,7 @@ function formatVariantTimeShort(route) {
 
 function buildVariantTabs(routes) {
   const main = routes.map((r, i) => {
-    const col = lineColorForMode(r.mode);
+    const col = routeLineColor(r, i);
     const rawLabel = String(variantDisplayTitle(r) || r.mode || '').trim();
     const labelDesk = escHtml(rawLabel);
     const labelMobile = escHtml(truncMobileLabel(rawLabel, MOBILE_VARIANT_TAB_LABEL_MAX));
@@ -1625,73 +1662,12 @@ function buildVariantTabs(routes) {
   });
 }
 
-function renderVariantDiffMobile(route, routes, idx) {
-  const base = routes[0];
-  if (!base || routes.length < 2) return '';
-  if (idx === 0) return '';
-  const parts = [];
-  const dl = route.length_m - base.length_m;
-  if (Math.abs(dl) >= 1) {
-    parts.push(dl > 0 ? `длиннее на ${fmtDist(dl)}` : `короче на ${fmtDist(-dl)}`);
-  }
-  const dt = route.time_s - base.time_s;
-  if (Math.abs(dt) >= 30) {
-    parts.push(dt > 0 ? `≈ на ${Math.round(dt / 60)} мин дольше` : `≈ на ${Math.round(-dt / 60)} мин быстрее`);
-  }
-  const dc = route.elevation.climb_m - base.elevation.climb_m;
-  if (Math.abs(dc) >= 3) {
-    parts.push(dc > 0 ? `набор на ${dc.toFixed(0)} м больше` : `набор на ${(-dc).toFixed(0)} м меньше`);
-  }
-  if (state.greenEnabled) {
-    const dg = route.green.percent - base.green.percent;
-    if (Math.abs(dg) >= 0.5) {
-      parts.push(dg > 0 ? `озеленение выше на ${dg.toFixed(1)} п.п.` : `озеленение ниже на ${(-dg).toFixed(1)} п.п.`);
-    }
-  }
-  const text = parts.length ? parts.join(' · ') : 'Близко к кратчайшему по длине.';
-  return `<p class="variant-diff mobile-diff-one">${escHtml(text)}</p>`;
-}
-
-function renderVariantDiff(route, routes, idx) {
-  const base = routes[0];
-  if (!base || routes.length < 2) return '';
-  if (idx === 0) return '';
-  const parts = [];
-  const dl = route.length_m - base.length_m;
-  if (Math.abs(dl) >= 1) {
-    parts.push(dl > 0 ? `длиннее на ${fmtDist(dl)}` : `короче на ${fmtDist(-dl)}`);
-  }
-  const dt = route.time_s - base.time_s;
-  if (Math.abs(dt) >= 30) {
-    parts.push(dt > 0 ? `примерно на ${Math.round(dt / 60)} мин дольше` : `примерно на ${Math.round(-dt / 60)} мин быстрее`);
-  }
-  const dc = route.elevation.climb_m - base.elevation.climb_m;
-  if (Math.abs(dc) >= 5) {
-    parts.push(dc > 0 ? `набор на ${dc.toFixed(0)} м больше` : `набор на ${(-dc).toFixed(0)} м меньше`);
-  }
-  const dmx = route.elevation.max_gradient_pct - base.elevation.max_gradient_pct;
-  if (Math.abs(dmx) >= 0.5) {
-    parts.push(dmx > 0 ? `макс. уклон на ${dmx.toFixed(1)} п.п. круче` : `макс. уклон на ${(-dmx).toFixed(1)} п.п. положе`);
-  }
-  if (state.greenEnabled) {
-    const dg = route.green.percent - base.green.percent;
-    if (Math.abs(dg) >= 0.5) {
-      parts.push(dg > 0 ? `озеленение выше на ${dg.toFixed(1)} п.п.` : `озеленение ниже на ${(-dg).toFixed(1)} п.п.`);
-    }
-  }
-  const text = parts.length ? parts.join('; ') + '.' : 'Близко к кратчайшему по длине.';
-  return `<p class="variant-diff">${escHtml(text)}</p>`;
-}
-
 function renderRouteDetailCard(route, routes, idx) {
   const e = route.elevation;
   const g = route.green;
   const title = escHtml(variantDisplayTitle(route));
-  const analyticsHtml = buildRouteAnalyticsBlocks(route);
+  const whyHtml = buildWhyThisRouteBlock(route, routes);
   const compact = isMobileLayout();
-  const diffBlock = Array.isArray(routes)
-    ? (compact ? renderVariantDiffMobile(route, routes, idx) : renderVariantDiff(route, routes, idx))
-    : '';
   const greenSrvNote = !serverSatelliteGreenEnabled
     ? `<div class="detail-row span-2 green-satellite-off">
         <p class="green-satellite-off-text">Озеленение по снимкам на сервере выключено (<code>DISABLE_SATELLITE_GREEN</code>). Ниже — нули-заглушки; режим «С учётом озеленения» совпадает с энергетическим по весам.</p>
@@ -1700,7 +1676,6 @@ function renderRouteDetailCard(route, routes, idx) {
 
   if (compact) {
     const moreInner = `
-      ${diffBlock}
       ${greenSrvNote}
       <div class="detail-grid">
         <div class="detail-row">
@@ -1712,7 +1687,7 @@ function renderRouteDetailCard(route, routes, idx) {
     `;
     dom.routeDetailCard.innerHTML = `
       <h3 class="route-detail-title-fallback">${title}</h3>
-      ${analyticsHtml}
+      ${whyHtml}
       <div class="detail-grid">
         <div class="detail-row">
           <span class="d-label">Длина</span>
@@ -1744,8 +1719,7 @@ function renderRouteDetailCard(route, routes, idx) {
   } else {
     dom.routeDetailCard.innerHTML = `
     <h3>${title}</h3>
-    ${analyticsHtml}
-    ${diffBlock}
+    ${whyHtml}
     <div class="detail-grid">
       <div class="detail-row">
         <span class="d-label">Длина</span>
@@ -1781,7 +1755,7 @@ function renderRouteDetailCard(route, routes, idx) {
   dom.routeDetailCard.classList.toggle('route-detail-card--mobile-compact', compact);
 }
 
-function renderElevChartForRoute(route) {
+function renderElevChartForRoute(route, routeIndex) {
   const profile = route?.elevation_profile;
   if (!profile || profile.length < 2) { dom.elevChart.innerHTML = ''; return; }
 
@@ -1804,7 +1778,8 @@ function renderElevChartForRoute(route) {
     + ` L${x(dists[dists.length - 1]).toFixed(1)},${(H - PY).toFixed(1)}`
     + ` L${x(0).toFixed(1)},${(H - PY).toFixed(1)} Z`;
 
-  const lineColor = lineColorForMode(route.mode);
+  const ri = routeIndex != null && routeIndex >= 0 ? routeIndex : state.selectedVariantIndex;
+  const lineColor = routeLineColor(route, ri);
   const gid = `eg-${Date.now()}`;
 
   dom.elevChart.innerHTML = `

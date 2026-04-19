@@ -185,11 +185,14 @@ class ElevationMetrics(BaseModel):
     descent_m: float = Field(..., description="Суммарный спуск (м)")
     max_gradient_pct: float = Field(
         ...,
-        description="Макс. уклон по рёбрам (%), с обрезкой выбросов DEM (см. MAX_ROUTE_GRADIENT_DISPLAY)",
+        description=(
+            "Макс. уклон по сегментам маршрута (%): |Δh|/длина на рёбрах длиннее порога, "
+            "без жёсткого потолка 49%; единичные выбросы DEM приглушаются"
+        ),
     )
     avg_gradient_pct: float = Field(
         ...,
-        description="Средний |уклон| по рёбрам (%), с той же обрезкой",
+        description="Средний |уклон| по тем же валидным сегментам (%)",
     )
     max_above_start_m: float = Field(
         ..., description="Макс. подъём относительно старта (м)"

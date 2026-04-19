@@ -71,13 +71,54 @@ def _edge_gradient_abs_raw(edge_data: dict) -> float:
 
 
 def _edge_gradient_abs_capped(edge_data: dict) -> float:
-    """Доля 0…1 для UI и агрегатов: обрезка выбросов DEM на коротких рёбрах."""
+    """Доля 0…1 для подписей по сегменту на карте (мягкий потолок от артефактов DEM)."""
     return min(_edge_gradient_abs_raw(edge_data), float(MAX_ROUTE_GRADIENT_DISPLAY))
 
 
 def _edge_gradient_abs_for_display(edge_data: dict) -> float:
-    """Уклон для подписей сегментов и статистики (см. ``MAX_ROUTE_GRADIENT_DISPLAY``)."""
+    """Уклон для подписей сегментов на карте (не для агрегата «макс. уклон» маршрута)."""
     return _edge_gradient_abs_capped(edge_data)
+
+
+# Минимальная длина ребра (м), чтобы |Δh|/L не взрывался от шума DEM на коротких звеньях.
+_MIN_GRADIENT_STAT_SEGMENT_M: float = 15.0
+# Сегменты с |Δh|/L выше порога не участвуют в макс./среднем (ошибка высот или лестница-артефакт).
+_ABSURD_SEGMENT_GRADIENT_RATIO: float = 0.85
+
+
+def _segment_gradient_ratio_for_stats(edge_data: dict) -> Optional[float]:
+    """|Δh|/L по ребру; None если сегмент не подходит для агрегатов."""
+    ln = float(edge_data.get("length", 0) or 0)
+    if ln < _MIN_GRADIENT_STAT_SEGMENT_M:
+        return None
+    ed = float(edge_data.get("elevation_diff", 0) or 0)
+    if not math.isfinite(ed) or not math.isfinite(ln) or ln <= 0:
+        return None
+    r = abs(ed) / ln
+    if not math.isfinite(r):
+        return None
+    if r >= _ABSURD_SEGMENT_GRADIENT_RATIO:
+        return None
+    return r
+
+
+def _route_max_gradient_pct_from_ratios(ratios: List[float]) -> float:
+    """Максимум по валидным сегментам; ослабление единичного выброса относительно остальных."""
+    if not ratios:
+        return 0.0
+    s = sorted(ratios)
+    n = len(s)
+    peak = s[-1]
+    if n >= 2 and peak > 0.32 and (peak - s[-2]) > 0.14:
+        peak = s[-2]
+    pct = peak * 100.0
+    return round(min(pct, 55.0), 1)
+
+
+def _route_avg_gradient_pct_from_ratios(ratios: List[float]) -> float:
+    if not ratios:
+        return 0.0
+    return round((sum(ratios) / len(ratios)) * 100.0, 1)
 
 
 def coerce_edge_weight_numeric(val: Any, *, fallback: float = float("inf")) -> float:
@@ -975,24 +1016,22 @@ class RouteService:
         if route is None:
             return zero
 
-        climb = descent = max_g = 0.0
-        grads: List[float] = []
+        climb = descent = 0.0
+        ratios: List[float] = []
 
         for i in range(route.edge_count):
             d = G.edges[route.edges[i]]
-            g = _edge_gradient_abs_capped(d)
-            grads.append(g)
             climb += d.get("edge_climb", 0.0)
             descent += d.get("edge_descent", 0.0)
-            max_g = max(max_g, g)
+            gr = _segment_gradient_ratio_for_stats(d)
+            if gr is not None:
+                ratios.append(gr)
 
         return {
             "climb": climb,
             "descent": descent,
-            "max_gradient_pct": max_g * 100,
-            "avg_gradient_pct": (
-                (sum(grads) / len(grads) * 100) if grads else 0.0
-            ),
+            "max_gradient_pct": _route_max_gradient_pct_from_ratios(ratios),
+            "avg_gradient_pct": _route_avg_gradient_pct_from_ratios(ratios),
         }
 
     @staticmethod

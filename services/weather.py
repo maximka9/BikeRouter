@@ -227,16 +227,20 @@ def fetch_open_meteo_hourly(
     *,
     historical: bool = False,
 ) -> WeatherSnapshot:
-    """Почасовая погода Open-Meteo. *when_iso* — локальное время ISO (YYYY-MM-DDTHH:MM:SS)."""
-    from datetime import datetime
+    """Почасовая погода Open-Meteo. *when_iso* — ISO (локальное или с offset)."""
+    from datetime import datetime, timedelta, timezone
+
+    def _as_utc(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
 
     raw = str(when_iso).strip().replace("Z", "+00:00")
     try:
-        dt = datetime.fromisoformat(raw)
+        dt = _as_utc(datetime.fromisoformat(raw))
     except ValueError:
-        dt = datetime.utcnow()
+        dt = datetime.now(timezone.utc)
     dstr = dt.date().isoformat()
-    hour = dt.hour
 
     url = _OPEN_METEO_ARCHIVE if historical else _OPEN_METEO_FORECAST
     params = {
@@ -274,7 +278,11 @@ def fetch_open_meteo_hourly(
     if not times:
         return WeatherSnapshot()
 
-    # найти индекс ближайшего часа
+    # Open-Meteo отдаёт time без tz — в локальном поясe точки; utc_offset_seconds в корне ответа.
+    offset_sec = int(data.get("utc_offset_seconds") or 0)
+    local_tz = timezone(timedelta(seconds=offset_sec))
+
+    # ближайший почасовой слот: сравниваем всё в UTC ( aware vs naive из API).
     target_h = dt.replace(minute=0, second=0, microsecond=0)
     best_i = 0
     best_d = 1e9
@@ -283,7 +291,11 @@ def fetch_open_meteo_hourly(
             tsi = datetime.fromisoformat(str(ts))
         except ValueError:
             continue
-        d = abs((tsi - target_h).total_seconds())
+        if tsi.tzinfo is not None:
+            tsi_utc = tsi.astimezone(timezone.utc)
+        else:
+            tsi_utc = tsi.replace(tzinfo=local_tz).astimezone(timezone.utc)
+        d = abs((tsi_utc - target_h).total_seconds())
         if d < best_d:
             best_d = d
             best_i = i

@@ -7,7 +7,7 @@
 
   <!-- MapLibre и шрифты с того же origin — иначе на LAN/мобильной сети вкладка может «вечно» ждать unpkg/Google Fonts -->
   <link href="/static/vendor/maplibre/maplibre-gl.css?v=20260430-1" rel="stylesheet">
-  <link href="/static/style.css?v=20260419-why-gradient-map" rel="stylesheet">
+  <link href="/static/style.css?v=20260419-stress-mask" rel="stylesheet">
 </head>
 <body>
 
@@ -141,6 +141,15 @@
     <button type="button" class="map-context-menu-item" role="menuitem" data-which="end">Точка сюда</button>
   </div>
   <div class="map-overlay-ui">
+    <label class="stress-mask-control" title="Тестовая визуализация LTS-стресса рёбер графа (не влияет на расчёт)">
+      <input type="checkbox" id="stress-mask-toggle" />
+      <span>Показать стресс графа</span>
+    </label>
+    <div id="stress-mask-legend" class="stress-mask-legend hidden" aria-hidden="true">
+      <div class="stress-mask-legend-title">Маска безопасности (LTS)</div>
+      <span class="stress-mask-legend-row">Светлее — безопаснее</span>
+      <span class="stress-mask-legend-row">Краснее — напряжённее</span>
+    </div>
     <div id="map-legend" class="map-legend hidden" aria-hidden="true"></div>
     <button type="button" id="fit-routes-btn" class="map-fit-btn" disabled title="Показать все построенные варианты в кадре">Показать весь маршрут</button>
   </div>
@@ -153,6 +162,6 @@
 </div>
 
 <script src="/static/vendor/maplibre/maplibre-gl.js?v=20260430-1"></script>
-<script src="/static/app.js?v=20260419-why-gradient-map"></script>
+  <script src="/static/app.js?v=20260419-stress-mask"></script>
 </body>
 </html>

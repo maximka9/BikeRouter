@@ -75,10 +75,16 @@ const state = {
   jobPendingGreen: false,
   /** Инкремент при сбросе — отмена фонового poll */
   routeFetchSeq: 0,
+  /** Тестовая маска стресса дорожного графа (не влияет на расчёт). */
+  stressMaskEnabled: false,
 };
 
 /** Слои линий на карте: до 6 вариантов + запас. */
 const N_ROUTE_LAYERS = 8;
+/** Слой отладочной маски стресса (под линиями маршрутов). */
+const STRESS_OVERLAY_SRC = 'stress-overlay-src';
+const STRESS_OVERLAY_LAYER = 'stress-overlay-layer';
+let stressOverlayFetchTimer = null;
 /** Задержка перед запросом подсказок геокодера (мс). */
 const GEO_SUGGEST_DEBOUNCE_MS = 320;
 const geoSuggestTimers = { start: null, end: null };
@@ -153,6 +159,8 @@ const dom = {
   resultsEmpty: $('#results-empty'),
   mapHintToggle: $('#map-hint-toggle'),
   mapHintTooltip: $('#map-hint-tooltip'),
+  stressMaskToggle: $('#stress-mask-toggle'),
+  stressMaskLegend: $('#stress-mask-legend'),
   mobileEditPointsBtn: $('#mobile-edit-points-btn'),
   mobileBackVariantsBtn: $('#mobile-back-variants-btn'),
   mobileRouteCompact: $('#mobile-route-compact'),
@@ -474,6 +482,7 @@ function initMap() {
   /* Атрибуция CARTO/OSM задаётся у raster-источника; MapLibre показывает её стандартным блоком. */
 
   map.on('load', () => {
+    addStressOverlayLayer();
     addRouteSources();
     addOverlaySources();
     void applyUrlFromQuery();
@@ -674,6 +683,105 @@ function fitAllRoutesInView() {
   });
 }
 
+function addStressOverlayLayer() {
+  const empty = { type: 'FeatureCollection', features: [] };
+  map.addSource(STRESS_OVERLAY_SRC, { type: 'geojson', data: empty });
+  map.addLayer({
+    id: STRESS_OVERLAY_LAYER,
+    type: 'line',
+    source: STRESS_OVERLAY_SRC,
+    layout: {
+      visibility: 'none',
+      'line-cap': 'round',
+      'line-join': 'round',
+    },
+    paint: {
+      'line-width': 5,
+      'line-opacity': 0.48,
+      'line-color': [
+        'interpolate',
+        ['linear'],
+        ['to-number', ['get', 'stress_lts'], 1.5],
+        1.0,
+        'rgba(236,248,238,0.18)',
+        1.5,
+        'rgba(255,236,150,0.4)',
+        2.2,
+        'rgba(255,160,65,0.52)',
+        3.0,
+        'rgba(235,65,45,0.6)',
+        4.0,
+        'rgba(115,18,24,0.65)',
+      ],
+    },
+  });
+}
+
+function clearStressOverlayData() {
+  if (!map) return;
+  const src = map.getSource(STRESS_OVERLAY_SRC);
+  if (src) src.setData({ type: 'FeatureCollection', features: [] });
+}
+
+function applyStressMaskLayout() {
+  if (!map || !map.getLayer(STRESS_OVERLAY_LAYER)) return;
+  const on = state.stressMaskEnabled;
+  map.setLayoutProperty(STRESS_OVERLAY_LAYER, 'visibility', on ? 'visible' : 'none');
+  if (dom.stressMaskLegend) {
+    dom.stressMaskLegend.classList.toggle('hidden', !on);
+    dom.stressMaskLegend.setAttribute('aria-hidden', on ? 'false' : 'true');
+  }
+}
+
+async function fetchAndApplyStressOverlay() {
+  if (!map || !state.stressMaskEnabled) return;
+  const sc = state.startCoords;
+  const ec = state.endCoords;
+  if (!sc || !ec) {
+    clearStressOverlayData();
+    applyStressMaskLayout();
+    return;
+  }
+  const params = new URLSearchParams({
+    start_lat: String(sc.lat),
+    start_lon: String(sc.lon),
+    end_lat: String(ec.lat),
+    end_lon: String(ec.lon),
+  });
+  try {
+    const res = await fetch(`${API}/graph/stress-overlay?${params}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      showToast(
+        `Не удалось загрузить маску стресса (${res.status}). ${errText.slice(0, 120)}`,
+        'warn',
+        8000,
+      );
+      return;
+    }
+    const gj = await res.json();
+    const src = map.getSource(STRESS_OVERLAY_SRC);
+    if (src) src.setData(gj);
+    applyStressMaskLayout();
+  } catch (e) {
+    const isNet = e instanceof TypeError && String(e.message || '').toLowerCase().includes('fetch');
+    showToast(
+      isNet ? 'Сеть: не удалось запросить маску стресса.' : (e.message || 'Ошибка маски стресса'),
+      'error',
+      7000,
+    );
+  }
+}
+
+function scheduleStressOverlayRefresh() {
+  if (!state.stressMaskEnabled) return;
+  clearTimeout(stressOverlayFetchTimer);
+  stressOverlayFetchTimer = setTimeout(() => {
+    stressOverlayFetchTimer = null;
+    void fetchAndApplyStressOverlay();
+  }, 450);
+}
+
 function addRouteSources() {
   const empty = { type: 'FeatureCollection', features: [] };
   for (let i = 0; i < N_ROUTE_LAYERS; i++) {
@@ -843,6 +951,7 @@ function clearRoutes() {
   removeOverlayPopup();
   if (dom.fitRoutesBtn) dom.fitRoutesBtn.disabled = true;
   clearOverlaySources();
+  clearStressOverlayData();
   state.routeList = [];
   state.routes = null;
   state.selectedVariantIndex = 0;
@@ -1240,6 +1349,7 @@ function setPoint(type, lat, lon) {
   updateBuildBtn();
   clearRoutes();
   if (!urlSyncSuppressed) syncUrlFromState();
+  scheduleStressOverlayRefresh();
 }
 
 function resetRouteOnly() {
@@ -1271,6 +1381,7 @@ function swapPoints() {
   clearRoutes();
   syncUrlFromState();
   updateMobileRouteCompact();
+  scheduleStressOverlayRefresh();
 }
 
 /* ═══════════ Route building ═════════════════════════════════ */
@@ -1361,6 +1472,9 @@ async function buildRoute() {
 
     displayRoutes(data);
     await showResults(data, prefer);
+    if (state.stressMaskEnabled) {
+      void fetchAndApplyStressOverlay();
+    }
   }
 
   try {
@@ -1933,6 +2047,19 @@ function setupEvents() {
     });
   }
   dom.buildBtn.addEventListener('click', buildRoute);
+
+  if (dom.stressMaskToggle) {
+    dom.stressMaskToggle.addEventListener('change', () => {
+      state.stressMaskEnabled = !!dom.stressMaskToggle.checked;
+      if (state.stressMaskEnabled) {
+        applyStressMaskLayout();
+        void fetchAndApplyStressOverlay();
+      } else {
+        applyStressMaskLayout();
+        clearStressOverlayData();
+      }
+    });
+  }
 
   if (dom.resetRouteBtn) dom.resetRouteBtn.addEventListener('click', resetRouteOnly);
   if (dom.fitRoutesBtn) dom.fitRoutesBtn.addEventListener('click', fitAllRoutesInView);

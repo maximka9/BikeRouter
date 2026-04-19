@@ -374,6 +374,25 @@ async def alternatives(req: AlternativesRequest):
         ) from exc
 
 
+@app.get(
+    "/graph/stress-overlay",
+    tags=["Routing"],
+    summary="GeoJSON маски стресса по рёбрам текущего графа (коридор start–end)",
+)
+async def graph_stress_overlay(
+    start_lat: float = Query(..., ge=-90, le=90),
+    start_lon: float = Query(..., ge=-180, le=180),
+    end_lat: float = Query(..., ge=-90, le=90),
+    end_lon: float = Query(..., ge=-180, le=180),
+):
+    """Тестовая визуализация: рёбра рабочего графа с полями stress_lts, stress_cost и т.д."""
+    try:
+        engine._ensure_graph_for_corridor((start_lat, start_lon), (end_lat, end_lon))
+        return engine.build_stress_overlay_geojson()
+    except BikeRouterError as exc:
+        raise _route_error(exc) from exc
+
+
 @app.post(
     "/alternatives/start",
     response_model=AlternativesStartResponse,

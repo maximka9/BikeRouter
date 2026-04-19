@@ -77,6 +77,7 @@ from .metrics import (
 from .services.routing import (
     RouteResult,
     RouteService,
+    _first_value,
     sanitize_multidigraph_routing_weights,
 )
 from .services.weather import (
@@ -195,6 +196,55 @@ def _build_weather_route_context(
         snapshot=_weather_snapshot_to_values(snap),
         multipliers=mults,
         summary_ru=_weather_summary_ru(snap, wp),
+    )
+
+
+def _iso_utc_z(dt: datetime) -> str:
+    """UTC ISO-8601 с суффиксом Z (без смещения)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _log_route_weather_line(
+    *,
+    built_at_utc: datetime,
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    snap: WeatherSnapshot,
+    source: str,
+    wp: WeatherWeightParams,
+    weather_time_effective: Optional[str],
+) -> None:
+    """Один компактный блок в лог на запрос альтернатив (см. ТЗ route_weather)."""
+    lat = (float(start[0]) + float(end[0])) * 0.5
+    lon = (float(start[1]) + float(end[1])) * 0.5
+    sw = snap.shortwave_radiation_wm2
+    sw_txt = f"{sw:.2f}" if sw is not None else "—"
+    m = wp.mults
+    mult = (
+        f"physical:{m.physical:.3f},heat:{m.heat:.3f},green:{m.green:.3f},"
+        f"stress:{m.stress:.3f},surface:{m.surface:.3f}"
+    )
+    logger.info(
+        "route_weather: built_at=%s weather_time=%s source=%s lat=%.5f lon=%.5f "
+        "temp_c=%.2f precip_mm=%.4f wind_ms=%.2f cloud_pct=%.1f humidity_pct=%.1f "
+        "sw_wm2=%s mult={%s} weather_enabled=%s",
+        _iso_utc_z(built_at_utc),
+        weather_time_effective or "—",
+        source or "none",
+        lat,
+        lon,
+        snap.temperature_c,
+        snap.precipitation_mm,
+        snap.wind_speed_ms,
+        snap.cloud_cover_pct,
+        snap.humidity_pct,
+        sw_txt,
+        mult,
+        wp.enabled,
     )
 
 
@@ -1140,6 +1190,38 @@ class RouteEngine:
             G, start, end, exclude
         )
 
+    def build_stress_overlay_geojson(self) -> Dict[str, Any]:
+        """GeoJSON FeatureCollection: рёбра текущего графа со стресс-полями (отладочная маска)."""
+        with self._graph_lock:
+            if not self._loaded or self._graph is None:
+                raise BikeRouterError("Граф не загружен. Вызовите warmup().")
+            G = self._graph
+        feats: List[dict] = []
+        for u, v, key, d in G.edges(data=True, keys=True):
+            coords = RouteService._edge_linestring_coords(G, u, v, key)
+            if len(coords) < 2:
+                continue
+            ln = float(d.get("length", 0.0) or 0.0)
+            lts = float(d.get("stress_lts", 1.5) or 1.5)
+            isc = float(d.get("stress_intersection_score", 0.0) or 0.0)
+            sc = float(d.get("stress_cost", 0.0) or 0.0)
+            hw = _first_value(d.get("highway", ""))
+            hw_s = str(hw or "").lower()
+            feats.append(
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                    "properties": {
+                        "stress_lts": round(lts, 3),
+                        "intersection_stress": round(isc, 4),
+                        "stress_cost": round(sc, 2),
+                        "highway": hw_s,
+                        "length_m": round(ln, 1),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": feats}
+
     def compute_route(
         self,
         start: Tuple[float, float],
@@ -1999,6 +2081,15 @@ class RouteEngine:
             snap=w_snap,
             source=wsrc,
             wp=wp,
+        )
+        _log_route_weather_line(
+            built_at_utc=now_utc,
+            start=start,
+            end=end,
+            snap=w_snap,
+            source=wsrc,
+            wp=wp,
+            weather_time_effective=weather_ctx.weather_time,
         )
 
         inc_route_disk_miss()

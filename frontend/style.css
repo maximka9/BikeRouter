@@ -892,6 +892,48 @@ body {
   pointer-events: auto;
 }
 
+.stress-mask-control {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  user-select: none;
+}
+.stress-mask-control input {
+  margin-top: 3px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.stress-mask-legend {
+  padding: 8px 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+.stress-mask-legend-title {
+  font-weight: 700;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.stress-mask-legend-row {
+  display: block;
+}
+
 .map-fit-btn {
   padding: 8px 12px;
   font-family: var(--font);

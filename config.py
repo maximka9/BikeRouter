@@ -260,6 +260,24 @@ ROUTING_PREFERENCE_PROFILES: Dict[str, RoutingPreferenceProfile] = {
         gamma=0.5,
         delta=0.5,
     ),
+    # Тепловой маршрут: доминирует weight_*_full; тепло — корректирующий член (не «ещё один green»).
+    "thermal_physical_base": RoutingPreferenceProfile(
+        key="thermal_physical_base",
+        label="Тепло на физической базе",
+        alpha=1.0,
+        beta=0.36,
+        gamma=0.2,
+        delta=0.72,
+    ),
+    # Стресс-маршрут на той же физической базе, что и full (не чистый stress_cost).
+    "stress_physical_base": RoutingPreferenceProfile(
+        key="stress_physical_base",
+        label="Безопасность на физической базе",
+        alpha=1.0,
+        beta=0.14,
+        gamma=1.08,
+        delta=1.05,
+    ),
 }
 
 
@@ -372,9 +390,16 @@ class Settings:
     end_lat: float = _env("END_LAT", 53.195334, float)
     end_lon: float = _env("END_LON", 50.124063, float)
     buffer: float = _env("BUFFER", 0.003, float)
-    # При GRAPH_CORRIDOR_MODE: если > 0 — запас коридора в метрах (раздельно по широте/долготе).
-    # По умолчанию 400 м (~как BUFFER=0.003° по широте); 0 — явный откат на BUFFER в градусах.
+    # При GRAPH_CORRIDOR_MODE: база для метаданных/fingerprint; основная последовательность
+    # буферов задаётся в CORRIDOR_BUFFER_EXPAND_SCHEDULE.
     corridor_buffer_meters: float = _env("CORRIDOR_BUFFER_METERS", 400.0, float)
+    # При NO_PATH: подряд пробовать буферы коридора (м), напр. 10,100,1000,5000.
+    # Пустая строка — одна попытка только с CORRIDOR_BUFFER_METERS (>0), иначе без буфера (BUFFER в °).
+    corridor_buffer_expand_schedule: str = field(
+        default_factory=lambda: _env(
+            "CORRIDOR_BUFFER_EXPAND_SCHEDULE", "10,100,1000,5000", str
+        )
+    )
 
     # --- Область покрытия графа (для API) ---
     # Если заданы все четыре AREA_*, граф загружается по ним, а не по
@@ -408,6 +433,9 @@ class Settings:
     # --- Лимиты маршрутизации ---
     max_route_km: float = _env("MAX_ROUTE_KM", 50.0, float)
     max_snap_distance_m: float = _env("MAX_SNAP_DISTANCE_M", 500.0, float)
+    # Макс. относительное удлинение vs маршрут «Оптимальный по энергии» (full) для thermal/stress режимов.
+    heat_max_detour_ratio: float = _env("HEAT_MAX_DETOUR_RATIO", 0.42, float)
+    stress_max_detour_ratio: float = _env("STRESS_MAX_DETOUR_RATIO", 0.55, float)
 
     # --- Кэш ---
     cache_satellite: bool = _env_bool("CACHE_SATELLITE", True)
@@ -441,11 +469,10 @@ class Settings:
         "PRECACHE_AREA_USE_GREEN_GRAPH", True
     )
 
-    # --- Авторасширение коридора при NO_PATH (только при CORRIDOR_BUFFER_METERS > 0) ---
+    # --- Legacy: было base + AUTO_EXPAND_STEP *(...) до AUTO_EXPAND_MAX_METERS;
+    # сейчас приоритет у CORRIDOR_BUFFER_EXPAND_SCHEDULE (см. corridor_expand_schedule_meters).
     auto_expand_step_meters: float = _env("AUTO_EXPAND_STEP_METERS", 1000.0, float)
-    # Верхняя граница суммарной «добавки» к буферу (м); совместно с AUTO_EXPAND_MAX_ATTEMPTS.
     auto_expand_max_meters: float = _env("AUTO_EXPAND_MAX_METERS", 5000.0, float)
-    # Максимум попыток с разным eff=base+extra (первая при extra=0). При исчерпании — NO_PATH.
     auto_expand_max_attempts: int = int(
         max(1, round(_env("AUTO_EXPAND_MAX_ATTEMPTS", 5.0, float)))
     )
@@ -552,6 +579,30 @@ class Settings:
         return bool(w) and (
             w.startswith("POLYGON") or w.startswith("MULTIPOLYGON")
         )
+
+    @property
+    def corridor_expand_schedule_meters(self) -> List[float]:
+        """Список буферов коридора (м) по возрастанию попыток при NO_PATH.
+
+        Читается из ``CORRIDOR_BUFFER_EXPAND_SCHEDULE`` (числа через запятую).
+        Если строка пустая — одна попытка с ``CORRIDOR_BUFFER_METERS``, если оно > 0.
+        """
+        raw = (self.corridor_buffer_expand_schedule or "").strip()
+        out: List[float] = []
+        for part in raw.split(","):
+            p = part.strip()
+            if not p:
+                continue
+            try:
+                v = float(p)
+            except ValueError:
+                continue
+            if v > 0:
+                out.append(v)
+        if out:
+            return out
+        b = float(self.corridor_buffer_meters)
+        return [b] if b > 0 else []
 
     def resolved_overpass_endpoints(self) -> List[str]:
         """Цепочка Overpass: зеркало(а) и основной инстанс — по очереди, не параллельно."""

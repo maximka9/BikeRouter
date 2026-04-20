@@ -10,10 +10,10 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import networkx as nx
 import osmnx as ox
@@ -126,6 +126,8 @@ def _engine_weather_mode(request_mode: Optional[str], use_live_weather: bool) ->
     if use_live_weather:
         return "auto"
     m = (request_mode or "none").strip().lower()
+    if m in ("fixed-snapshot", "fixed_snapshot"):
+        return "fixed-snapshot"
     return m if m else "none"
 
 
@@ -266,7 +268,7 @@ def _resolve_route_weather(
     lon = (float(start[1]) + float(end[1])) * 0.5
     wm = _engine_weather_mode(request_mode, use_live_weather)
     manual: Optional[WeatherSnapshot] = None
-    if wm == "manual":
+    if wm in ("manual", "fixed-snapshot"):
         manual = snapshot_from_manual(
             temperature_c=temperature_c,
             precipitation_mm=precipitation_mm,
@@ -278,7 +280,7 @@ def _resolve_route_weather(
         lat=lat,
         lon=lon,
         weather_mode=wm,
-        use_live_weather=False,
+        use_live_weather=use_live_weather,
         weather_time_iso=weather_time,
         departure_time=departure_time,
         manual=manual,
@@ -341,6 +343,23 @@ def _raise_route_not_found_after_corridor_expand(
         f"Маршрут не найден после {attempt} попыток (последний коридор ±{eff:.0f} м; "
         f"база {base:.0f} м, шаг {step:.0f} м, не более {max_attempts} попыток, "
         f"макс. доп. к буферу {max_extra:.0f} м). "
+        "Попробуйте другие точки ближе к связной сети дорог."
+    )
+    raise RouteNotFoundError(last_exc.weight_key, msg) from last_exc
+
+
+def _raise_route_not_found_after_schedule(
+    last_exc: RouteNotFoundError,
+    *,
+    schedule: Sequence[float],
+    last_eff: float,
+    attempts: int,
+) -> None:
+    """После перебора CORRIDOR_BUFFER_EXPAND_SCHEDULE — NO_PATH."""
+    sched_s = ", ".join(f"{x:.0f}" for x in schedule)
+    msg = (
+        f"Маршрут не найден после {attempts} попыток "
+        f"(буферы коридора м: {sched_s}; последний ±{last_eff:.0f} м). "
         "Попробуйте другие точки ближе к связной сети дорог."
     )
     raise RouteNotFoundError(last_exc.weight_key, msg) from last_exc
@@ -1707,6 +1726,54 @@ class RouteEngine:
             thermal_model_proxy=self._route_uses_thermal_proxy(G, route),
         )
 
+    def _combined_route_with_detour_cap(
+        self,
+        G: nx.MultiDiGraph,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        profile_key: str,
+        time_slot_key: str,
+        preference_key: str,
+        *,
+        max_detour_ratio: float,
+        heat_context_mult: float,
+        weather: Optional[WeatherWeightParams],
+    ) -> Tuple[RouteResult, str]:
+        """Поиск по α·physical+β·heat+γ·stress с ограничением длины относительно full.
+
+        Возвращает маршрут и короткую русскую подпись, если пришлось упасть на эталон full.
+        """
+        router = self._app.router
+        w_full = f"weight_{profile_key}_full"
+        base = routing_preference_profile(preference_key)
+        rf = router.find_route(G, start, end, w_full)
+        lf = router.calculate_length(G, rf)
+        beta = float(base.beta)
+        gamma = float(base.gamma)
+        r_last: Optional[RouteResult] = None
+        cap = max(0.0, float(max_detour_ratio))
+        for _ in range(7):
+            pref = replace(base, beta=beta, gamma=gamma)
+            r = router.find_route_combined(
+                G,
+                start,
+                end,
+                profile_key,
+                time_slot_key,
+                pref,
+                heat_context_mult=heat_context_mult,
+                weather=weather,
+                physical_weight_key=w_full,
+            )
+            r_last = r
+            lh = router.calculate_length(G, r)
+            if lf <= 1e-9 or lh <= lf * (1.0 + cap):
+                return r, ""
+            beta *= 0.52
+            gamma *= 0.96
+        assert r_last is not None
+        return rf, "ограничение обхода: как «Оптимальный по энергии»"
+
     def _build_criterion_routes(
         self,
         start: Tuple[float, float],
@@ -1730,9 +1797,23 @@ class RouteEngine:
             season, time_slot_key, air_temperature_c
         )
 
+        w_full_key = f"weight_{profile_key}_full"
+
         if crit == "heat":
-            hk = f"heat_{time_slot_key}"
-            r = router.find_route(G, start, end, hk)
+            r, cap_note = self._combined_route_with_detour_cap(
+                G,
+                start,
+                end,
+                profile_key,
+                time_slot_key,
+                "thermal_physical_base",
+                max_detour_ratio=self._app.settings.heat_max_detour_ratio,
+                heat_context_mult=hm_ctx,
+                weather=weather,
+            )
+            h_label = "С учётом теплового комфорта"
+            if cap_note:
+                h_label = f"{h_label} ({cap_note})"
             seg = router.route_segment_costs(
                 G,
                 r,
@@ -1740,6 +1821,7 @@ class RouteEngine:
                 time_slot_key,
                 heat_context_mult=hm_ctx,
                 weather=weather,
+                physical_weight_key=w_full_key,
             )
             metrics = self._make_heat_stress_metrics(
                 G,
@@ -1751,6 +1833,7 @@ class RouteEngine:
                 air_temperature_c=air_temperature_c,
                 heat_mult=hm_ctx,
                 weather=weather,
+                physical_weight_key=w_full_key,
             )
             rc = self._routing_context_meta(
                 time_slot_key=time_slot_key,
@@ -1769,17 +1852,30 @@ class RouteEngine:
                     profile_key,
                     "heat",
                     r,
-                    hk,
-                    "С учётом теплового комфорта",
+                    w_full_key,
+                    h_label,
                     graph=G,
-                    cost_override=seg["heat"],
+                    cost_override=round(seg["heat"], 1),
                     heat_stress_metrics=metrics,
                     routing_context=rc,
                     weather=weather_ctx,
                 )
             )
         elif crit == "stress":
-            r = router.find_route(G, start, end, "stress_cost")
+            r, cap_note = self._combined_route_with_detour_cap(
+                G,
+                start,
+                end,
+                profile_key,
+                time_slot_key,
+                "stress_physical_base",
+                max_detour_ratio=self._app.settings.stress_max_detour_ratio,
+                heat_context_mult=hm_ctx,
+                weather=weather,
+            )
+            s_label = "С учётом безопасности (минимальный стресс)"
+            if cap_note:
+                s_label = f"{s_label} ({cap_note})"
             seg = router.route_segment_costs(
                 G,
                 r,
@@ -1787,6 +1883,7 @@ class RouteEngine:
                 time_slot_key,
                 heat_context_mult=hm_ctx,
                 weather=weather,
+                physical_weight_key=w_full_key,
             )
             metrics = self._make_heat_stress_metrics(
                 G,
@@ -1798,6 +1895,7 @@ class RouteEngine:
                 air_temperature_c=air_temperature_c,
                 heat_mult=hm_ctx,
                 weather=weather,
+                physical_weight_key=w_full_key,
             )
             rc = self._routing_context_meta(
                 time_slot_key=time_slot_key,
@@ -1816,10 +1914,10 @@ class RouteEngine:
                     profile_key,
                     "stress",
                     r,
-                    "stress_cost",
-                    "С учётом безопасности (минимальный стресс)",
+                    w_full_key,
+                    s_label,
                     graph=G,
-                    cost_override=seg["stress"],
+                    cost_override=round(seg["stress"], 1),
                     heat_stress_metrics=metrics,
                     routing_context=rc,
                     weather=weather_ctx,
@@ -1836,6 +1934,7 @@ class RouteEngine:
                     pref,
                     heat_context_mult=hm_ctx,
                     weather=weather,
+                    physical_weight_key=w_full_key,
                 )
             else:
                 r = router.find_route_combined(
@@ -1847,6 +1946,7 @@ class RouteEngine:
                     pref,
                     heat_context_mult=hm_ctx,
                     weather=weather,
+                    physical_weight_key=w_full_key,
                 )
             metrics = self._make_heat_stress_metrics(
                 G,
@@ -1858,6 +1958,7 @@ class RouteEngine:
                 air_temperature_c=air_temperature_c,
                 heat_mult=hm_ctx,
                 weather=weather,
+                physical_weight_key=w_full_key,
             )
             rc = self._routing_context_meta(
                 time_slot_key=time_slot_key,
@@ -1903,6 +2004,7 @@ class RouteEngine:
                 air_temperature_c=air_temperature_c,
                 heat_mult=hm_ctx,
                 weather=weather,
+                physical_weight_key=w_full_key,
             )
             rc_s = self._routing_context_meta(
                 time_slot_key=time_slot_key,
@@ -1994,8 +2096,8 @@ class RouteEngine:
             note: Optional[str] = None
             if r.mode == "heat":
                 note = (
-                    "В отличие от зелёного маршрута, этот вариант учитывает не только "
-                    "озеленение, но и текущую погоду и тепловую нагрузку."
+                    "Тепловой комфорт на базе энергетического маршрута (рельеф/покрытие), "
+                    "с учётом погоды и геометрии среды; не эквивалентен «максимально зелёному»."
                 )
             effect: Optional[str] = None
             if base_len is not None and r.mode != "shortest":
@@ -2035,11 +2137,16 @@ class RouteEngine:
         wind_speed_ms: Optional[float] = None,
         cloud_cover_pct: Optional[float] = None,
         humidity_pct: Optional[float] = None,
+        corridor_expand_schedule_meters: Optional[Sequence[float]] = None,
     ) -> AlternativesResponse:
         """Все доступные варианты сразу: кратчайший, энергия, зелёный, тепло, стресс, тепло+безопасность.
 
         Внутри для тепло/стресс комбинаций используется профиль предпочтений
         ``balanced`` (см. ``routing_preference_profile`` в config).
+
+        ``corridor_expand_schedule_meters``: если задано, подставляется вместо
+        ``Settings.corridor_expand_schedule_meters`` при переборе буферов коридора
+        (режим dynamic corridor). Иначе — из конфигурации.
         """
         profile = _PROFILE_MAP.get(profile_key)
         if profile is None:
@@ -2106,7 +2213,12 @@ class RouteEngine:
         include_green = green_enabled
         routes_base: List[RouteResponse]
 
-        if not s.use_dynamic_corridor_graph or s.corridor_buffer_meters <= 0:
+        buf_sched = (
+            list(corridor_expand_schedule_meters)
+            if corridor_expand_schedule_meters is not None
+            else s.corridor_expand_schedule_meters
+        )
+        if not s.use_dynamic_corridor_graph or not buf_sched:
             routes_base = self._compute_alternatives_once(
                 start,
                 end,
@@ -2118,21 +2230,15 @@ class RouteEngine:
                 time_slot_key=slot_key,
                 heat_context_mult=hm_default,
                 weather_ctx=weather_ctx,
-                enrich_heat_stress_metrics=False,
+                enrich_heat_stress_metrics=True,
                 routing_profile_key=rp_internal,
                 season=season_val,
                 air_temperature_c=air_eff,
             )
         else:
-            base_buf = float(s.corridor_buffer_meters)
-            extra = 0.0
-            attempt = 0
-            step = max(1.0, float(s.auto_expand_step_meters))
-            max_extra = max(0.0, float(s.auto_expand_max_meters))
-            max_attempts = max(1, int(s.auto_expand_max_attempts))
-            while True:
-                attempt += 1
-                eff = base_buf + extra
+            routes_base = None
+            last_nf: Optional[RouteNotFoundError] = None
+            for attempt, eff in enumerate(buf_sched, start=1):
                 try:
                     routes_base = self._compute_alternatives_once(
                         start,
@@ -2140,12 +2246,12 @@ class RouteEngine:
                         profile_key,
                         include_green_route=include_green,
                         skip_satellite_green=skip_sat,
-                        corridor_buffer_meters=eff,
+                        corridor_buffer_meters=float(eff),
                         weather=wp,
                         time_slot_key=slot_key,
                         heat_context_mult=hm_default,
                         weather_ctx=weather_ctx,
-                        enrich_heat_stress_metrics=False,
+                        enrich_heat_stress_metrics=True,
                         routing_profile_key=rp_internal,
                         season=season_val,
                         air_temperature_c=air_eff,
@@ -2159,6 +2265,7 @@ class RouteEngine:
                     )
                     break
                 except RouteNotFoundError as e:
+                    last_nf = e
                     logger.warning(
                         "auto_expand_corridor attempt=%d corridor_m=%.0f "
                         "result=no_path code=%s",
@@ -2166,27 +2273,19 @@ class RouteEngine:
                         eff,
                         e.code,
                     )
-                    at_attempts = attempt >= max_attempts
-                    at_extra_cap = extra + step > max_extra + 1e-6
-                    if at_attempts or at_extra_cap:
+                    if attempt >= len(buf_sched):
                         logger.warning(
-                            "auto_expand_corridor exhausted attempt=%d "
-                            "corridor_m=%.0f max_extra_m=%.0f max_attempts=%d",
-                            attempt,
-                            eff,
-                            max_extra,
-                            max_attempts,
+                            "auto_expand_corridor exhausted schedule (%s) м",
+                            ",".join(f"{x:.0f}" for x in buf_sched),
                         )
-                        _raise_route_not_found_after_corridor_expand(
-                            e,
-                            eff=eff,
-                            base=base_buf,
-                            max_extra=max_extra,
-                            step=step,
-                            attempt=attempt,
-                            max_attempts=max_attempts,
+                        assert last_nf is not None
+                        _raise_route_not_found_after_schedule(
+                            last_nf,
+                            schedule=buf_sched,
+                            last_eff=float(eff),
+                            attempts=attempt,
                         )
-                    extra += step
+            assert routes_base is not None
 
         with self._graph_lock:
             if not self._loaded or self._graph is None:
@@ -2256,7 +2355,8 @@ class RouteEngine:
                 logger.debug("alternatives_phase1: route cache invalid, recalculating")
 
         inc_route_disk_miss()
-        if not s.use_dynamic_corridor_graph or s.corridor_buffer_meters <= 0:
+        buf_sched = s.corridor_expand_schedule_meters
+        if not s.use_dynamic_corridor_graph or not buf_sched:
             return self._compute_alternatives_once(
                 start,
                 end,
@@ -2265,15 +2365,8 @@ class RouteEngine:
                 skip_satellite_green=True,
                 corridor_buffer_meters=None,
             )
-        base = float(s.corridor_buffer_meters)
-        extra = 0.0
-        attempt = 0
-        step = max(1.0, float(s.auto_expand_step_meters))
-        max_extra = max(0.0, float(s.auto_expand_max_meters))
-        max_attempts = max(1, int(s.auto_expand_max_attempts))
-        while True:
-            attempt += 1
-            eff = base + extra
+        last_nf: Optional[RouteNotFoundError] = None
+        for attempt, eff in enumerate(buf_sched, start=1):
             try:
                 routes = self._compute_alternatives_once(
                     start,
@@ -2281,7 +2374,7 @@ class RouteEngine:
                     profile_key,
                     include_green_route=False,
                     skip_satellite_green=True,
-                    corridor_buffer_meters=eff,
+                    corridor_buffer_meters=float(eff),
                 )
                 logger.info(
                     "alternatives_phase1 attempt=%d corridor_m=%.0f routes=%d",
@@ -2291,29 +2384,22 @@ class RouteEngine:
                 )
                 return routes
             except RouteNotFoundError as e:
+                last_nf = e
                 logger.warning(
                     "alternatives_phase1 attempt=%d corridor_m=%.0f no_path",
                     attempt,
                     eff,
                 )
-                at_attempts = attempt >= max_attempts
-                at_extra_cap = extra + step > max_extra + 1e-6
-                if at_attempts or at_extra_cap:
+                if attempt >= len(buf_sched):
                     logger.warning(
-                        "alternatives_phase1 exhausted attempt=%d "
-                        "corridor_m=%.0f max_extra_m=%.0f max_attempts=%d",
-                        attempt,
-                        eff,
-                        max_extra,
-                        max_attempts,
+                        "alternatives_phase1 exhausted schedule (%s) м",
+                        ",".join(f"{x:.0f}" for x in buf_sched),
                     )
-                    _raise_route_not_found_after_corridor_expand(
-                        e,
-                        eff=eff,
-                        base=base,
-                        max_extra=max_extra,
-                        step=step,
-                        attempt=attempt,
-                        max_attempts=max_attempts,
+                    assert last_nf is not None
+                    _raise_route_not_found_after_schedule(
+                        last_nf,
+                        schedule=buf_sched,
+                        last_eff=float(eff),
+                        attempts=attempt,
                     )
-                extra += step
+        raise RuntimeError("alternatives_phase1: пустой corridor_expand_schedule_meters")

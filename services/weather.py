@@ -361,6 +361,9 @@ def resolve_weather_for_route(
     if mode in ("none", "off", ""):
         snap = WeatherSnapshot()
         return snap, "none", WeatherWeightParams(enabled=False)
+    if mode in ("fixed-snapshot", "fixed_snapshot") and manual is None:
+        snap = WeatherSnapshot()
+        return snap, "fixed_snapshot_unset", WeatherWeightParams(enabled=False)
 
     when = weather_time_iso or departure_time
     if not when:
@@ -368,9 +371,9 @@ def resolve_weather_for_route(
 
         when = datetime.now().isoformat(timespec="seconds")
 
-    if mode == "manual" and manual is not None:
+    if mode in ("manual", "fixed-snapshot", "fixed_snapshot") and manual is not None:
         snap = manual
-        src = "manual"
+        src = "fixed_snapshot" if "fixed" in mode else "manual"
     elif mode == "auto" or use_live_weather or mode == "live":
         use_archive = _weather_target_in_past(when)
         key = _cache_key(lat, lon, when, use_archive)

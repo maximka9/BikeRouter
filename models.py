@@ -95,7 +95,7 @@ class AlternativesRequest(BaseModel):
     )
     weather_mode: str = Field(
         default="none",
-        description="none — без погоды; auto — Open-Meteo; manual — поля ниже",
+        description="none | auto | manual | fixed-snapshot — см. resolve_weather_for_route",
     )
     use_live_weather: bool = Field(
         default=False,

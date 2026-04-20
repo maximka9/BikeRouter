@@ -9,7 +9,12 @@
 без fixed ``AREA_POLYGON_WKT``, чтобы движок использовал граф арены без
 пересборки на каждую пару.
 
-Погода отключена (``weather_mode=none``), чтобы не нагружать API и лог.
+По умолчанию погода отключена (``weather_mode=none``), чтобы не бомбить Open-Meteo
+и не раздувать лог. Включить текущий прогноз: ``--weather-mode auto``.
+
+Расширение коридора в батче только **10 м → 100 м**. Если маршрута нет и на 100 м,
+пара O-D **пропускается** (без попыток 1000/5000 м); в лог пишутся координаты
+начала/конца и идентификаторы точек.
 
 Точки O-D отбираются **только** внутри полигона из ``PRECACHE_AREA_POLYGON_WKT``
 (арена precache), через ``parse_precache_polygon`` / uniform sampling в bounds
@@ -46,6 +51,9 @@ EXPECTED_VARIANTS: Tuple[str, ...] = (
 )
 
 PROFILES: Tuple[str, ...] = ("cyclist", "pedestrian")
+
+# Перебор буфера коридора в этом эксперименте; дальше — пропуск пары (см. RouteNotFoundError).
+EXPERIMENT_CORRIDOR_EXPAND_M: Tuple[float, ...] = (10.0, 100.0)
 
 
 def _ensure_pkg_path() -> None:
@@ -190,6 +198,7 @@ def route_to_raw_row(
     d_lat: float,
     d_lon: float,
     r: Any,
+    baseline_full: Any = None,
 ) -> Dict[str, Any]:
     st = _stress_fields(r)
     wn, wt = _warnings_text(r)
@@ -199,7 +208,7 @@ def route_to_raw_row(
     geom = r.geometry or []
     geom_json = json.dumps(geom, ensure_ascii=False, separators=(",", ":"))
 
-    return {
+    out: Dict[str, Any] = {
         "route_id": route_id,
         "experiment_id": experiment_id,
         "seed": seed,
@@ -244,6 +253,20 @@ def route_to_raw_row(
         "warnings_text": wt,
         "geometry_json": geom_json,
     }
+    if baseline_full is not None:
+        out["full_baseline_length_m"] = round(float(baseline_full.length_m), 2)
+        be = baseline_full.elevation
+        out["delta_length_vs_full_m"] = round(
+            float(r.length_m) - float(baseline_full.length_m), 2
+        )
+        out["delta_climb_vs_full_m"] = round(
+            float(elev.climb_m) - float(be.climb_m), 2
+        )
+    else:
+        out["full_baseline_length_m"] = None
+        out["delta_length_vs_full_m"] = None
+        out["delta_climb_vs_full_m"] = None
+    return out
 
 
 def _mean(xs: List[float]) -> Optional[float]:
@@ -353,6 +376,100 @@ def build_pair_comparison(
     return out
 
 
+def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
+    ru = {
+        "experiment_id": "ID эксперимента",
+        "started_at_utc": "Время старта (UTC)",
+        "seed": "Seed",
+        "n_points": "Число точек",
+        "n_directed_pairs": "Направленных пар O–D",
+        "n_profiles": "Профилей",
+        "n_variants": "Вариантов маршрута",
+        "expected_route_cells": "Ожидалось строк маршрутов",
+        "successful_route_rows": "Успешных строк",
+        "skipped_od_no_path_buffer_100m": "Пропущено (нет пути до 100 м)",
+        "failure_rows": "Строк ошибок",
+        "precache_polygon_wkt_sha256": "SHA256 полигона precache",
+        "precache_polygon_bounds_lonlat": "Границы полигона (lon/lat)",
+        "precache_polygon_wkt_prefix": "Префикс WKT полигона",
+        "routing_algo_version": "Версия алгоритма",
+        "routing_weights_fingerprint": "Отпечаток весов",
+        "elapsed_seconds": "Время работы, с",
+        "weather_mode": "Режим погоды",
+        "weather_time": "Время погоды",
+        "vertices_file": "Файл вершин (отдельно)",
+    }
+    return [(ru.get(str(k), str(k)), v) for k, v in rows]
+
+
+_ROUTE_COL_RU: Dict[str, str] = {
+    "route_id": "ID маршрута",
+    "experiment_id": "ID эксперимента",
+    "seed": "Seed",
+    "profile": "Профиль",
+    "variant_key": "Вариант (ключ)",
+    "variant_label": "Вариант",
+    "origin_point_id": "Точка отправления",
+    "destination_point_id": "Точка назначения",
+    "direction_key": "Направление",
+    "direction_order": "Порядок",
+    "origin_lat": "Широта начала",
+    "origin_lon": "Долгота начала",
+    "destination_lat": "Широта конца",
+    "destination_lon": "Долгота конца",
+    "route_built_at_utc": "Построен в (UTC)",
+    "weather_time": "Время погоды",
+    "length_m": "Длина, м",
+    "length_km": "Длина, км",
+    "time_s": "Время, с",
+    "time_min": "Время, мин",
+    "time_display": "Время (текст)",
+    "climb_m": "Набор, м",
+    "descent_m": "Спуск, м",
+    "max_gradient_pct": "Макс. уклон, %",
+    "avg_gradient_pct": "Средн. уклон, %",
+    "max_above_start_m": "Макс. выше старта, м",
+    "max_below_start_m": "Макс. ниже старта, м",
+    "end_diff_m": "Перепад финиша, м",
+    "green_percent": "Озеленение, %",
+    "avg_trees_pct": "Деревья, %",
+    "avg_grass_pct": "Трава, %",
+    "stress_cost_total": "Стресс, суммарно",
+    "avg_stress_lts": "Средний LTS",
+    "max_stress_lts": "Макс. LTS",
+    "high_stress_segments_count": "Высокий стресс, сегм.",
+    "stressful_intersections_count": "Стресс. пересечения",
+    "cost": "Стоимость модели",
+    "mode": "Режим (техн.)",
+    "warnings_count": "Число предупреждений",
+    "warnings_text": "Предупреждения",
+    "geometry_json": "Геометрия (JSON)",
+    "full_baseline_length_m": "Длина эталона full, м",
+    "delta_length_vs_full_m": "Δ длины к full, м",
+    "delta_climb_vs_full_m": "Δ набора к full, м",
+}
+
+
+def _rename_row_keys_ru(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {_ROUTE_COL_RU.get(k, k): v for k, v in row.items()}
+
+
+def write_route_vertices_csv_gzip(path: str, vertices: List[Dict[str, Any]]) -> None:
+    import csv
+    import gzip
+
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as gz:
+        w = csv.DictWriter(
+            gz,
+            fieldnames=["route_id", "vertex_index", "lat", "lon"],
+            extrasaction="ignore",
+        )
+        w.writeheader()
+        for row in vertices:
+            w.writerow(row)
+    _log.info("Вершины маршрутов: %s (%d строк)", path, len(vertices))
+
+
 def write_xlsx(
     path: str,
     *,
@@ -365,79 +482,156 @@ def write_xlsx(
     summary_profile: List[Dict[str, Any]],
     summary_direction: List[Dict[str, Any]],
     pair_cmp: List[Dict[str, Any]],
+    legacy_multisheet: bool = False,
 ) -> None:
     from openpyxl import Workbook
 
+    if legacy_multisheet:
+        wb = Workbook()
+        wm = wb.active
+        wm.title = "Meta"
+        wm.cell(row=1, column=1, value="key")
+        wm.cell(row=1, column=2, value="value")
+        for i, (k, v) in enumerate(meta_rows, start=2):
+            wm.cell(row=i, column=1, value=k)
+            wm.cell(row=i, column=2, value=v)
+
+        def add_sheet(name: str, headers: List[str], rows: List[Dict[str, Any]]) -> None:
+            ws = wb.create_sheet(title=name)
+            _write_sheet_table(ws, headers, rows)
+
+        add_sheet(
+            "SampledPoints",
+            ["point_id", "lat", "lon", "nearest_node_id"],
+            [
+                {
+                    "point_id": _point_id_fmt(sp.idx),
+                    "lat": sp.lat,
+                    "lon": sp.lon,
+                    "nearest_node_id": sp.nearest_node_id,
+                }
+                for sp in points
+            ],
+        )
+
+        if raw_rows:
+            headers = list(raw_rows[0].keys())
+        else:
+            headers = []
+        add_sheet("RoutesRaw", headers, raw_rows)
+        add_sheet(
+            "RouteVertices",
+            ["route_id", "vertex_index", "lat", "lon"],
+            vertices,
+        )
+        if summary_variant:
+            svh = list(summary_variant[0].keys())
+        else:
+            svh = []
+        add_sheet("SummaryByVariant", svh, summary_variant)
+        if summary_profile:
+            sph = list(summary_profile[0].keys())
+        else:
+            sph = []
+        add_sheet("SummaryByProfile", sph, summary_profile)
+        if summary_direction:
+            sdh = list(summary_direction[0].keys())
+        else:
+            sdh = []
+        add_sheet("SummaryDirection", sdh, summary_direction)
+        if pair_cmp:
+            pch = list(pair_cmp[0].keys())
+        else:
+            pch = []
+        add_sheet("PairComparison", pch, pair_cmp)
+
+        fh = [
+            "origin_point_id",
+            "destination_point_id",
+            "profile",
+            "variant",
+            "error_code",
+            "error_message",
+        ]
+        add_sheet("Failures", fh, failures)
+
+        wb.save(path)
+        _log.info("Excel записан (англ. листы): %s", path)
+        return
+
     wb = Workbook()
-    wm = wb.active
-    wm.title = "Meta"
-    wm.cell(row=1, column=1, value="key")
-    wm.cell(row=1, column=2, value="value")
-    for i, (k, v) in enumerate(meta_rows, start=2):
-        wm.cell(row=i, column=1, value=k)
-        wm.cell(row=i, column=2, value=v)
+    ws0 = wb.active
+    ws0.title = "Метаданные"
+    ws0.cell(row=1, column=1, value="Параметр")
+    ws0.cell(row=1, column=2, value="Значение")
+    for i, (k, v) in enumerate(_meta_rows_ru(meta_rows), start=2):
+        ws0.cell(row=i, column=1, value=k)
+        ws0.cell(row=i, column=2, value=v)
 
-    def add_sheet(name: str, headers: List[str], rows: List[Dict[str, Any]]) -> None:
-        ws = wb.create_sheet(title=name)
-        _write_sheet_table(ws, headers, rows)
-
-    add_sheet(
-        "SampledPoints",
-        ["point_id", "lat", "lon", "nearest_node_id"],
+    ws1 = wb.create_sheet(title="Точки")
+    _write_sheet_table(
+        ws1,
+        ["ID точки", "Широта", "Долгота", "Узел графа"],
         [
             {
-                "point_id": _point_id_fmt(sp.idx),
-                "lat": sp.lat,
-                "lon": sp.lon,
-                "nearest_node_id": sp.nearest_node_id,
+                "ID точки": _point_id_fmt(sp.idx),
+                "Широта": sp.lat,
+                "Долгота": sp.lon,
+                "Узел графа": sp.nearest_node_id,
             }
             for sp in points
         ],
     )
 
     if raw_rows:
-        headers = list(raw_rows[0].keys())
+        rh = [_ROUTE_COL_RU.get(k, k) for k in raw_rows[0].keys()]
+        ru_rows = [_rename_row_keys_ru(dict(rw)) for rw in raw_rows]
     else:
-        headers = []
-    add_sheet("RoutesRaw", headers, raw_rows)
-    add_sheet(
-        "RouteVertices",
-        ["route_id", "vertex_index", "lat", "lon"],
-        vertices,
-    )
-    if summary_variant:
-        svh = list(summary_variant[0].keys())
-    else:
-        svh = []
-    add_sheet("SummaryByVariant", svh, summary_variant)
-    if summary_profile:
-        sph = list(summary_profile[0].keys())
-    else:
-        sph = []
-    add_sheet("SummaryByProfile", sph, summary_profile)
-    if summary_direction:
-        sdh = list(summary_direction[0].keys())
-    else:
-        sdh = []
-    add_sheet("SummaryDirection", sdh, summary_direction)
-    if pair_cmp:
-        pch = list(pair_cmp[0].keys())
-    else:
-        pch = []
-    add_sheet("PairComparison", pch, pair_cmp)
+        rh, ru_rows = [], []
+    ws2 = wb.create_sheet(title="Маршруты")
+    _write_sheet_table(ws2, rh, ru_rows)
 
-    fh = [
-        "origin_point_id",
-        "destination_point_id",
-        "profile",
-        "variant",
-        "error_code",
-        "error_message",
-    ]
-    add_sheet("Failures", fh, failures)
+    ws3 = wb.create_sheet(title="Сводка")
+    rr = 1
+    for title, block in (
+        ("Средние по варианту", summary_variant),
+        ("Средние по профилю", summary_profile),
+        ("Средние по направлению", summary_direction),
+        ("Сводка по парам O–D", pair_cmp),
+    ):
+        ws3.cell(row=rr, column=1, value=title)
+        rr += 1
+        if block and block[0]:
+            hdr = list(block[0].keys())
+            for c, h in enumerate(hdr, start=1):
+                ws3.cell(row=rr, column=c, value=h)
+            rr += 1
+            for i, row in enumerate(block):
+                for c, h in enumerate(hdr, start=1):
+                    ws3.cell(row=rr + i, column=c, value=row.get(h))
+            rr += len(block) + 1
+        else:
+            rr += 1
+
+    ws4 = wb.create_sheet(title="Ошибки")
+    _write_sheet_table(
+        ws4,
+        ["Отправление", "Назначение", "Профиль", "Вариант", "Код", "Сообщение"],
+        [
+            {
+                "Отправление": f.get("origin_point_id"),
+                "Назначение": f.get("destination_point_id"),
+                "Профиль": f.get("profile"),
+                "Вариант": f.get("variant"),
+                "Код": f.get("error_code"),
+                "Сообщение": f.get("error_message"),
+            }
+            for f in failures
+        ],
+    )
 
     wb.save(path)
-    _log.info("Excel записан: %s", path)
+    _log.info("Excel записан (компактный RU): %s", path)
 
 
 def run_experiment(
@@ -448,12 +642,22 @@ def run_experiment(
     output_path: Optional[str],
     max_sample_attempts: int,
     show_progress: bool = True,
+    weather_mode: str = "none",
+    use_live_weather: bool = False,
+    weather_time: Optional[str] = None,
+    temperature_c: Optional[float] = None,
+    precipitation_mm: Optional[float] = None,
+    wind_speed_ms: Optional[float] = None,
+    cloud_cover_pct: Optional[float] = None,
+    humidity_pct: Optional[float] = None,
+    export_legacy_xlsx: bool = False,
+    vertices_gzip_path: Optional[str] = None,
 ) -> str:
     _ensure_pkg_path()
 
     from bike_router.config import ROUTING_ALGO_VERSION, Settings, routing_engine_cache_fingerprint
     from bike_router.engine import RouteEngine
-    from bike_router.exceptions import BikeRouterError
+    from bike_router.exceptions import BikeRouterError, RouteNotFoundError
     from bike_router.services.area_graph_cache import parse_precache_polygon
 
     import numpy as np
@@ -509,6 +713,7 @@ def run_experiment(
     route_id_counter = 1
     n_ok_route_rows = 0
     n_fail_rows = 0
+    n_skipped_no_path_100m = 0
 
     route_tasks: List[Tuple[int, int, str]] = [
         (i, j, prof)
@@ -540,6 +745,7 @@ def run_experiment(
                 p=prof,
                 ok=n_ok_route_rows,
                 fail=n_fail_rows,
+                skip=n_skipped_no_path_100m,
                 refresh=False,
             )
         by_mode: Dict[str, Any] = {}
@@ -549,9 +755,34 @@ def run_experiment(
                 end,
                 prof,
                 green_enabled=True,
-                weather_mode="none",
+                weather_mode=weather_mode,
+                use_live_weather=use_live_weather,
+                weather_time=weather_time,
+                temperature_c=temperature_c,
+                precipitation_mm=precipitation_mm,
+                wind_speed_ms=wind_speed_ms,
+                cloud_cover_pct=cloud_cover_pct,
+                humidity_pct=humidity_pct,
+                corridor_expand_schedule_meters=EXPERIMENT_CORRIDOR_EXPAND_M,
             )
             by_mode = {r.mode: r for r in alt.routes}
+        except RouteNotFoundError as e:
+            n_skipped_no_path_100m += 1
+            _log.warning(
+                "Пропуск O-D: нет маршрута при буфере коридора до 100 м. "
+                "origin lat=%.6f lon=%.6f | dest lat=%.6f lon=%.6f | profile=%s | "
+                "points %s→%s (%s). Детали: %s",
+                start[0],
+                start[1],
+                end[0],
+                end[1],
+                prof,
+                _point_id_fmt(i),
+                _point_id_fmt(j),
+                _direction_key(i, j),
+                e,
+            )
+            continue
         except (BikeRouterError, Exception) as e:
             code = getattr(e, "code", type(e).__name__)
             for mode in EXPECTED_VARIANTS:
@@ -598,6 +829,7 @@ def run_experiment(
                 d_lat=d_pt.lat,
                 d_lon=d_pt.lon,
                 r=r,
+                baseline_full=by_mode.get("full"),
             )
             raw_rows.append(row)
             n_ok_route_rows += 1
@@ -631,6 +863,7 @@ def run_experiment(
         ("n_variants", len(EXPECTED_VARIANTS)),
         ("expected_route_cells", expected_routes),
         ("successful_route_rows", len(raw_rows)),
+        ("skipped_od_no_path_buffer_100m", n_skipped_no_path_100m),
         ("failure_rows", len(failures)),
         ("precache_polygon_wkt_sha256", precache_wkt_sha256),
         (
@@ -640,9 +873,26 @@ def run_experiment(
         ("precache_polygon_wkt_prefix", settings.precache_area_polygon_wkt_stripped[:120]),
         ("routing_algo_version", ROUTING_ALGO_VERSION),
         ("routing_weights_fingerprint", wkt_fp),
+        ("weather_mode", weather_mode),
+        ("weather_time", weather_time or ""),
         ("elapsed_seconds", round(time.perf_counter() - t_start, 2)),
     ]
 
+    vgz_path: Optional[str] = None
+    if not export_legacy_xlsx and vertices:
+        if vertices_gzip_path:
+            vgz_path = vertices_gzip_path
+        else:
+            stem = out[:-5] if out.lower().endswith(".xlsx") else out
+            vgz_path = f"{stem}_route_vertices.csv.gz"
+        write_route_vertices_csv_gzip(vgz_path, vertices)
+        meta_rows = meta_rows + [("vertices_file", vgz_path)]
+
+    if n_skipped_no_path_100m:
+        _log.info(
+            "Пропущено направлений O-D (нет пути после буфера 100 м): %d",
+            n_skipped_no_path_100m,
+        )
     _log.info("Запись Excel (%d строк маршрутов, вершин %d)…", len(raw_rows), len(vertices))
     write_xlsx(
         out,
@@ -655,6 +905,7 @@ def run_experiment(
         summary_profile=s_prof,
         summary_direction=s_dir,
         pair_cmp=pair_cmp,
+        legacy_multisheet=export_legacy_xlsx,
     )
     _log.info("Готово за %.1f с.", time.perf_counter() - t_start)
     return out
@@ -665,7 +916,7 @@ def main() -> None:
         description="Пакетный эксперимент O-D в PRECACHE_AREA_POLYGON_WKT -> Excel."
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--n-points", type=int, default=20, help="Число случайных точек")
+    parser.add_argument("--n-points", type=int, default=10, help="Число случайных точек")
     parser.add_argument(
         "--min-spacing-m",
         type=float,
@@ -690,6 +941,42 @@ def main() -> None:
         action="store_true",
         help="Отключить прогресс-бар tqdm (удобно для логов в файл)",
     )
+    parser.add_argument(
+        "--weather-mode",
+        choices=("none", "auto", "manual", "fixed-snapshot"),
+        default="none",
+        help=(
+            "none — без погодных множителей; auto — Open-Meteo; "
+            "manual / fixed-snapshot — поля temperature/осадки ниже (fixed = воспроизводимый снимок)."
+        ),
+    )
+    parser.add_argument(
+        "--weather-time",
+        type=str,
+        default=None,
+        help="ISO 8601 — момент для почасовой погоды (auto) или подписи (manual)",
+    )
+    parser.add_argument("--temperature-c", type=float, default=None, help="Ручная t °C")
+    parser.add_argument("--precipitation-mm", type=float, default=None, help="Осадки мм/ч")
+    parser.add_argument("--wind-speed-ms", type=float, default=None, help="Ветер м/с")
+    parser.add_argument("--cloud-cover-pct", type=float, default=None, help="Облачность %")
+    parser.add_argument("--humidity-pct", type=float, default=None, help="Влажность %")
+    parser.add_argument(
+        "--use-live-weather",
+        action="store_true",
+        help="С API: как принудительный auto (прогноз по координатам и времени).",
+    )
+    parser.add_argument(
+        "--export-legacy-xlsx",
+        action="store_true",
+        help="Полная англ. выгрузка со всеми листами и вершинами внутри .xlsx (как раньше).",
+    )
+    parser.add_argument(
+        "--vertices-gzip",
+        type=str,
+        default=None,
+        help="Путь к route_vertices.csv.gz (по умолчанию рядом с .xlsx, если не --export-legacy-xlsx).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -698,6 +985,7 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    use_live = bool(args.use_live_weather) or (args.weather_mode == "auto")
     path = run_experiment(
         seed=args.seed,
         n_points=args.n_points,
@@ -705,6 +993,16 @@ def main() -> None:
         output_path=args.output,
         max_sample_attempts=args.max_sample_attempts,
         show_progress=not args.no_progress,
+        weather_mode=args.weather_mode,
+        use_live_weather=use_live,
+        weather_time=args.weather_time,
+        temperature_c=args.temperature_c,
+        precipitation_mm=args.precipitation_mm,
+        wind_speed_ms=args.wind_speed_ms,
+        cloud_cover_pct=args.cloud_cover_pct,
+        humidity_pct=args.humidity_pct,
+        export_legacy_xlsx=args.export_legacy_xlsx,
+        vertices_gzip_path=args.vertices_gzip,
     )
     print(path)
 

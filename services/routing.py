@@ -51,12 +51,27 @@ def effective_edge_components(
     wm = weather.mults
     gcc = float(weather.green_coupling)
     g_edge = min(1.0, max(0.0, float(edge_data.get("trees_pct") or 0) / 100.0))
+    # Озеленение как поправка к физике: при прохладе не раздувать «зелёный рычаг» для тепла.
+    g_coupling = gcc
+    if wm.heat < 1.0:
+        g_coupling *= max(0.25, float(wm.heat))
     phys_eff = (
         phys
         * wm.physical
         * wm.surface
-        * (1.0 + max(0.0, wm.green - 1.0) * g_edge * gcc)
+        * (1.0 + max(0.0, wm.green - 1.0) * g_edge * g_coupling)
     )
+    # Прокси геометрии улицы (тепловая модель графа): открытость и «каньон».
+    O = float(edge_data.get("thermal_open_sky_share") or 0.5) or 0.5
+    O = max(0.0, min(1.0, O))
+    B = float(edge_data.get("thermal_building_shade_share") or 0.0) or 0.0
+    B = max(0.0, min(1.0, B))
+    if wm.heat >= 1.03:
+        # Жара: сильнее штраф на открытых участках (солнце), не сводя к одной зелени.
+        h = h * (1.0 + 0.28 * O * min(1.2, wm.heat - 1.0))
+    elif wm.heat <= 0.97:
+        # Прохладно: умеренный бонус «каньона» без роста роли деревьев.
+        h = h * (1.0 - 0.18 * B * (1.0 - float(wm.heat)))
     heat_eff = h * hm * wm.heat
     st_eff = st * wm.stress
     return phys_eff, heat_eff, st_eff

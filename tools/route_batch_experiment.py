@@ -459,6 +459,7 @@ def run_experiment(
     import numpy as np
 
     settings = Settings()
+    _log.info("Каталог данных: base_dir=%s (cache=%s)", settings.base_dir, settings.cache_dir)
     if not settings.has_precache_area_polygon:
         raise SystemExit(
             "В .env должен быть задан PRECACHE_AREA_POLYGON_WKT (полигон арены)."

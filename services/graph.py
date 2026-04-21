@@ -58,6 +58,10 @@ _OSM_STRESS_TAG_KEYS = (
     "bicycle",
     "width",
     "foot",
+    "covered",
+    "tunnel",
+    "indoor",
+    "layer",
 )
 
 
@@ -141,6 +145,10 @@ class GraphBuilder:
             "width",
             "foot",
             "lit",
+            "covered",
+            "tunnel",
+            "indoor",
+            "layer",
         ):
             if tag not in ox.settings.useful_tags_way:
                 ox.settings.useful_tags_way += [tag]
@@ -588,6 +596,7 @@ class GraphBuilder:
         o_sky = np.zeros(n, dtype=np.float64)
         v_sh = np.zeros(n, dtype=np.float64)
         b_sh = np.zeros(n, dtype=np.float64)
+        c_cov = np.zeros(n, dtype=np.float64)
         use_proxy = np.zeros(n, dtype=np.int8)
         heat_by_slot = {s.key: np.zeros(n, dtype=np.float64) for s in TIME_SLOTS}
         exp_by_slot = {s.key: np.zeros(n, dtype=np.float64) for s in TIME_SLOTS}
@@ -608,12 +617,13 @@ class GraphBuilder:
             if "highway" not in tags and "highway" in edges_gdf.columns:
                 tags["highway"] = row.get("highway")
 
-            O, V, B, _ = thermal_edge_features(
+            O, V, B, C, _ = thermal_edge_features(
                 brg, float(trees[i]), float(grass[i]), tags
             )
             o_sky[i] = O
             v_sh[i] = V
             b_sh[i] = B
+            c_cov[i] = C
 
             fb = use_fallback_green or (
                 float(trees[i]) < 0.5 and float(grass[i]) < 0.5
@@ -649,6 +659,7 @@ class GraphBuilder:
         edges_gdf["thermal_open_sky_share"] = o_sky
         edges_gdf["thermal_vegetation_shade_share"] = v_sh
         edges_gdf["thermal_building_shade_share"] = b_sh
+        edges_gdf["thermal_covered_share"] = c_cov
         edges_gdf["thermal_use_proxy"] = use_proxy
         edges_gdf["stress_lts"] = lts_arr
         edges_gdf["stress_intersection_score"] = int_score_arr
@@ -775,6 +786,7 @@ class GraphBuilder:
             "thermal_open_sky_share",
             "thermal_vegetation_shade_share",
             "thermal_building_shade_share",
+            "thermal_covered_share",
             "thermal_use_proxy",
             "stress_lts",
             "stress_intersection_score",
@@ -825,6 +837,7 @@ class GraphBuilder:
                     "thermal_open_sky_share",
                     "thermal_vegetation_shade_share",
                     "thermal_building_shade_share",
+                    "thermal_covered_share",
                     "stress_segment_cost",
                     "stress_intersection_cost",
                 ):

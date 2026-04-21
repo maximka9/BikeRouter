@@ -452,6 +452,69 @@ class Settings:
     # Общий усилитель чувствительности погодных множителей и тепловых поправок по рёбрам.
     heat_weather_response_scale: float = _env("HEAT_WEATHER_RESPONSE_SCALE", 1.35, float)
 
+    # --- Непрерывная тепло-микроклиматическая модель (рёбра, без hot/cold/neutral) ---
+    heat_continuous_enable: bool = _env_bool("HEAT_CONTINUOUS_ENABLE", True)
+    heat_temp_ref_max: float = _env("HEAT_TEMP_REF_MAX", 30.0, float)
+    heat_temp_cool_ref: float = _env("HEAT_TEMP_COOL_REF", 10.0, float)
+    heat_temp_cool_range: float = _env("HEAT_TEMP_COOL_RANGE", 15.0, float)
+    heat_rain_ref_max: float = _env("HEAT_RAIN_REF_MAX", 3.0, float)
+    heat_wind_ref_max: float = _env("HEAT_WIND_REF_MAX", 12.0, float)
+    heat_gust_delta_ref_max: float = _env("HEAT_GUST_DELTA_REF_MAX", 10.0, float)
+
+    heat_tree_shade_temp_gain: float = _env("HEAT_TREE_SHADE_TEMP_GAIN", 0.42, float)
+    heat_tree_shade_rain_damp: float = _env("HEAT_TREE_SHADE_RAIN_DAMP", 0.35, float)
+    heat_tree_shade_cold_damp: float = _env("HEAT_TREE_SHADE_COLD_DAMP", 0.38, float)
+
+    heat_open_sky_temp_gain: float = _env("HEAT_OPEN_SKY_TEMP_GAIN", 0.52, float)
+    heat_open_sky_wind_gain: float = _env("HEAT_OPEN_SKY_WIND_GAIN", 0.28, float)
+    heat_open_sky_gust_gain: float = _env("HEAT_OPEN_SKY_GUST_GAIN", 0.22, float)
+    heat_open_sky_humid_gain: float = _env("HEAT_OPEN_SKY_HUMID_GAIN", 0.18, float)
+
+    heat_building_shade_wind_gain: float = _env(
+        "HEAT_BUILDING_SHADE_WIND_GAIN", 0.32, float
+    )
+    heat_building_shade_rain_gain: float = _env(
+        "HEAT_BUILDING_SHADE_RAIN_GAIN", 0.26, float
+    )
+    heat_building_shade_humid_gain: float = _env(
+        "HEAT_BUILDING_SHADE_HUMID_GAIN", 0.14, float
+    )
+    heat_building_shade_gust_gain: float = _env(
+        "HEAT_BUILDING_SHADE_GUST_GAIN", 0.22, float
+    )
+
+    heat_covered_rain_gain: float = _env("HEAT_COVERED_RAIN_GAIN", 0.45, float)
+    heat_covered_wind_gain: float = _env("HEAT_COVERED_WIND_GAIN", 0.22, float)
+    heat_covered_gust_gain: float = _env("HEAT_COVERED_GUST_GAIN", 0.18, float)
+
+    heat_wet_surface_rain_gain: float = _env("HEAT_WET_SURFACE_RAIN_GAIN", 0.38, float)
+    heat_wet_surface_humid_gain: float = _env("HEAT_WET_SURFACE_HUMID_GAIN", 0.22, float)
+
+    heat_edge_k_open: float = _env("HEAT_EDGE_K_OPEN", 0.38, float)
+    heat_edge_k_tree: float = _env("HEAT_EDGE_K_TREE", 0.36, float)
+    heat_edge_k_building: float = _env("HEAT_EDGE_K_BUILDING", 0.34, float)
+    heat_edge_k_covered: float = _env("HEAT_EDGE_K_COVERED", 0.32, float)
+    heat_edge_k_wet: float = _env("HEAT_EDGE_K_WET", 0.28, float)
+    heat_edge_k_wind: float = _env("HEAT_EDGE_K_WIND", 0.30, float)
+
+    heat_wind_exp_w1: float = _env("HEAT_WIND_EXP_W1", 0.45, float)
+    heat_wind_exp_w2: float = _env("HEAT_WIND_EXP_W2", 0.35, float)
+    heat_wind_exp_w3: float = _env("HEAT_WIND_EXP_W3", 0.35, float)
+
+    heat_wet_surface_edge_bad_max: float = _env(
+        "HEAT_WET_SURFACE_EDGE_BAD_MAX", 0.85, float
+    )
+    heat_open_wet_synergy: float = _env("HEAT_OPEN_WET_SYNERGY", 0.14, float)
+
+    heat_wind_open_penalty_gain: float = _env("HEAT_WIND_OPEN_GAIN", 0.34, float)
+    heat_wind_open_gust_gain: float = _env("HEAT_WIND_OPEN_GUST_EXTRA", 0.24, float)
+
+    heat_edge_factor_min: float = _env("HEAT_EDGE_FACTOR_MIN", 0.65, float)
+    heat_edge_factor_max: float = _env("HEAT_EDGE_FACTOR_MAX", 1.75, float)
+
+    heat_coeff_clamp_lo: float = _env("HEAT_COEFF_CLAMP_LO", 0.72, float)
+    heat_coeff_clamp_hi: float = _env("HEAT_COEFF_CLAMP_HI", 1.42, float)
+
     # --- Кэш ---
     cache_satellite: bool = _env_bool("CACHE_SATELLITE", True)
     cache_tile_analysis: bool = _env_bool("CACHE_TILE_ANALYSIS", True)
@@ -712,6 +775,17 @@ def routing_engine_cache_fingerprint() -> str:
         "heat_weather_response_scale": _env(
             "HEAT_WEATHER_RESPONSE_SCALE", 1.35, float
         ),
+        "heat_continuous_enable": _env_bool("HEAT_CONTINUOUS_ENABLE", True),
+        "heat_temp_ref_max": _env("HEAT_TEMP_REF_MAX", 30.0, float),
+        "heat_rain_ref_max": _env("HEAT_RAIN_REF_MAX", 3.0, float),
+        "heat_wind_ref_max": _env("HEAT_WIND_REF_MAX", 12.0, float),
+        "heat_gust_delta_ref_max": _env("HEAT_GUST_DELTA_REF_MAX", 10.0, float),
+        "heat_edge_factor_min": _env("HEAT_EDGE_FACTOR_MIN", 0.65, float),
+        "heat_edge_factor_max": _env("HEAT_EDGE_FACTOR_MAX", 1.75, float),
+        "heat_tree_shade_temp_gain": _env("HEAT_TREE_SHADE_TEMP_GAIN", 0.42, float),
+        "heat_open_sky_temp_gain": _env("HEAT_OPEN_SKY_TEMP_GAIN", 0.52, float),
+        "heat_coeff_clamp_lo": _env("HEAT_COEFF_CLAMP_LO", 0.72, float),
+        "heat_coeff_clamp_hi": _env("HEAT_COEFF_CLAMP_HI", 1.42, float),
         "heat_stress_model_version": HEAT_STRESS_MODEL_VERSION,
         "osm_highway_filter": OSM_HIGHWAY_FILTER,
         "preference_profiles": pref_profiles,

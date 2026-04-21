@@ -145,6 +145,20 @@ SUMMARY_NUM_KEYS = (
     "weather_cloud_cover_pct",
     "weather_humidity_pct",
     "weather_shortwave_radiation_wm2",
+    "weather_heat_continuous",
+    "heat_tree_shade_bonus",
+    "heat_open_sky_penalty",
+    "heat_building_shade_bonus",
+    "heat_covered_bonus",
+    "heat_wind_open_penalty",
+    "heat_wet_surface_penalty",
+    "heat_norm_temp",
+    "heat_norm_rain",
+    "heat_norm_wind",
+    "heat_norm_gust",
+    "heat_norm_cloud",
+    "heat_norm_humidity",
+    "heat_norm_cold_like",
 )
 
 
@@ -160,6 +174,20 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "weather_cloud_cover_pct": None,
         "weather_humidity_pct": None,
         "weather_shortwave_radiation_wm2": None,
+        "weather_heat_continuous": None,
+        "heat_tree_shade_bonus": None,
+        "heat_open_sky_penalty": None,
+        "heat_building_shade_bonus": None,
+        "heat_covered_bonus": None,
+        "heat_wind_open_penalty": None,
+        "heat_wet_surface_penalty": None,
+        "heat_norm_temp": None,
+        "heat_norm_rain": None,
+        "heat_norm_wind": None,
+        "heat_norm_gust": None,
+        "heat_norm_cloud": None,
+        "heat_norm_humidity": None,
+        "heat_norm_cold_like": None,
     }
     w = getattr(r, "weather", None)
     if not w or not bool(getattr(w, "enabled", False)):
@@ -177,7 +205,7 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         except (TypeError, ValueError):
             return None
 
-    return {
+    out = {
         "weather_temperature_c": _f("temperature_c"),
         "weather_apparent_temperature_c": _f("apparent_temperature_c"),
         "weather_precipitation_mm": _f("precipitation_mm"),
@@ -187,7 +215,45 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "weather_cloud_cover_pct": _f("cloud_cover_pct"),
         "weather_humidity_pct": _f("humidity_pct"),
         "weather_shortwave_radiation_wm2": _f("shortwave_radiation_wm2"),
+        "weather_heat_continuous": bool(getattr(w, "heat_continuous", False)),
+        "heat_tree_shade_bonus": None,
+        "heat_open_sky_penalty": None,
+        "heat_building_shade_bonus": None,
+        "heat_covered_bonus": None,
+        "heat_wind_open_penalty": None,
+        "heat_wet_surface_penalty": None,
+        "heat_norm_temp": None,
+        "heat_norm_rain": None,
+        "heat_norm_wind": None,
+        "heat_norm_gust": None,
+        "heat_norm_cloud": None,
+        "heat_norm_humidity": None,
+        "heat_norm_cold_like": None,
     }
+    hm = getattr(w, "heat_microclimate", None) or {}
+    if isinstance(hm, dict):
+        mapping = {
+            "tree_shade_bonus": "heat_tree_shade_bonus",
+            "open_sky_penalty": "heat_open_sky_penalty",
+            "building_shade_bonus": "heat_building_shade_bonus",
+            "covered_bonus": "heat_covered_bonus",
+            "wind_open_penalty": "heat_wind_open_penalty",
+            "wet_surface_penalty": "heat_wet_surface_penalty",
+            "norm_temp_norm": "heat_norm_temp",
+            "norm_rain_norm": "heat_norm_rain",
+            "norm_wind_norm": "heat_norm_wind",
+            "norm_gust_norm": "heat_norm_gust",
+            "norm_cloud_norm": "heat_norm_cloud",
+            "norm_humidity_norm": "heat_norm_humidity",
+            "norm_cold_like_norm": "heat_norm_cold_like",
+        }
+        for sk, dk in mapping.items():
+            if sk in hm:
+                try:
+                    out[dk] = float(hm[sk])
+                except (TypeError, ValueError):
+                    pass
+    return out
 
 
 def _ensure_pkg_path() -> None:
@@ -608,6 +674,20 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "weather_cloud_cover_pct": "Облачность, %",
     "weather_humidity_pct": "Влажность, %",
     "weather_shortwave_radiation_wm2": "КВ радиация, Вт/м²",
+    "weather_heat_continuous": "Непрерывная тепло-модель",
+    "heat_tree_shade_bonus": "Heat: бонус тени деревьев",
+    "heat_open_sky_penalty": "Heat: штраф открытого неба",
+    "heat_building_shade_bonus": "Heat: бонус тени зданий",
+    "heat_covered_bonus": "Heat: бонус укрытий",
+    "heat_wind_open_penalty": "Heat: ветровой штраф (открыто)",
+    "heat_wet_surface_penalty": "Heat: мокрое покрытие",
+    "heat_norm_temp": "Heat: норм. температура",
+    "heat_norm_rain": "Heat: норм. осадки",
+    "heat_norm_wind": "Heat: норм. ветер",
+    "heat_norm_gust": "Heat: норм. порывы",
+    "heat_norm_cloud": "Heat: норм. облачность",
+    "heat_norm_humidity": "Heat: норм. влажность",
+    "heat_norm_cold_like": "Heat: норм. прохлада",
     "length_m": "Длина, м",
     "length_km": "Длина, км",
     "time_s": "Время, с",

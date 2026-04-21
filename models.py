@@ -323,6 +323,14 @@ class WeatherRouteContext(BaseModel):
         default="",
         description="Кратко: как погода повлияла на веса",
     )
+    heat_continuous: bool = Field(
+        default=False,
+        description="Непрерывная тепло-микроклиматическая модель рёбер включена",
+    )
+    heat_microclimate: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Коэффициенты и нормированные сигналы (tree_shade_bonus, temp_norm, …)",
+    )
 
 
 class HeatStressMetrics(BaseModel):

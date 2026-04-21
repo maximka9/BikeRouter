@@ -56,14 +56,36 @@ class WeatherWeightParams:
     mults: WeatherMultipliers = field(default_factory=WeatherMultipliers)
     green_coupling: float = 0.55
     enabled: bool = False
-    # Режим для микроклиматических поправок к тепловой компоненте (routing.effective_edge_components).
-    regime: str = "neutral"  # hot | cold | neutral
+    # Устар.: только логи/аналитика (classify_weather_regime), не ветвление стоимости ребра.
+    regime: str = "neutral"
     hot_tree_bonus_scale: float = 1.0
     hot_open_penalty_scale: float = 1.0
     cold_canyon_bonus_scale: float = 1.0
-    # 0..1: ослабление «зелёной» тени растений в холоде (выше — сильнее).
     cold_tree_damping: float = 0.5
     weather_response_scale: float = 1.0
+    # Непрерывная тепло-микроклиматическая модель (см. routing.effective_edge_components).
+    heat_continuous: bool = False
+    tree_shade_bonus: float = 1.0
+    open_sky_penalty: float = 1.0
+    building_shade_bonus: float = 1.0
+    covered_bonus: float = 1.0
+    wind_open_penalty: float = 1.0
+    wet_surface_penalty: float = 1.0
+    normalized_signals: Dict[str, float] = field(default_factory=dict)
+    # Пороги и k для ребра (копия из Settings на момент запроса).
+    heat_edge_k_open: float = 0.38
+    heat_edge_k_tree: float = 0.36
+    heat_edge_k_building: float = 0.34
+    heat_edge_k_covered: float = 0.32
+    heat_edge_k_wet: float = 0.28
+    heat_edge_k_wind: float = 0.30
+    heat_wind_exp_w1: float = 0.45
+    heat_wind_exp_w2: float = 0.35
+    heat_wind_exp_w3: float = 0.35
+    heat_wet_surface_edge_bad_max: float = 0.85
+    heat_open_wet_synergy: float = 0.14
+    heat_edge_factor_min: float = 0.65
+    heat_edge_factor_max: float = 1.75
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -89,12 +111,131 @@ def snapshot_from_manual(
     )
 
 
+def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, float]:
+    """Нормированные сигналы [0..1] и cold_like [0..1] для непрерывной тепловой модели."""
+    T = float(snap.temperature_c)
+    rain = float(snap.precipitation_mm)
+    wind = float(snap.wind_speed_ms)
+    gust_o = snap.wind_gusts_ms
+    gust = float(gust_o) if gust_o is not None else wind
+    clouds = float(snap.cloud_cover_pct)
+    hum = float(snap.humidity_pct)
+
+    tmax = max(float(getattr(s, "heat_temp_ref_max", 30.0)), 1e-6)
+    rmax = max(float(getattr(s, "heat_rain_ref_max", 3.0)), 1e-6)
+    wmax = max(float(getattr(s, "heat_wind_ref_max", 12.0)), 1e-6)
+    gdmax = max(float(getattr(s, "heat_gust_delta_ref_max", 10.0)), 1e-6)
+    tcref = float(getattr(s, "heat_temp_cool_ref", 10.0))
+    tc_rng = max(float(getattr(s, "heat_temp_cool_range", 15.0)), 1e-6)
+
+    temp_norm = _clamp(T / tmax, 0.0, 1.0)
+    rain_norm = _clamp(rain / rmax, 0.0, 1.0)
+    wind_norm = _clamp(wind / wmax, 0.0, 1.0)
+    gust_delta = max(0.0, gust - wind)
+    gust_norm = _clamp(gust_delta / gdmax, 0.0, 1.0)
+    cloud_norm = _clamp(clouds / 100.0, 0.0, 1.0)
+    humidity_norm = _clamp(hum / 100.0, 0.0, 1.0)
+    cold_like_norm = _clamp((tcref - T) / tc_rng, 0.0, 1.0)
+    return {
+        "temp_norm": temp_norm,
+        "rain_norm": rain_norm,
+        "wind_norm": wind_norm,
+        "gust_norm": gust_norm,
+        "cloud_norm": cloud_norm,
+        "humidity_norm": humidity_norm,
+        "cold_like_norm": cold_like_norm,
+    }
+
+
+def _continuous_six_coefficients(
+    sig: Dict[str, float], s: Any
+) -> Tuple[float, float, float, float, float, float]:
+    """Шесть непрерывных множителей для поправки тепловой компоненты ребра."""
+    tn = sig["temp_norm"]
+    rn = sig["rain_norm"]
+    wn = sig["wind_norm"]
+    gn = sig["gust_norm"]
+    cn = sig["cloud_norm"]
+    hn = sig["humidity_norm"]
+    cl = sig["cold_like_norm"]
+
+    a1 = float(getattr(s, "heat_tree_shade_temp_gain", 0.42))
+    a2 = float(getattr(s, "heat_tree_shade_rain_damp", 0.35))
+    a3 = float(getattr(s, "heat_tree_shade_cold_damp", 0.38))
+    tree_shade_bonus = 1.0 + a1 * tn - a2 * rn - a3 * cl
+
+    b1 = float(getattr(s, "heat_open_sky_temp_gain", 0.52))
+    b2 = float(getattr(s, "heat_open_sky_wind_gain", 0.28))
+    b3 = float(getattr(s, "heat_open_sky_gust_gain", 0.22))
+    b4 = float(getattr(s, "heat_open_sky_humid_gain", 0.18))
+    open_sky_penalty = (
+        1.0
+        + b1 * tn * (1.0 - cn)
+        + b2 * wn
+        + b3 * gn
+        + b4 * hn * tn
+    )
+
+    c1 = float(getattr(s, "heat_building_shade_wind_gain", 0.32))
+    c2 = float(getattr(s, "heat_building_shade_gust_gain", 0.22))
+    c3 = float(getattr(s, "heat_building_shade_rain_gain", 0.26))
+    c4 = float(getattr(s, "heat_building_shade_humid_gain", 0.14))
+    building_shade_bonus = (
+        1.0 + c1 * wn + c2 * gn + c3 * rn + c4 * hn * (1.0 - cn)
+    )
+
+    d1 = float(getattr(s, "heat_covered_rain_gain", 0.45))
+    d2 = float(getattr(s, "heat_covered_wind_gain", 0.22))
+    d3 = float(getattr(s, "heat_covered_gust_gain", 0.18))
+    covered_bonus = 1.0 + d1 * rn + d2 * wn + d3 * gn
+
+    wg = float(getattr(s, "heat_wind_open_penalty_gain", 0.34))
+    gg = float(getattr(s, "heat_wind_open_gust_gain", 0.24))
+    wind_open_penalty = 1.0 + wg * wn + gg * gn
+
+    e1 = float(getattr(s, "heat_wet_surface_rain_gain", 0.38))
+    e2 = float(getattr(s, "heat_wet_surface_humid_gain", 0.22))
+    wet_surface_penalty = 1.0 + e1 * rn + e2 * hn
+
+    lo = float(getattr(s, "heat_coeff_clamp_lo", 0.72))
+    hi = float(getattr(s, "heat_coeff_clamp_hi", 1.42))
+    return (
+        _clamp(tree_shade_bonus, lo, hi),
+        _clamp(open_sky_penalty, lo, hi),
+        _clamp(building_shade_bonus, lo, hi),
+        _clamp(covered_bonus, lo, hi),
+        _clamp(wind_open_penalty, lo, hi),
+        _clamp(wet_surface_penalty, lo, hi),
+    )
+
+
+def _edge_params_from_settings(s: Any) -> Dict[str, float]:
+    return {
+        "heat_edge_k_open": float(getattr(s, "heat_edge_k_open", 0.38)),
+        "heat_edge_k_tree": float(getattr(s, "heat_edge_k_tree", 0.36)),
+        "heat_edge_k_building": float(getattr(s, "heat_edge_k_building", 0.34)),
+        "heat_edge_k_covered": float(getattr(s, "heat_edge_k_covered", 0.32)),
+        "heat_edge_k_wet": float(getattr(s, "heat_edge_k_wet", 0.28)),
+        "heat_edge_k_wind": float(getattr(s, "heat_edge_k_wind", 0.30)),
+        "heat_wind_exp_w1": float(getattr(s, "heat_wind_exp_w1", 0.45)),
+        "heat_wind_exp_w2": float(getattr(s, "heat_wind_exp_w2", 0.35)),
+        "heat_wind_exp_w3": float(getattr(s, "heat_wind_exp_w3", 0.35)),
+        "heat_wet_surface_edge_bad_max": float(
+            getattr(s, "heat_wet_surface_edge_bad_max", 0.85)
+        ),
+        "heat_open_wet_synergy": float(getattr(s, "heat_open_wet_synergy", 0.14)),
+        "heat_edge_factor_min": float(getattr(s, "heat_edge_factor_min", 0.65)),
+        "heat_edge_factor_max": float(getattr(s, "heat_edge_factor_max", 1.75)),
+    }
+
+
 def build_weather_weight_params(
     snap: WeatherSnapshot,
     *,
     enabled: bool,
     policy: Optional[Dict[str, Any]] = None,
     thermal_scales: Optional[Dict[str, float]] = None,
+    settings: Optional[Any] = None,
 ) -> WeatherWeightParams:
     """Собрать параметры для RouteService из снимка погоды."""
     if not enabled:
@@ -105,7 +246,8 @@ def build_weather_weight_params(
     rs = float(scales.get("response", 1.0))
     mults = compute_weather_multipliers(snap, policy=pol, response_scale=rs)
     regime = classify_weather_regime(snap)
-    return WeatherWeightParams(
+
+    base_kw: Dict[str, Any] = dict(
         enabled=True,
         mults=mults,
         green_coupling=gcc,
@@ -115,7 +257,27 @@ def build_weather_weight_params(
         cold_canyon_bonus_scale=float(scales.get("cold_canyon", 1.0)),
         cold_tree_damping=float(scales.get("cold_tree_damp", 0.65)),
         weather_response_scale=rs,
+        heat_continuous=False,
     )
+
+    if settings is not None and bool(
+        getattr(settings, "heat_continuous_enable", True)
+    ):
+        sig = _normalized_weather_signals(snap, settings)
+        tsb, osp, bsb, cbn, wop, wsp = _continuous_six_coefficients(sig, settings)
+        ep = _edge_params_from_settings(settings)
+        base_kw.update(
+            heat_continuous=True,
+            tree_shade_bonus=tsb,
+            open_sky_penalty=osp,
+            building_shade_bonus=bsb,
+            covered_bonus=cbn,
+            wind_open_penalty=wop,
+            wet_surface_penalty=wsp,
+            normalized_signals=sig,
+            **ep,
+        )
+    return WeatherWeightParams(**base_kw)
 
 
 def classify_weather_regime(snap: WeatherSnapshot) -> str:
@@ -449,6 +611,7 @@ def resolve_weather_for_route(
     departure_time: Optional[str],
     manual: Optional[WeatherSnapshot] = None,
     thermal_scales: Optional[Dict[str, float]] = None,
+    settings: Optional[Any] = None,
 ) -> Tuple[WeatherSnapshot, str, WeatherWeightParams]:
     """Вернуть снимок погоды, строку источника и параметры весов."""
     mode = (weather_mode or "none").strip().lower()
@@ -489,5 +652,8 @@ def resolve_weather_for_route(
 
     enabled = mode not in ("none", "off", "")
     return snap, src, build_weather_weight_params(
-        snap, enabled=enabled, thermal_scales=thermal_scales
+        snap,
+        enabled=enabled,
+        thermal_scales=thermal_scales,
+        settings=settings,
     )

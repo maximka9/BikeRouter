@@ -19,12 +19,68 @@ from ..config import (
     TURN_PENALTY_BASE,
     TIME_SLOTS,
 )
-from .heat import angle_diff_deg
+from .heat import angle_diff_deg, wet_surface_edge_slip_factor
 from .stress import stress_metrics_for_route
 from .weather import WeatherWeightParams
 from ..exceptions import RouteNotFoundError
 
 logger = logging.getLogger(__name__)
+
+
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, x))
+
+
+def continuous_heat_edge_weather_factor(
+    edge_data: dict, weather: WeatherWeightParams
+) -> float:
+    """Непрерывный множитель микроклимата для тепловой компоненты (без hot/cold/neutral)."""
+    O = float(edge_data.get("thermal_open_sky_share") or 0.5) or 0.5
+    O = _clamp01(O)
+    B = _clamp01(float(edge_data.get("thermal_building_shade_share") or 0.0) or 0.0)
+    V = _clamp01(float(edge_data.get("thermal_vegetation_shade_share") or 0.0) or 0.0)
+    C = _clamp01(float(edge_data.get("thermal_covered_share") or 0.0) or 0.0)
+
+    se = edge_data.get("surface_effective")
+    wet = wet_surface_edge_slip_factor(se)
+    rs = float(getattr(weather, "weather_response_scale", 1.0) or 1.0)
+
+    w1 = float(getattr(weather, "heat_wind_exp_w1", 0.45))
+    w2 = float(getattr(weather, "heat_wind_exp_w2", 0.35))
+    w3 = float(getattr(weather, "heat_wind_exp_w3", 0.35))
+    wind_exp = _clamp01(w1 * O + w2 * (1.0 - B) + w3 * (1.0 - C))
+
+    k1 = float(getattr(weather, "heat_edge_k_open", 0.38))
+    k2 = float(getattr(weather, "heat_edge_k_tree", 0.36))
+    k3 = float(getattr(weather, "heat_edge_k_building", 0.34))
+    k4 = float(getattr(weather, "heat_edge_k_covered", 0.32))
+    k5 = float(getattr(weather, "heat_edge_k_wet", 0.28))
+    k6 = float(getattr(weather, "heat_edge_k_wind", 0.30))
+
+    osp = float(getattr(weather, "open_sky_penalty", 1.0))
+    tsb = float(getattr(weather, "tree_shade_bonus", 1.0))
+    bsb = float(getattr(weather, "building_shade_bonus", 1.0))
+    cbn = float(getattr(weather, "covered_bonus", 1.0))
+    wsp = float(getattr(weather, "wet_surface_penalty", 1.0))
+    wop = float(getattr(weather, "wind_open_penalty", 1.0))
+
+    syn = float(getattr(weather, "heat_open_wet_synergy", 0.14))
+    wet_scale = float(getattr(weather, "heat_wet_surface_edge_bad_max", 0.85))
+    wet_eff = _clamp01(wet * wet_scale)
+
+    raw = (
+        1.0
+        + rs * k1 * osp * O
+        - rs * k2 * tsb * V
+        - rs * k3 * bsb * B
+        - rs * k4 * cbn * C
+        + rs * k5 * wsp * wet_eff
+        + rs * k6 * wop * wind_exp
+        + rs * syn * O * wet_eff * wind_exp
+    )
+    lo = float(getattr(weather, "heat_edge_factor_min", 0.65))
+    hi = float(getattr(weather, "heat_edge_factor_max", 1.75))
+    return max(lo, min(hi, raw))
 
 
 def effective_edge_components(
@@ -73,7 +129,10 @@ def effective_edge_components(
     heat_excess = max(0.0, float(wm.heat) - 1.0)
     heat_deficit = max(0.0, 1.0 - float(wm.heat))
 
-    if regime == "hot":
+    if getattr(weather, "heat_continuous", False):
+        ef = continuous_heat_edge_weather_factor(edge_data, weather)
+        heat_eff = h * hm * wm.heat * ef
+    elif regime == "hot":
         op = float(getattr(weather, "hot_open_penalty_scale", 1.0) or 1.0)
         tb = float(getattr(weather, "hot_tree_bonus_scale", 1.0) or 1.0)
         h = h * (
@@ -84,6 +143,7 @@ def effective_edge_components(
             1.0
             - 0.26 * rs * tb * V * min(1.2, heat_excess + 0.08)
         )
+        heat_eff = h * hm * wm.heat
     elif regime == "cold":
         cc = float(getattr(weather, "cold_canyon_bonus_scale", 1.0) or 1.0)
         td = float(getattr(weather, "cold_tree_damping", 0.65) or 0.65)
@@ -94,12 +154,13 @@ def effective_edge_components(
             1.0
             + 0.16 * rs * (1.0 - td) * V * (0.6 + 0.4 * heat_deficit)
         )
+        heat_eff = h * hm * wm.heat
     else:
         if wm.heat >= 1.03:
             h = h * (1.0 + 0.28 * O * min(1.2, wm.heat - 1.0))
         elif wm.heat <= 0.97:
             h = h * (1.0 - 0.18 * B * (1.0 - float(wm.heat)))
-    heat_eff = h * hm * wm.heat
+        heat_eff = h * hm * wm.heat
     st_eff = st * wm.stress
     return phys_eff, heat_eff, st_eff
 
@@ -210,6 +271,7 @@ _GRAPHML_NUMERIC_EDGE_ATTRS = frozenset(
         "thermal_open_sky_share",
         "thermal_vegetation_shade_share",
         "thermal_building_shade_share",
+        "thermal_covered_share",
         *[f"heat_{s.key}" for s in TIME_SLOTS],
         *[f"heat_exposure_{s.key}" for s in TIME_SLOTS],
     }

@@ -189,6 +189,24 @@ def _build_weather_route_context(
     if wp.enabled:
         mults = {k: round(float(v), 4) for k, v in asdict(wp.mults).items()}
     wt = weather_time or departure_time
+    hm: Dict[str, float] = {}
+    hc = False
+    if wp.enabled and getattr(wp, "heat_continuous", False):
+        hc = True
+        hm = {
+            "tree_shade_bonus": float(getattr(wp, "tree_shade_bonus", 1.0)),
+            "open_sky_penalty": float(getattr(wp, "open_sky_penalty", 1.0)),
+            "building_shade_bonus": float(getattr(wp, "building_shade_bonus", 1.0)),
+            "covered_bonus": float(getattr(wp, "covered_bonus", 1.0)),
+            "wind_open_penalty": float(getattr(wp, "wind_open_penalty", 1.0)),
+            "wet_surface_penalty": float(getattr(wp, "wet_surface_penalty", 1.0)),
+        }
+        ns = getattr(wp, "normalized_signals", None) or {}
+        for k, v in ns.items():
+            try:
+                hm[f"norm_{k}"] = float(v)
+            except (TypeError, ValueError):
+                pass
     return WeatherRouteContext(
         enabled=bool(wp.enabled),
         mode=request_mode,
@@ -198,6 +216,8 @@ def _build_weather_route_context(
         snapshot=_weather_snapshot_to_values(snap),
         multipliers=mults,
         summary_ru=_weather_summary_ru(snap, wp),
+        heat_continuous=hc,
+        heat_microclimate=hm,
     )
 
 
@@ -266,6 +286,7 @@ def _resolve_route_weather(
     cloud_cover_pct: Optional[float],
     humidity_pct: Optional[float],
     thermal_scales: Optional[Dict[str, float]] = None,
+    settings: Any = None,
 ) -> Tuple[WeatherSnapshot, str, WeatherWeightParams]:
     lat = (float(start[0]) + float(end[0])) * 0.5
     lon = (float(start[1]) + float(end[1])) * 0.5
@@ -288,6 +309,7 @@ def _resolve_route_weather(
         departure_time=departure_time,
         manual=manual,
         thermal_scales=thermal_scales,
+        settings=settings,
     )
 
 
@@ -2184,6 +2206,7 @@ class RouteEngine:
             cloud_cover_pct=cloud_cover_pct,
             humidity_pct=humidity_pct,
             thermal_scales=_thermal,
+            settings=_s,
         )
         season_val = _infer_season_from_month(now_utc.month)
         air_eff: Optional[float] = air_temperature_c

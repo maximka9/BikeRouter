@@ -85,6 +85,28 @@ def vegetation_shade_share(trees_pct: float, grass_pct: float) -> float:
     return float(min(0.95, (t / 100.0) * 0.92 + (g / 100.0) * 0.25))
 
 
+def covered_share(tags: Dict[str, Any]) -> float:
+    """Доля укрытия / навеса / прохода [0..1] по OSM (covered, tunnel, indoor)."""
+    if not tags:
+        return 0.0
+    indoor = tags.get("indoor")
+    if indoor in ("yes", "room"):
+        return 0.92
+    tun = tags.get("tunnel")
+    if tun == "building_passage":
+        return 0.95
+    if tun in ("yes", "true", "1"):
+        return 0.82
+    cov = tags.get("covered")
+    if cov in ("yes", "roof"):
+        return 0.80
+    if cov in ("arcade", "colonnade"):
+        return 0.88
+    if cov:
+        return 0.52
+    return 0.0
+
+
 def building_shade_share(tags: Dict[str, Any]) -> float:
     """Прокси тени зданий по ширине проезда [0..1]."""
     w = tags.get("width") or tags.get("est:width")
@@ -147,6 +169,31 @@ def legacy_exposure_unit(
     return max(0.0, min(1.0, exposed * ins))
 
 
+def wet_surface_edge_slip_factor(surface_effective: Any) -> float:
+    """[0..1] риск дискомфорта мокрого покрытия (доп. поправка к heat, не дублируя physical)."""
+    s = str(surface_effective or "unknown").strip().lower()
+    if s in ("asphalt", "concrete", "paved"):
+        return 0.10
+    if s in ("sett", "cobblestone", "unhewn_cobblestone"):
+        return 0.42
+    if s in (
+        "gravel",
+        "fine_gravel",
+        "compacted",
+        "ground",
+        "earth",
+        "grass",
+        "unpaved",
+        "dirt",
+    ):
+        return 0.78
+    if s in ("wood", "metal"):
+        return 0.50
+    if s in ("unknown", "", "na"):
+        return 0.32
+    return 0.38
+
+
 def heat_cost_for_edge(
     length_m: float,
     exposure_unit: float,
@@ -163,14 +210,14 @@ def thermal_edge_features(
     trees_pct: float,
     grass_pct: float,
     tags: Dict[str, Any],
-) -> Tuple[float, float, float, float]:
-    """O, V, B и комбинированный tree/build mitigation для legacy."""
+) -> Tuple[float, float, float, float, float]:
+    """O, V, B, C (укрытие), tree_mit — для тепловой маршрутизации."""
     O = open_sky_fraction(trees_pct, grass_pct)
     V = vegetation_shade_share(trees_pct, grass_pct)
     B = building_shade_share(tags)
+    C = covered_share(tags)
     tree_mit = min(0.85, (max(0.0, min(100.0, trees_pct)) / 100.0) * 0.9)
-    build_mit = building_shade_share(tags)
-    return O, V, B, tree_mit
+    return O, V, B, C, tree_mit
 
 
 def exposure_units_detailed_all_slots(
@@ -182,7 +229,7 @@ def exposure_units_detailed_all_slots(
     use_fallback: bool,
 ) -> Dict[str, float]:
     """Безразмерная тепловая нагрузка по слотам (детально или прокси)."""
-    O, V, B, _tm = thermal_edge_features(
+    O, V, B, _c, _tm = thermal_edge_features(
         bearing_deg, trees_pct, grass_pct, tags
     )
     out: Dict[str, float] = {}

@@ -437,6 +437,21 @@ class Settings:
     heat_max_detour_ratio: float = _env("HEAT_MAX_DETOUR_RATIO", 0.42, float)
     stress_max_detour_ratio: float = _env("STRESS_MAX_DETOUR_RATIO", 0.55, float)
 
+    # --- Тепловая маршрутизация: погода × микроклимат рёбер (см. services/routing.effective_edge_components) ---
+    heat_hot_tree_bonus_scale: float = _env("HEAT_HOT_TREE_BONUS_SCALE", 1.45, float)
+    heat_hot_open_sky_penalty_scale: float = _env(
+        "HEAT_HOT_OPEN_SKY_PENALTY_SCALE", 1.55, float
+    )
+    heat_cold_building_canyon_bonus_scale: float = _env(
+        "HEAT_COLD_BUILDING_CANYON_BONUS_SCALE", 1.4, float
+    )
+    # 0..1: насколько гасить выгоду тени деревьев в «холодном» режиме (выше — сильнее гашение).
+    heat_cold_tree_bonus_damping: float = _env(
+        "HEAT_COLD_TREE_BONUS_DAMPING", 0.65, float
+    )
+    # Общий усилитель чувствительности погодных множителей и тепловых поправок по рёбрам.
+    heat_weather_response_scale: float = _env("HEAT_WEATHER_RESPONSE_SCALE", 1.35, float)
+
     # --- Кэш ---
     cache_satellite: bool = _env_bool("CACHE_SATELLITE", True)
     cache_tile_analysis: bool = _env_bool("CACHE_TILE_ANALYSIS", True)
@@ -684,6 +699,19 @@ def routing_engine_cache_fingerprint() -> str:
         "algo_ver": ROUTING_ALGO_VERSION,
         "default_coefficient": DEFAULT_COEFFICIENT,
         "heat_cost_scale": HEAT_COST_SCALE,
+        "heat_hot_tree_bonus_scale": _env("HEAT_HOT_TREE_BONUS_SCALE", 1.45, float),
+        "heat_hot_open_sky_penalty_scale": _env(
+            "HEAT_HOT_OPEN_SKY_PENALTY_SCALE", 1.55, float
+        ),
+        "heat_cold_building_canyon_bonus_scale": _env(
+            "HEAT_COLD_BUILDING_CANYON_BONUS_SCALE", 1.4, float
+        ),
+        "heat_cold_tree_bonus_damping": _env(
+            "HEAT_COLD_TREE_BONUS_DAMPING", 0.65, float
+        ),
+        "heat_weather_response_scale": _env(
+            "HEAT_WEATHER_RESPONSE_SCALE", 1.35, float
+        ),
         "heat_stress_model_version": HEAT_STRESS_MODEL_VERSION,
         "osm_highway_filter": OSM_HIGHWAY_FILTER,
         "preference_profiles": pref_profiles,

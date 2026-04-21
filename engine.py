@@ -230,10 +230,11 @@ def _log_route_weather_line(
         f"physical:{m.physical:.3f},heat:{m.heat:.3f},green:{m.green:.3f},"
         f"stress:{m.stress:.3f},surface:{m.surface:.3f}"
     )
+    regime = getattr(wp, "regime", "—") if wp else "—"
     logger.info(
         "route_weather: built_at=%s weather_time=%s source=%s lat=%.5f lon=%.5f "
         "temp_c=%.2f precip_mm=%.4f wind_ms=%.2f cloud_pct=%.1f humidity_pct=%.1f "
-        "sw_wm2=%s mult={%s} weather_enabled=%s",
+        "sw_wm2=%s mult={%s} regime=%s weather_enabled=%s",
         _iso_utc_z(built_at_utc),
         weather_time_effective or "—",
         source or "none",
@@ -246,6 +247,7 @@ def _log_route_weather_line(
         snap.humidity_pct,
         sw_txt,
         mult,
+        regime,
         wp.enabled,
     )
 
@@ -263,6 +265,7 @@ def _resolve_route_weather(
     wind_speed_ms: Optional[float],
     cloud_cover_pct: Optional[float],
     humidity_pct: Optional[float],
+    thermal_scales: Optional[Dict[str, float]] = None,
 ) -> Tuple[WeatherSnapshot, str, WeatherWeightParams]:
     lat = (float(start[0]) + float(end[0])) * 0.5
     lon = (float(start[1]) + float(end[1])) * 0.5
@@ -284,6 +287,7 @@ def _resolve_route_weather(
         weather_time_iso=weather_time,
         departure_time=departure_time,
         manual=manual,
+        thermal_scales=thermal_scales,
     )
 
 
@@ -2159,6 +2163,14 @@ class RouteEngine:
         now_utc = datetime.now(timezone.utc)
         dep_for_weather = departure_time or now_utc.replace(microsecond=0).isoformat()
 
+        _s = self._app.settings
+        _thermal = {
+            "hot_tree": float(_s.heat_hot_tree_bonus_scale),
+            "hot_open": float(_s.heat_hot_open_sky_penalty_scale),
+            "cold_canyon": float(_s.heat_cold_building_canyon_bonus_scale),
+            "cold_tree_damp": float(_s.heat_cold_tree_bonus_damping),
+            "response": float(_s.heat_weather_response_scale),
+        }
         w_snap, wsrc, wp = _resolve_route_weather(
             start,
             end,
@@ -2171,6 +2183,7 @@ class RouteEngine:
             wind_speed_ms=wind_speed_ms,
             cloud_cover_pct=cloud_cover_pct,
             humidity_pct=humidity_pct,
+            thermal_scales=_thermal,
         )
         season_val = _infer_season_from_month(now_utc.month)
         air_eff: Optional[float] = air_temperature_c
@@ -2208,7 +2221,7 @@ class RouteEngine:
             season_val,
         )
 
-        s = self._app.settings
+        s = _s
         skip_sat = not green_enabled
         include_green = green_enabled
         routes_base: List[RouteResponse]

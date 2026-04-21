@@ -56,6 +56,14 @@ class WeatherWeightParams:
     mults: WeatherMultipliers = field(default_factory=WeatherMultipliers)
     green_coupling: float = 0.55
     enabled: bool = False
+    # Режим для микроклиматических поправок к тепловой компоненте (routing.effective_edge_components).
+    regime: str = "neutral"  # hot | cold | neutral
+    hot_tree_bonus_scale: float = 1.0
+    hot_open_penalty_scale: float = 1.0
+    cold_canyon_bonus_scale: float = 1.0
+    # 0..1: ослабление «зелёной» тени растений в холоде (выше — сильнее).
+    cold_tree_damping: float = 0.5
+    weather_response_scale: float = 1.0
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -86,28 +94,87 @@ def build_weather_weight_params(
     *,
     enabled: bool,
     policy: Optional[Dict[str, Any]] = None,
+    thermal_scales: Optional[Dict[str, float]] = None,
 ) -> WeatherWeightParams:
     """Собрать параметры для RouteService из снимка погоды."""
     if not enabled:
         return WeatherWeightParams(enabled=False)
     pol = policy if policy is not None else load_weather_policy()
     gcc = float((pol or {}).get("green_edge_coupling", 0.55))
-    mults = compute_weather_multipliers(snap, policy=pol)
+    scales = thermal_scales or {}
+    rs = float(scales.get("response", 1.0))
+    mults = compute_weather_multipliers(snap, policy=pol, response_scale=rs)
+    regime = classify_weather_regime(snap)
     return WeatherWeightParams(
-        enabled=True, mults=mults, green_coupling=gcc
+        enabled=True,
+        mults=mults,
+        green_coupling=gcc,
+        regime=regime,
+        hot_tree_bonus_scale=float(scales.get("hot_tree", 1.0)),
+        hot_open_penalty_scale=float(scales.get("hot_open", 1.0)),
+        cold_canyon_bonus_scale=float(scales.get("cold_canyon", 1.0)),
+        cold_tree_damping=float(scales.get("cold_tree_damp", 0.65)),
+        weather_response_scale=rs,
     )
+
+
+def classify_weather_regime(snap: WeatherSnapshot) -> str:
+    """Грубая классификация: жара/инсоляция vs холод/ветер/влага для микроклимата на рёбрах."""
+    T = float(snap.temperature_c)
+    Ta = float(snap.apparent_temperature_c) if snap.apparent_temperature_c is not None else T
+    sw = snap.shortwave_radiation_wm2
+    wind = max(float(snap.wind_speed_ms), float(snap.wind_gusts_ms or 0.0))
+    hum = float(snap.humidity_pct)
+    clouds = float(snap.cloud_cover_pct)
+    rain = float(snap.precipitation_mm)
+
+    hot_score = 0.0
+    if max(T, Ta) >= 23.5:
+        hot_score += 2.0
+    if sw is not None:
+        swf = float(sw)
+        if swf >= 520:
+            hot_score += 1.8
+        elif swf >= 320:
+            hot_score += 1.0
+    if clouds <= 38:
+        hot_score += 1.0
+    if rain <= 0.08:
+        hot_score += 0.35
+    if Ta > T + 1.2:
+        hot_score += 0.6
+
+    cold_score = 0.0
+    if min(T, Ta) <= 12.5:
+        cold_score += 2.0
+    if wind >= 9.0:
+        cold_score += 1.2
+    if hum >= 78:
+        cold_score += 0.85
+    if clouds >= 72 or rain >= 0.45:
+        cold_score += 1.0
+    if Ta < T - 0.8:
+        cold_score += 0.5
+
+    if hot_score >= 3.2 and cold_score < 2.2:
+        return "hot"
+    if cold_score >= 2.6 and hot_score < 3.0:
+        return "cold"
+    return "neutral"
 
 
 def compute_weather_multipliers(
     snap: WeatherSnapshot,
     *,
     policy: Optional[Dict[str, Any]] = None,
+    response_scale: float = 1.0,
 ) -> WeatherMultipliers:
     """Вычислить множители по политике и снимку погоды."""
     pol = policy if policy is not None else load_weather_policy()
     if not pol:
         return WeatherMultipliers()
 
+    rs = max(0.5, min(2.5, float(response_scale)))
     m = pol.get("multipliers") or {}
     tc = pol.get("temperature_c") or {}
     pr = pol.get("precipitation_mm_h") or {}
@@ -116,8 +183,12 @@ def compute_weather_multipliers(
     hu = pol.get("humidity_pct") or {}
 
     T = snap.temperature_c
+    Ta = snap.apparent_temperature_c if snap.apparent_temperature_c is not None else T
+    sw = snap.shortwave_radiation_wm2
     rain = snap.precipitation_mm
     wind = snap.wind_speed_ms
+    gust = snap.wind_gusts_ms
+    wind_eff = max(float(wind), float(gust or 0.0))
     clouds = snap.cloud_cover_pct
     hum = snap.humidity_pct
 
@@ -143,15 +214,22 @@ def compute_weather_multipliers(
         phys *= float(mp.get("rain_light" if rain < light_max else "rain_heavy", 1.06))
     calm = float(wn.get("calm_max", 4))
     strong = float(wn.get("strong_above", 12))
-    if wind > strong:
-        phys *= 1.0 + float(mp.get("wind_headwind_proxy", 0.04)) * min(2.0, (wind - strong) / strong)
+    if wind_eff > strong:
+        phys *= 1.0 + float(mp.get("wind_headwind_proxy", 0.04)) * min(
+            2.0, (wind_eff - strong) / max(strong, 1e-6)
+        )
     if hum > float(hu.get("humid_above", 80)):
         phys *= float(mp.get("humid_surface", 1.05))
 
-    # heat (thermal discomfort routing component)
+    # heat (thermal discomfort routing component): T, облака, осадки + ощущаемая температура и солнце
     heat = float(mh.get("base", 1.0))
-    if T > ref_heat:
-        heat += float(mh.get("per_temp_above_22", 0.022)) * (T - ref_heat)
+    t_for_heat = max(T, Ta)
+    if t_for_heat > ref_heat:
+        heat += float(mh.get("per_temp_above_22", 0.022)) * (t_for_heat - ref_heat) * (
+            0.85 + 0.15 * rs
+        )
+    if Ta > T + 0.5:
+        heat *= 1.0 + 0.012 * rs * min(8.0, Ta - T)
     heat *= max(0.65, 1.0 - float(mh.get("cloud_reduction_per_pct", 0.0022)) * clouds)
     if rain > dry_max:
         heat *= float(
@@ -160,6 +238,9 @@ def compute_weather_multipliers(
                 0.9,
             )
         )
+    if sw is not None:
+        sw_norm = max(0.0, min(1.0, (float(sw) - 120.0) / 780.0))
+        heat *= 1.0 + 0.14 * rs * sw_norm
 
     # green comfort multiplier (applied with trees_pct on edge)
     green = float(mg.get("base", 1.0))
@@ -167,20 +248,24 @@ def compute_weather_multipliers(
     clear_max = float(cc.get("clear_max", 30))
     overcast = float(cc.get("overcast_min", 70))
     if T >= warm_min and clouds <= clear_max and rain <= dry_max:
-        green *= float(mg.get("hot_sunny_bonus", 1.18))
+        green *= float(mg.get("hot_sunny_bonus", 1.18)) ** (0.85 + 0.15 * rs)
     elif T < float(tc.get("cool_max", 15)) or clouds >= overcast:
-        green *= float(mg.get("cool_cloud_penalty", 0.92))
+        green *= float(mg.get("cool_cloud_penalty", 0.92)) ** (0.9 + 0.1 * rs)
     if rain > light_max:
         green *= float(mg.get("rain_neutralize", 0.72))
+    if sw is not None and float(sw) >= 400 and T >= 22:
+        green *= 1.0 + 0.06 * rs * min(1.0, (float(sw) - 400.0) / 500.0)
 
     # stress
     stress = float(ms.get("base", 1.0))
     if rain > dry_max:
         stress *= float(ms.get("rain", 1.12))
-    if wind > strong:
-        stress *= float(ms.get("wind_strong", 1.1))
+    if wind_eff > strong:
+        stress *= float(ms.get("wind_strong", 1.1)) ** (0.9 + 0.1 * min(1.5, rs))
     if clouds > float(cc.get("overcast_min", 70)) and rain > dry_max * 2:
         stress *= float(ms.get("low_visibility_cloud", 1.05))
+    if gust is not None and float(gust) > wind + 4:
+        stress *= 1.0 + 0.04 * rs * min(1.0, (float(gust) - wind) / 12.0)
 
     # surface (merged with physical in routing; separate knob)
     surface = float(msv.get("base", 1.0))
@@ -190,15 +275,23 @@ def compute_weather_multipliers(
         surface *= float(msv.get("humid", 1.04))
 
     # wet + high LTS roads — approximate: bump stress slightly if rain and wind
-    if rain > light_max and wind > float(wn.get("breeze_max", 8)):
+    if rain > light_max and wind_eff > float(wn.get("breeze_max", 8)):
         stress *= float(ms.get("wet_and_fast_road", 1.08))
 
+    # Диапазоны расширяются с response_scale, чтобы агрегаты батча различали контрастные дни.
+    phys_lo, phys_hi = 0.72 - 0.04 * (rs - 1.0), 1.48 + 0.08 * (rs - 1.0)
+    heat_lo = 0.42 - 0.12 * (rs - 1.0)
+    heat_hi = 1.82 + 0.35 * (rs - 1.0)
+    green_lo = 0.48 - 0.08 * (rs - 1.0)
+    green_hi = 1.48 + 0.12 * (rs - 1.0)
+    stress_lo, stress_hi = 0.82 - 0.05 * (rs - 1.0), 1.52 + 0.12 * (rs - 1.0)
+
     return WeatherMultipliers(
-        physical=_clamp(phys, 0.75, 1.45),
-        heat=_clamp(heat, 0.55, 1.75),
-        green=_clamp(green, 0.6, 1.35),
-        stress=_clamp(stress, 0.85, 1.45),
-        surface=_clamp(surface, 0.9, 1.25),
+        physical=_clamp(phys, phys_lo, phys_hi),
+        heat=_clamp(heat, heat_lo, heat_hi),
+        green=_clamp(green, green_lo, green_hi),
+        stress=_clamp(stress, stress_lo, stress_hi),
+        surface=_clamp(surface, 0.88, 1.28),
     )
 
 
@@ -355,6 +448,7 @@ def resolve_weather_for_route(
     weather_time_iso: Optional[str],
     departure_time: Optional[str],
     manual: Optional[WeatherSnapshot] = None,
+    thermal_scales: Optional[Dict[str, float]] = None,
 ) -> Tuple[WeatherSnapshot, str, WeatherWeightParams]:
     """Вернуть снимок погоды, строку источника и параметры весов."""
     mode = (weather_mode or "none").strip().lower()
@@ -394,4 +488,6 @@ def resolve_weather_for_route(
         src = "manual" if manual is not None else "default"
 
     enabled = mode not in ("none", "off", "")
-    return snap, src, build_weather_weight_params(snap, enabled=enabled)
+    return snap, src, build_weather_weight_params(
+        snap, enabled=enabled, thermal_scales=thermal_scales
+    )

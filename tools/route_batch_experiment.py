@@ -14,8 +14,8 @@
 умолчанию 10), слот каждого дня 14:00 локально (``BATCH_WEATHER_TZ`` /
 по умолчанию Europe/Samara).
 
-Результат всегда пишется в ``route_experiment_batch.xlsx`` (и рядом
-``route_experiment_batch_route_vertices.csv.gz`` при наличии вершин).
+Результат: ``route_experiment_batch_<YYYYMMDD_HHMMSS>.xlsx`` (UTC) и рядом
+``*_route_vertices.csv.gz`` при наличии вершин.
 
 Расширение коридора в батче только **10 м → 100 м**. Если маршрута нет и на 100 м,
 пара O-D **пропускается** (без попыток 1000/5000 м); в лог пишутся координаты
@@ -72,10 +72,27 @@ _DEFAULT_BATCH_WEATHER_TZ = "Europe/Samara"
 DEFAULT_ROUTE_BATCH_SEED = 42
 DEFAULT_MIN_SPACING_M = 100.0
 DEFAULT_MAX_SAMPLE_ATTEMPTS = 50_000
-DEFAULT_ROUTE_BATCH_OUTPUT_XLSX = "route_experiment_batch.xlsx"
 # Режим ``past``: столько дней архива, каждый день — 14:00 локально.
 PAST_ARCHIVE_DAYS = 10
 PAST_ARCHIVE_LOCAL_HOUR = 14
+
+
+def _batch_profiles_from_arg(arg: str) -> Tuple[str, ...]:
+    v = (arg or "both").strip().lower()
+    if v == "both":
+        return ("cyclist", "pedestrian")
+    if v == "cyclist":
+        return ("cyclist",)
+    if v == "pedestrian":
+        return ("pedestrian",)
+    raise ValueError("profiles: ожидается both | cyclist | pedestrian")
+
+
+def _batch_output_xlsx_path() -> str:
+    """Уникальное имя: route_experiment_batch_YYYYMMDD_HHMMSS.xlsx (UTC)."""
+    return datetime.now(timezone.utc).strftime(
+        "route_experiment_batch_%Y%m%d_%H%M%S.xlsx"
+    )
 
 
 def _zoneinfo_or_raise(name: str) -> Any:
@@ -539,6 +556,7 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "seed": "Seed",
         "n_points": "Число точек",
         "n_directed_pairs": "Направленных пар O–D",
+        "batch_profiles": "Профили (батч)",
         "n_profiles": "Профилей",
         "n_variants": "Вариантов маршрута",
         "expected_route_cells": "Ожидалось строк маршрутов",
@@ -821,6 +839,7 @@ def run_experiment(
     weather: str = "none",
     past_archive_days: int = PAST_ARCHIVE_DAYS,
     precipitation_mm: Optional[float] = None,
+    profiles_mode: str = "both",
 ) -> str:
     _ensure_pkg_path()
 
@@ -915,8 +934,9 @@ def run_experiment(
         wm_engine = "none"
         use_live_engine = False
 
+    profile_tuple = _batch_profiles_from_arg(profiles_mode)
     n_win = max(1, len(weather_windows))
-    expected_routes = n_pairs * len(PROFILES) * len(EXPECTED_VARIANTS) * n_win
+    expected_routes = n_pairs * len(profile_tuple) * len(EXPECTED_VARIANTS) * n_win
 
     raw_rows: List[Dict[str, Any]] = []
     vertices: List[Dict[str, Any]] = []
@@ -930,7 +950,7 @@ def run_experiment(
     route_tasks: List[Tuple[int, int, str]] = [
         (i, j, prof)
         for i, j in _iter_directed_pairs(n_points)
-        for prof in PROFILES
+        for prof in profile_tuple
     ]
 
     total_steps = len(route_tasks) * n_win
@@ -1066,7 +1086,7 @@ def run_experiment(
     s_wdv = build_summaries_by_weather_date_and_variant(raw_rows)
     pair_cmp = build_pair_comparison(raw_rows)
 
-    out = DEFAULT_ROUTE_BATCH_OUTPUT_XLSX
+    out = _batch_output_xlsx_path()
 
     wkt_fp = routing_engine_cache_fingerprint()
     meta_rows: List[Tuple[str, Any]] = [
@@ -1075,7 +1095,8 @@ def run_experiment(
         ("seed", seed),
         ("n_points", n_points),
         ("n_directed_pairs", n_pairs),
-        ("n_profiles", len(PROFILES)),
+        ("batch_profiles", ",".join(profile_tuple)),
+        ("n_profiles", len(profile_tuple)),
         ("n_variants", len(EXPECTED_VARIANTS)),
         ("expected_route_cells", expected_routes),
         ("successful_route_rows", len(raw_rows)),
@@ -1134,7 +1155,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Пакетный эксперимент O-D в PRECACHE_AREA_POLYGON_WKT -> "
-            f"{DEFAULT_ROUTE_BATCH_OUTPUT_XLSX} (и вершины рядом .csv.gz)."
+            "route_experiment_batch_<YYYYMMDD_HHMMSS>.xlsx (UTC) и вершины *_route_vertices.csv.gz."
         )
     )
     parser.add_argument(
@@ -1170,6 +1191,12 @@ def main() -> None:
         default=None,
         help="Осадки, мм/ч",
     )
+    parser.add_argument(
+        "--profiles",
+        choices=("both", "cyclist", "pedestrian"),
+        default="both",
+        help="Профили: только велосипед, только пешеход или оба (по умолчанию).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -1183,6 +1210,7 @@ def main() -> None:
         weather=args.weather,
         past_archive_days=args.past_days,
         precipitation_mm=args.precipitation_mm,
+        profiles_mode=args.profiles,
     )
     print(path)
 

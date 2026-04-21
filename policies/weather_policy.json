@@ -38,15 +38,15 @@
     },
     "heat": {
       "base": 1.0,
-      "per_temp_above_22": 0.022,
-      "cloud_reduction_per_pct": 0.0022,
+      "per_temp_above_22": 0.028,
+      "cloud_reduction_per_pct": 0.0026,
       "rain_reduction_light": 0.92,
       "rain_reduction_heavy": 0.82
     },
     "green": {
       "base": 1.0,
-      "hot_sunny_bonus": 1.18,
-      "cool_cloud_penalty": 0.92,
+      "hot_sunny_bonus": 1.24,
+      "cool_cloud_penalty": 0.88,
       "rain_neutralize": 0.72
     },
     "stress": {

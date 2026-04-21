@@ -61,17 +61,44 @@ def effective_edge_components(
         * wm.surface
         * (1.0 + max(0.0, wm.green - 1.0) * g_edge * g_coupling)
     )
-    # Прокси геометрии улицы (тепловая модель графа): открытость и «каньон».
+    # Прокси геометрии улицы (тепловая модель графа): открытость, тень зданий, тень растений.
     O = float(edge_data.get("thermal_open_sky_share") or 0.5) or 0.5
     O = max(0.0, min(1.0, O))
     B = float(edge_data.get("thermal_building_shade_share") or 0.0) or 0.0
     B = max(0.0, min(1.0, B))
-    if wm.heat >= 1.03:
-        # Жара: сильнее штраф на открытых участках (солнце), не сводя к одной зелени.
-        h = h * (1.0 + 0.28 * O * min(1.2, wm.heat - 1.0))
-    elif wm.heat <= 0.97:
-        # Прохладно: умеренный бонус «каньона» без роста роли деревьев.
-        h = h * (1.0 - 0.18 * B * (1.0 - float(wm.heat)))
+    V = float(edge_data.get("thermal_vegetation_shade_share") or 0.0) or 0.0
+    V = max(0.0, min(1.0, V))
+    rs = float(getattr(weather, "weather_response_scale", 1.0) or 1.0)
+    regime = str(getattr(weather, "regime", "neutral") or "neutral")
+    heat_excess = max(0.0, float(wm.heat) - 1.0)
+    heat_deficit = max(0.0, 1.0 - float(wm.heat))
+
+    if regime == "hot":
+        op = float(getattr(weather, "hot_open_penalty_scale", 1.0) or 1.0)
+        tb = float(getattr(weather, "hot_tree_bonus_scale", 1.0) or 1.0)
+        h = h * (
+            1.0
+            + 0.32 * rs * op * O * min(1.35, heat_excess + 0.12)
+        )
+        h = h * (
+            1.0
+            - 0.26 * rs * tb * V * min(1.2, heat_excess + 0.08)
+        )
+    elif regime == "cold":
+        cc = float(getattr(weather, "cold_canyon_bonus_scale", 1.0) or 1.0)
+        td = float(getattr(weather, "cold_tree_damping", 0.65) or 0.65)
+        td = max(0.0, min(1.0, td))
+        canyon = max(0.0, min(1.0, B * (0.65 + 0.35 * (1.0 - O))))
+        h = h * (1.0 - 0.22 * rs * cc * canyon * min(1.0, heat_deficit + 0.18))
+        h = h * (
+            1.0
+            + 0.16 * rs * (1.0 - td) * V * (0.6 + 0.4 * heat_deficit)
+        )
+    else:
+        if wm.heat >= 1.03:
+            h = h * (1.0 + 0.28 * O * min(1.2, wm.heat - 1.0))
+        elif wm.heat <= 0.97:
+            h = h * (1.0 - 0.18 * B * (1.0 - float(wm.heat)))
     heat_eff = h * hm * wm.heat
     st_eff = st * wm.stress
     return phys_eff, heat_eff, st_eff

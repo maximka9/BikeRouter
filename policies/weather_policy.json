@@ -53,13 +53,12 @@
       "base": 1.0,
       "rain": 1.12,
       "wind_strong": 1.1,
-      "low_visibility_cloud": 1.05,
-      "wet_and_fast_road": 1.08
+      "low_visibility_cloud": 1.05
     },
     "surface": {
       "base": 1.0,
-      "rain": 1.08,
-      "humid": 1.04
+      "rain": 1.0,
+      "humid": 1.0
     }
   }
 }

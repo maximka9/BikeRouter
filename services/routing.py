@@ -31,6 +31,146 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+def _surface_wet_route_tier(surface_effective: Any) -> int:
+    """0 — хорошие покрытия; 1 — умеренные; 2 — плохие/скользкие при дожде."""
+    s = str(surface_effective or "unknown").strip().lower()
+    if s in ("asphalt", "paved", "concrete") or s.startswith("concrete:"):
+        return 0
+    if s in ("paving_stones", "bricks", "paving_stone"):
+        return 0
+    if s in ("compacted", "fine_gravel"):
+        return 1
+    return 2
+
+
+def wet_surface_route_penalty(surface_effective: Any, weather: WeatherWeightParams) -> float:
+    """Множитель к физической стоимости ребра: дождь бьёт по плохому покрытию, асфальт почти не трогаем."""
+    if not weather.enabled:
+        return 1.0
+    sig = weather.normalized_signals or {}
+    rn = float(sig.get("rain_norm", 0.0))
+    hn = float(sig.get("humidity_norm", 0.0))
+    wet_env = max(rn, hn * 0.82)
+    if wet_env <= 1e-6:
+        return 1.0
+    tier = _surface_wet_route_tier(surface_effective)
+    t0 = float(getattr(weather, "phys_wet_tier0_cap", 0.016))
+    t1 = float(getattr(weather, "phys_wet_tier1_coef", 0.048))
+    t2 = float(getattr(weather, "phys_wet_tier2_coef", 0.12))
+    if tier == 0:
+        extra = wet_env * t0
+    elif tier == 1:
+        extra = wet_env * t1
+    else:
+        slip = wet_surface_edge_slip_factor(surface_effective)
+        extra = wet_env * (t2 * (0.55 + 0.45 * slip))
+    return max(1.0, min(1.28, 1.0 + extra))
+
+
+def _parse_maxspeed_kmh(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    if not s or s in ("none", "walk", "signals"):
+        return None
+    try:
+        v = float(s.replace(" mph", "").split()[0])
+        if "mph" in s:
+            return v * 1.60934
+        return v
+    except (TypeError, ValueError):
+        return None
+
+
+def weather_edge_stress_factor(
+    edge_data: dict, weather: WeatherWeightParams
+) -> float:
+    """Погодная поправка stress на уровне ребра (дождь×покрытие, ветер×открытость, LTS×скорость)."""
+    if not weather.enabled:
+        return 1.0
+    sig = weather.normalized_signals or {}
+    rn = float(sig.get("rain_norm", 0.0))
+    wn = float(sig.get("wind_norm", 0.0))
+    gn = float(sig.get("gust_norm", 0.0))
+    wind_comb = max(wn, gn * 0.85)
+
+    O = _clamp01(float(edge_data.get("thermal_open_sky_share") or 0.5) or 0.5)
+    B = _clamp01(float(edge_data.get("thermal_building_shade_share") or 0.0) or 0.0)
+    C = _clamp01(float(edge_data.get("thermal_covered_share") or 0.0) or 0.0)
+    w1 = float(getattr(weather, "heat_wind_exp_w1", 0.45))
+    w2 = float(getattr(weather, "heat_wind_exp_w2", 0.35))
+    w3 = float(getattr(weather, "heat_wind_exp_w3", 0.35))
+    wind_exp = _clamp01(w1 * O + w2 * (1.0 - B) + w3 * (1.0 - C))
+
+    slip = wet_surface_edge_slip_factor(edge_data.get("surface_effective"))
+    lts = float(edge_data.get("stress_lts", 1.5) or 1.5)
+    lts_excess = max(0.0, min(1.0, (lts - 1.0) / 3.0))
+    ms_kmh = _parse_maxspeed_kmh(edge_data.get("maxspeed"))
+    fast = 0.0
+    if ms_kmh is not None:
+        if ms_kmh >= 50.0:
+            fast = 1.0
+        elif ms_kmh >= 40.0:
+            fast = 0.5
+
+    kr = float(getattr(weather, "stress_edge_rain_slip", 0.22))
+    kw = float(getattr(weather, "stress_edge_wind_open", 0.20))
+    kl = float(getattr(weather, "stress_edge_lts_fast", 0.17))
+    ks = float(getattr(weather, "stress_edge_building_shelter", 0.11))
+    rs = float(getattr(weather, "weather_response_scale", 1.0) or 1.0)
+
+    wet_bad = rn * slip * kr
+    wind_bad = wind_comb * wind_exp * kw
+    lts_bad = lts_excess * (1.0 + fast * 0.95) * (0.05 + rn * 0.2) * kl
+    shelter = B * wind_comb * ks
+    raw = 1.0 + rs * (wet_bad + wind_bad + lts_bad - shelter)
+    lo = float(getattr(weather, "stress_edge_factor_min", 0.82))
+    hi = float(getattr(weather, "stress_edge_factor_max", 1.48))
+    return max(lo, min(hi, raw))
+
+
+def route_shelter_length_weighted_averages(
+    G: nx.MultiDiGraph,
+    route: Optional[Any],
+) -> Dict[str, float]:
+    """Средние по длине: открытость, тень зданий, укрытие, «плохое мокрое» покрытие."""
+    if route is None or getattr(route, "edge_count", 0) <= 0:
+        return {
+            "route_open_sky_share": 0.0,
+            "route_building_shade_share": 0.0,
+            "route_covered_share": 0.0,
+            "route_bad_wet_surface_share": 0.0,
+        }
+    tlen = 0.0
+    so = 0.0
+    sb = 0.0
+    sc = 0.0
+    sw = 0.0
+    for i in range(route.edge_count):
+        d = G.edges[route.edges[i]]
+        ln = float(d.get("length", 0.0) or 0.0)
+        if ln <= 0:
+            continue
+        tlen += ln
+        so += ln * float(d.get("thermal_open_sky_share", 0.5) or 0.5)
+        sb += ln * float(d.get("thermal_building_shade_share", 0.0) or 0.0)
+        sc += ln * float(d.get("thermal_covered_share", 0.0) or 0.0)
+        sw += ln * wet_surface_edge_slip_factor(d.get("surface_effective"))
+    if tlen <= 0:
+        return {
+            "route_open_sky_share": 0.0,
+            "route_building_shade_share": 0.0,
+            "route_covered_share": 0.0,
+            "route_bad_wet_surface_share": 0.0,
+        }
+    return {
+        "route_open_sky_share": float(so / tlen),
+        "route_building_shade_share": float(sb / tlen),
+        "route_covered_share": float(sc / tlen),
+        "route_bad_wet_surface_share": float(sw / tlen),
+    }
+
+
 def continuous_heat_edge_weather_factor(
     edge_data: dict, weather: WeatherWeightParams
 ) -> float:
@@ -111,10 +251,12 @@ def effective_edge_components(
     g_coupling = gcc
     if wm.heat < 1.0:
         g_coupling *= max(0.25, float(wm.heat))
+    surf_edge = wet_surface_route_penalty(edge_data.get("surface_effective"), weather)
     phys_eff = (
         phys
         * wm.physical
         * wm.surface
+        * surf_edge
         * (1.0 + max(0.0, wm.green - 1.0) * g_edge * g_coupling)
     )
     # Прокси геометрии улицы (тепловая модель графа): открытость, тень зданий, тень растений.
@@ -161,7 +303,10 @@ def effective_edge_components(
         elif wm.heat <= 0.97:
             h = h * (1.0 - 0.18 * B * (1.0 - float(wm.heat)))
         heat_eff = h * hm * wm.heat
-    st_eff = st * wm.stress
+    se_st = weather_edge_stress_factor(edge_data, weather)
+    blend = float(getattr(weather, "weather_stress_global_blend", 0.38))
+    stress_global = 1.0 + blend * (float(wm.stress) - 1.0)
+    st_eff = st * stress_global * se_st
     return phys_eff, heat_eff, st_eff
 
 

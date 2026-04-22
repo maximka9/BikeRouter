@@ -455,15 +455,15 @@ class Settings:
     # --- Непрерывная тепло-микроклиматическая модель (рёбра, без hot/cold/neutral) ---
     heat_continuous_enable: bool = _env_bool("HEAT_CONTINUOUS_ENABLE", True)
     heat_temp_ref_max: float = _env("HEAT_TEMP_REF_MAX", 30.0, float)
-    heat_temp_cool_ref: float = _env("HEAT_TEMP_COOL_REF", 10.0, float)
-    heat_temp_cool_range: float = _env("HEAT_TEMP_COOL_RANGE", 15.0, float)
+    heat_temp_cool_ref: float = _env("HEAT_TEMP_COOL_REF", 14.0, float)
+    heat_temp_cool_range: float = _env("HEAT_TEMP_COOL_RANGE", 10.0, float)
     heat_rain_ref_max: float = _env("HEAT_RAIN_REF_MAX", 3.0, float)
     heat_wind_ref_max: float = _env("HEAT_WIND_REF_MAX", 12.0, float)
     heat_gust_delta_ref_max: float = _env("HEAT_GUST_DELTA_REF_MAX", 10.0, float)
 
     heat_tree_shade_temp_gain: float = _env("HEAT_TREE_SHADE_TEMP_GAIN", 0.42, float)
     heat_tree_shade_rain_damp: float = _env("HEAT_TREE_SHADE_RAIN_DAMP", 0.35, float)
-    heat_tree_shade_cold_damp: float = _env("HEAT_TREE_SHADE_COLD_DAMP", 0.38, float)
+    heat_tree_shade_cold_damp: float = _env("HEAT_TREE_SHADE_COLD_DAMP", 0.58, float)
 
     heat_open_sky_temp_gain: float = _env("HEAT_OPEN_SKY_TEMP_GAIN", 0.52, float)
     heat_open_sky_wind_gain: float = _env("HEAT_OPEN_SKY_WIND_GAIN", 0.28, float)
@@ -483,19 +483,19 @@ class Settings:
         "HEAT_BUILDING_SHADE_GUST_GAIN", 0.22, float
     )
 
-    heat_covered_rain_gain: float = _env("HEAT_COVERED_RAIN_GAIN", 0.45, float)
-    heat_covered_wind_gain: float = _env("HEAT_COVERED_WIND_GAIN", 0.22, float)
-    heat_covered_gust_gain: float = _env("HEAT_COVERED_GUST_GAIN", 0.18, float)
+    heat_covered_rain_gain: float = _env("HEAT_COVERED_RAIN_GAIN", 0.28, float)
+    heat_covered_wind_gain: float = _env("HEAT_COVERED_WIND_GAIN", 0.14, float)
+    heat_covered_gust_gain: float = _env("HEAT_COVERED_GUST_GAIN", 0.12, float)
 
     heat_wet_surface_rain_gain: float = _env("HEAT_WET_SURFACE_RAIN_GAIN", 0.38, float)
     heat_wet_surface_humid_gain: float = _env("HEAT_WET_SURFACE_HUMID_GAIN", 0.22, float)
 
-    heat_edge_k_open: float = _env("HEAT_EDGE_K_OPEN", 0.38, float)
+    heat_edge_k_open: float = _env("HEAT_EDGE_K_OPEN", 0.44, float)
     heat_edge_k_tree: float = _env("HEAT_EDGE_K_TREE", 0.36, float)
-    heat_edge_k_building: float = _env("HEAT_EDGE_K_BUILDING", 0.34, float)
-    heat_edge_k_covered: float = _env("HEAT_EDGE_K_COVERED", 0.32, float)
-    heat_edge_k_wet: float = _env("HEAT_EDGE_K_WET", 0.28, float)
-    heat_edge_k_wind: float = _env("HEAT_EDGE_K_WIND", 0.30, float)
+    heat_edge_k_building: float = _env("HEAT_EDGE_K_BUILDING", 0.40, float)
+    heat_edge_k_covered: float = _env("HEAT_EDGE_K_COVERED", 0.20, float)
+    heat_edge_k_wet: float = _env("HEAT_EDGE_K_WET", 0.34, float)
+    heat_edge_k_wind: float = _env("HEAT_EDGE_K_WIND", 0.36, float)
 
     heat_wind_exp_w1: float = _env("HEAT_WIND_EXP_W1", 0.45, float)
     heat_wind_exp_w2: float = _env("HEAT_WIND_EXP_W2", 0.35, float)
@@ -514,6 +514,31 @@ class Settings:
 
     heat_coeff_clamp_lo: float = _env("HEAT_COEFF_CLAMP_LO", 0.72, float)
     heat_coeff_clamp_hi: float = _env("HEAT_COEFF_CLAMP_HI", 1.42, float)
+
+    # Погодный stress: доля глобального wm.stress (остальное — edge-specific в routing).
+    weather_stress_global_blend: float = _env("WEATHER_STRESS_GLOBAL_BLEND", 0.38, float)
+    weather_stress_edge_rain_slip: float = _env("WEATHER_STRESS_EDGE_RAIN_SLIP", 0.22, float)
+    weather_stress_edge_wind_open: float = _env("WEATHER_STRESS_EDGE_WIND_OPEN", 0.20, float)
+    weather_stress_edge_lts_fast: float = _env("WEATHER_STRESS_EDGE_LTS_FAST", 0.17, float)
+    weather_stress_edge_building_shelter: float = _env(
+        "WEATHER_STRESS_EDGE_BUILDING_SHELTER", 0.11, float
+    )
+    weather_stress_edge_factor_min: float = _env(
+        "WEATHER_STRESS_EDGE_FACTOR_MIN", 0.82, float
+    )
+    weather_stress_edge_factor_max: float = _env(
+        "WEATHER_STRESS_EDGE_FACTOR_MAX", 1.48, float
+    )
+    # Физика: дождевой штраф по покрытию на ребре (хорошие покрытия ~1.0).
+    weather_phys_wet_penalty_tier0_cap: float = _env(
+        "WEATHER_PHYS_WET_PENALTY_TIER0_CAP", 0.016, float
+    )
+    weather_phys_wet_penalty_tier1_coef: float = _env(
+        "WEATHER_PHYS_WET_PENALTY_TIER1_COEF", 0.048, float
+    )
+    weather_phys_wet_penalty_tier2_coef: float = _env(
+        "WEATHER_PHYS_WET_PENALTY_TIER2_COEF", 0.12, float
+    )
 
     # --- Кэш ---
     cache_satellite: bool = _env_bool("CACHE_SATELLITE", True)
@@ -786,6 +811,10 @@ def routing_engine_cache_fingerprint() -> str:
         "heat_open_sky_temp_gain": _env("HEAT_OPEN_SKY_TEMP_GAIN", 0.52, float),
         "heat_coeff_clamp_lo": _env("HEAT_COEFF_CLAMP_LO", 0.72, float),
         "heat_coeff_clamp_hi": _env("HEAT_COEFF_CLAMP_HI", 1.42, float),
+        "heat_temp_cool_ref": _env("HEAT_TEMP_COOL_REF", 14.0, float),
+        "heat_temp_cool_range": _env("HEAT_TEMP_COOL_RANGE", 10.0, float),
+        "heat_tree_shade_cold_damp": _env("HEAT_TREE_SHADE_COLD_DAMP", 0.58, float),
+        "weather_stress_global_blend": _env("WEATHER_STRESS_GLOBAL_BLEND", 0.38, float),
         "heat_stress_model_version": HEAT_STRESS_MODEL_VERSION,
         "osm_highway_filter": OSM_HIGHWAY_FILTER,
         "preference_profiles": pref_profiles,

@@ -12,7 +12,8 @@
 Погода (``--weather``): ``none`` — без учёта; ``now`` — Open-Meteo на момент
 старта (UTC); ``past`` — архив за N календарных дней (``--past-days``, по
 умолчанию 10), слот каждого дня 14:00 локально (``BATCH_WEATHER_TZ`` /
-по умолчанию Europe/Samara).
+по умолчанию Europe/Samara); ``test`` — 36 синтетических комбинаций без
+Open-Meteo (см. ``weather_windows_test_grid``).
 
 Результат: ``route_experiment_batch_<YYYYMMDD_HHMMSS>.xlsx`` (UTC) и рядом
 ``*_route_vertices.csv.gz`` при наличии вершин.
@@ -75,6 +76,51 @@ DEFAULT_MAX_SAMPLE_ATTEMPTS = 50_000
 # Режим ``past``: столько дней архива, каждый день — 14:00 локально.
 PAST_ARCHIVE_DAYS = 10
 PAST_ARCHIVE_LOCAL_HOUR = 14
+
+# Режим ``--weather test``: фиксированный ISO без Open-Meteo.
+SYNTHETIC_TEST_WEATHER_ISO = "2000-06-15T12:00:00+00:00"
+
+
+@dataclass(frozen=True)
+class SyntheticWeatherCase:
+    case_id: str
+    temperature_c: float
+    precipitation_mm: float
+    wind_speed_ms: float
+    wind_gusts_ms: float
+    cloud_cover_pct: float
+    humidity_pct: float
+    shortwave_radiation_wm2: float
+
+
+def weather_windows_test_grid() -> List[SyntheticWeatherCase]:
+    """3×2×2×3 = 36 синтетических сценариев (температура × дождь × ветер × облачность)."""
+    temps = (0.0, 12.5, 25.0)
+    rains = ((False, 0.0), (True, 1.5))
+    winds = ((False, 2.0, 3.0), (True, 9.0, 14.0))
+    clouds = ((0.0, 750.0), (50.0, 400.0), (100.0, 80.0))
+    out: List[SyntheticWeatherCase] = []
+    for T in temps:
+        for rain_on, precip in rains:
+            for wind_flag, w_ms, g_ms in winds:
+                for c_pct, sw in clouds:
+                    hum = 85.0 if rain_on else 55.0
+                    tid = int(round(T * 10))
+                    cid = f"test_T{tid}_R{int(rain_on)}_W{int(wind_flag)}_C{int(c_pct)}"
+                    out.append(
+                        SyntheticWeatherCase(
+                            case_id=cid,
+                            temperature_c=T,
+                            precipitation_mm=precip,
+                            wind_speed_ms=w_ms,
+                            wind_gusts_ms=g_ms,
+                            cloud_cover_pct=c_pct,
+                            humidity_pct=hum,
+                            shortwave_radiation_wm2=sw,
+                        )
+                    )
+    assert len(out) == 36
+    return out
 
 
 def _batch_profiles_from_arg(arg: str) -> Tuple[str, ...]:
@@ -159,6 +205,17 @@ SUMMARY_NUM_KEYS = (
     "heat_norm_cloud",
     "heat_norm_humidity",
     "heat_norm_cold_like",
+    "route_open_sky_share",
+    "route_building_shade_share",
+    "route_covered_share",
+    "route_bad_wet_surface_share",
+    "weather_test_temperature_c",
+    "weather_test_precipitation_mm",
+    "weather_test_wind_speed_ms",
+    "weather_test_wind_gusts_ms",
+    "weather_test_cloud_cover_pct",
+    "weather_test_humidity_pct",
+    "weather_test_shortwave_radiation_wm2",
 )
 
 
@@ -400,6 +457,7 @@ def route_to_raw_row(
     r: Any,
     baseline_full: Any = None,
     weather_date: str = "",
+    test_weather_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     st = _stress_fields(r)
     wn, wt = _warnings_text(r)
@@ -457,7 +515,25 @@ def route_to_raw_row(
         "warnings_count": wn,
         "warnings_text": wt,
         "geometry_json": geom_json,
+        "route_open_sky_share": round(float(getattr(r, "route_open_sky_share", 0.0)), 4),
+        "route_building_shade_share": round(
+            float(getattr(r, "route_building_shade_share", 0.0)), 4
+        ),
+        "route_covered_share": round(float(getattr(r, "route_covered_share", 0.0)), 4),
+        "route_bad_wet_surface_share": round(
+            float(getattr(r, "route_bad_wet_surface_share", 0.0)), 4
+        ),
+        "weather_test_case_id": None,
+        "weather_test_temperature_c": None,
+        "weather_test_precipitation_mm": None,
+        "weather_test_wind_speed_ms": None,
+        "weather_test_wind_gusts_ms": None,
+        "weather_test_cloud_cover_pct": None,
+        "weather_test_humidity_pct": None,
+        "weather_test_shortwave_radiation_wm2": None,
     }
+    if test_weather_meta:
+        out.update(test_weather_meta)
     if baseline_full is not None:
         out["full_baseline_length_m"] = round(float(baseline_full.length_m), 2)
         be = baseline_full.elevation
@@ -635,7 +711,8 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "routing_algo_version": "Версия алгоритма",
         "routing_weights_fingerprint": "Отпечаток весов",
         "elapsed_seconds": "Время работы, с",
-        "weather_schedule": "Сценарий погоды (none / now / past)",
+        "weather_schedule": "Сценарий погоды (none / now / past / test)",
+        "synthetic_test_cases": "Число синтетических сценариев (test)",
         "weather_mode_engine": "Режим погоды (движок)",
         "weather_time_utc_snapshot": "Снимок времени UTC (режим now)",
         "past_days": "Дней архива (режим past)",
@@ -688,6 +765,18 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "heat_norm_cloud": "Heat: норм. облачность",
     "heat_norm_humidity": "Heat: норм. влажность",
     "heat_norm_cold_like": "Heat: норм. прохлада",
+    "route_open_sky_share": "Маршрут: доля открытого неба",
+    "route_building_shade_share": "Маршрут: тень зданий",
+    "route_covered_share": "Маршрут: укрытия",
+    "route_bad_wet_surface_share": "Маршрут: плохое мокрое покрытие",
+    "weather_test_case_id": "Test: ID сценария",
+    "weather_test_temperature_c": "Test: температура, °C",
+    "weather_test_precipitation_mm": "Test: осадки, мм/ч",
+    "weather_test_wind_speed_ms": "Test: ветер, м/с",
+    "weather_test_wind_gusts_ms": "Test: порывы, м/с",
+    "weather_test_cloud_cover_pct": "Test: облачность, %",
+    "weather_test_humidity_pct": "Test: влажность, %",
+    "weather_test_shortwave_radiation_wm2": "Test: КВ, Вт/м²",
     "length_m": "Длина, м",
     "length_km": "Длина, км",
     "time_s": "Время, с",
@@ -975,12 +1064,15 @@ def run_experiment(
     tz_resolved = os.getenv("BATCH_WEATHER_TZ", _DEFAULT_BATCH_WEATHER_TZ)
 
     sched = (weather or "none").strip().lower()
-    if sched not in ("none", "now", "past"):
-        raise ValueError("weather должен быть one of: none, now, past")
+    if sched not in ("none", "now", "past", "test"):
+        raise ValueError("weather должен быть one of: none, now, past, test")
 
     past_days = 0
     local_hour = PAST_ARCHIVE_LOCAL_HOUR
     weather_time_snapshot: Optional[str] = None
+    weather_jobs: List[Tuple[str, Optional[str], Optional[SyntheticWeatherCase]]] = []
+    wm_engine = "none"
+    use_live_engine = False
 
     if sched == "past":
         pd = int(past_archive_days)
@@ -996,26 +1088,38 @@ def run_experiment(
         )
         wm_engine = "auto"
         use_live_engine = True
+        weather_jobs = [(a, b, None) for a, b in weather_windows]
         _log.info(
             "Погода past: %d дней, локальный час %02d:00 (%s), первый слот %s",
-            len(weather_windows),
+            len(weather_jobs),
             local_hour,
             tz_resolved,
-            weather_windows[0][0] if weather_windows else "—",
+            weather_jobs[0][0] if weather_jobs else "—",
         )
     elif sched == "now":
         weather_time_snapshot = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        weather_windows = [("", weather_time_snapshot)]
         wm_engine = "auto"
         use_live_engine = True
+        weather_jobs = [("", weather_time_snapshot, None)]
         _log.info("Погода now: снимок UTC %s", weather_time_snapshot)
-    else:
-        weather_windows = [("", None)]
-        wm_engine = "none"
+    elif sched == "test":
+        grid = weather_windows_test_grid()
+        wm_engine = "fixed-snapshot"
         use_live_engine = False
+        weather_time_snapshot = SYNTHETIC_TEST_WEATHER_ISO
+        weather_jobs = [
+            (tc.case_id, SYNTHETIC_TEST_WEATHER_ISO, tc) for tc in grid
+        ]
+        _log.info(
+            "Погода test: %d синтетических комбинаций (без Open-Meteo), ISO=%s",
+            len(weather_jobs),
+            SYNTHETIC_TEST_WEATHER_ISO,
+        )
+    else:
+        weather_jobs = [("", None, None)]
 
     profile_tuple = _batch_profiles_from_arg(profiles_mode)
-    n_win = max(1, len(weather_windows))
+    n_win = max(1, len(weather_jobs))
     expected_routes = n_pairs * len(profile_tuple) * len(EXPECTED_VARIANTS) * n_win
 
     raw_rows: List[Dict[str, Any]] = []
@@ -1044,7 +1148,7 @@ def run_experiment(
         mininterval=0.3,
     )
 
-    for wdate_str, wt_iso in weather_windows:
+    for wdate_str, wt_iso, syn_case in weather_jobs:
         for i, j, prof in route_tasks:
             o_pt = points[i]
             d_pt = points[j]
@@ -1061,17 +1165,34 @@ def run_experiment(
             )
             by_mode: Dict[str, Any] = {}
             try:
-                alt = eng.compute_alternatives(
-                    start,
-                    end,
-                    prof,
+                alt_kw: Dict[str, Any] = dict(
+                    start=start,
+                    end=end,
+                    profile_key=prof,
                     green_enabled=True,
-                    weather_mode=wm_engine,
-                    use_live_weather=use_live_engine,
-                    weather_time=wt_iso if wt_iso else weather_time_snapshot,
-                    precipitation_mm=precipitation_mm,
                     corridor_expand_schedule_meters=EXPERIMENT_CORRIDOR_EXPAND_M,
                 )
+                if syn_case is not None:
+                    alt_kw.update(
+                        weather_mode="fixed-snapshot",
+                        use_live_weather=False,
+                        weather_time=wt_iso,
+                        temperature_c=syn_case.temperature_c,
+                        precipitation_mm=syn_case.precipitation_mm,
+                        wind_speed_ms=syn_case.wind_speed_ms,
+                        cloud_cover_pct=syn_case.cloud_cover_pct,
+                        humidity_pct=syn_case.humidity_pct,
+                        wind_gusts_ms=syn_case.wind_gusts_ms,
+                        shortwave_radiation_wm2=syn_case.shortwave_radiation_wm2,
+                    )
+                else:
+                    alt_kw.update(
+                        weather_mode=wm_engine,
+                        use_live_weather=use_live_engine,
+                        weather_time=wt_iso if wt_iso else weather_time_snapshot,
+                        precipitation_mm=precipitation_mm,
+                    )
+                alt = eng.compute_alternatives(**alt_kw)
                 by_mode = {r.mode: r for r in alt.routes}
             except RouteNotFoundError as e:
                 n_skipped_no_path_100m += 1
@@ -1129,6 +1250,18 @@ def run_experiment(
                 r = by_mode[mode]
                 rid = route_id_counter
                 route_id_counter += 1
+                test_meta: Optional[Dict[str, Any]] = None
+                if syn_case is not None:
+                    test_meta = {
+                        "weather_test_case_id": syn_case.case_id,
+                        "weather_test_temperature_c": syn_case.temperature_c,
+                        "weather_test_precipitation_mm": syn_case.precipitation_mm,
+                        "weather_test_wind_speed_ms": syn_case.wind_speed_ms,
+                        "weather_test_wind_gusts_ms": syn_case.wind_gusts_ms,
+                        "weather_test_cloud_cover_pct": syn_case.cloud_cover_pct,
+                        "weather_test_humidity_pct": syn_case.humidity_pct,
+                        "weather_test_shortwave_radiation_wm2": syn_case.shortwave_radiation_wm2,
+                    }
                 row = route_to_raw_row(
                     experiment_id=experiment_id,
                     seed=seed,
@@ -1143,6 +1276,7 @@ def run_experiment(
                     r=r,
                     baseline_full=by_mode.get("full"),
                     weather_date=wdate_str,
+                    test_weather_meta=test_meta,
                 )
                 raw_rows.append(row)
                 n_ok_route_rows += 1
@@ -1198,6 +1332,8 @@ def run_experiment(
         ("batch_weather_tz", tz_resolved if int(past_days) > 0 else ""),
         ("elapsed_seconds", round(time.perf_counter() - t_start, 2)),
     ]
+    if sched == "test":
+        meta_rows.append(("synthetic_test_cases", 36))
 
     vgz_path: Optional[str] = None
     if vertices:
@@ -1246,13 +1382,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--weather",
-        choices=("none", "now", "past"),
+        choices=("none", "now", "past", "test"),
         default="none",
         help=(
             "none — без учёта погоды; "
             "now — Open-Meteo на дату/время старта эксперимента (UTC); "
             "past — архив за N календарных дней (см. --past-days), каждый день "
-            f"{PAST_ARCHIVE_LOCAL_HOUR:02d}:00 локально (BATCH_WEATHER_TZ или Europe/Samara)."
+            f"{PAST_ARCHIVE_LOCAL_HOUR:02d}:00 локально (BATCH_WEATHER_TZ или Europe/Samara); "
+            "test — 36 синтетических комбинаций (без Open-Meteo), см. weather_windows_test_grid."
         ),
     )
     parser.add_argument(

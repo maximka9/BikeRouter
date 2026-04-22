@@ -375,6 +375,30 @@ class HeatStressMetrics(BaseModel):
         le=1.0,
         description="Средневзвешенная доля прокси-тени зданий по длине",
     )
+    route_open_sky_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Средневзвешенная thermal_open_sky_share по длине маршрута",
+    )
+    route_building_shade_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Средневзвешенная thermal_building_shade_share по длине",
+    )
+    route_covered_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Средневзвешенная thermal_covered_share по длине",
+    )
+    route_bad_wet_surface_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Среднее wet_surface_edge_slip_factor по длине (мокрое плохое покрытие)",
+    )
     avg_stress_lts: float = Field(default=0.0, description="Средний уровень стресса (1–4)")
     max_stress_lts: float = Field(default=0.0, description="Максимальный стресс на сегменте")
     high_stress_length_fraction: float = Field(
@@ -520,6 +544,21 @@ class RouteResponse(BaseModel):
         description="Длина с высокой тепловой экспозицией",
     )
     building_shade_share: float = Field(default=0.0, ge=0.0, le=1.0)
+    route_open_sky_share: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="Средняя открытость неба по длине"
+    )
+    route_building_shade_share: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="Средняя тень зданий по длине"
+    )
+    route_covered_share: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="Средняя доля укрытий по длине"
+    )
+    route_bad_wet_surface_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Средний индекс плохого мокрого покрытия по длине",
+    )
     vegetation_shade_share: float = Field(default=0.0, ge=0.0, le=1.0)
     stressful_intersections_count: int = Field(default=0)
     high_stress_segments_count: int = Field(default=0)

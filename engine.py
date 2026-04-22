@@ -283,8 +283,10 @@ def _resolve_route_weather(
     temperature_c: Optional[float],
     precipitation_mm: Optional[float],
     wind_speed_ms: Optional[float],
-    cloud_cover_pct: Optional[float],
-    humidity_pct: Optional[float],
+    cloud_cover_pct: Optional[float] = None,
+    humidity_pct: Optional[float] = None,
+    wind_gusts_ms: Optional[float] = None,
+    shortwave_radiation_wm2: Optional[float] = None,
     thermal_scales: Optional[Dict[str, float]] = None,
     settings: Any = None,
 ) -> Tuple[WeatherSnapshot, str, WeatherWeightParams]:
@@ -297,8 +299,10 @@ def _resolve_route_weather(
             temperature_c=temperature_c,
             precipitation_mm=precipitation_mm,
             wind_speed_ms=wind_speed_ms,
+            wind_gusts_ms=wind_gusts_ms,
             cloud_cover_pct=cloud_cover_pct,
             humidity_pct=humidity_pct,
+            shortwave_radiation_wm2=shortwave_radiation_wm2,
         )
     return resolve_weather_for_route(
         lat=lat,
@@ -1180,6 +1184,14 @@ class RouteEngine:
             stress_cost_total=float(hm.stress_cost_total) if hm else 0.0,
             exposed_length_m=float(hm.exposed_high_length_m) if hm else 0.0,
             building_shade_share=float(hm.building_shade_share) if hm else 0.0,
+            route_open_sky_share=float(hm.route_open_sky_share) if hm else 0.0,
+            route_building_shade_share=float(hm.route_building_shade_share)
+            if hm
+            else 0.0,
+            route_covered_share=float(hm.route_covered_share) if hm else 0.0,
+            route_bad_wet_surface_share=float(hm.route_bad_wet_surface_share)
+            if hm
+            else 0.0,
             vegetation_shade_share=float(hm.vegetation_shade_share) if hm else 0.0,
             stressful_intersections_count=int(hm.stressful_intersections_count)
             if hm
@@ -1664,6 +1676,7 @@ class RouteEngine:
         )
         st = router.route_stress_levels(G, route)
         sh = router.route_shade_shares(G, route)
+        sh_rt = router.route_shelter_length_weighted_averages(G, route)
         n_int = router.count_stressful_intersections(G, route)
         n_hi_seg = router.count_high_stress_segments(G, route)
         comb = router.route_combined_total(
@@ -1708,6 +1721,10 @@ class RouteEngine:
             avg_exposure_unit=round(expm["avg_exposure"], 3),
             vegetation_shade_share=round(sh["vegetation_shade_share"], 3),
             building_shade_share=round(sh["building_shade_share"], 3),
+            route_open_sky_share=round(sh_rt["route_open_sky_share"], 4),
+            route_building_shade_share=round(sh_rt["route_building_shade_share"], 4),
+            route_covered_share=round(sh_rt["route_covered_share"], 4),
+            route_bad_wet_surface_share=round(sh_rt["route_bad_wet_surface_share"], 4),
             avg_stress_lts=round(st["avg_lts"], 2),
             max_stress_lts=round(st["max_lts"], 2),
             high_stress_length_fraction=round(st["high_stress_fraction"], 3),
@@ -2163,6 +2180,8 @@ class RouteEngine:
         wind_speed_ms: Optional[float] = None,
         cloud_cover_pct: Optional[float] = None,
         humidity_pct: Optional[float] = None,
+        wind_gusts_ms: Optional[float] = None,
+        shortwave_radiation_wm2: Optional[float] = None,
         corridor_expand_schedule_meters: Optional[Sequence[float]] = None,
     ) -> AlternativesResponse:
         """Все доступные варианты сразу: кратчайший, энергия, зелёный, тепло, стресс, тепло+безопасность.
@@ -2205,6 +2224,8 @@ class RouteEngine:
             wind_speed_ms=wind_speed_ms,
             cloud_cover_pct=cloud_cover_pct,
             humidity_pct=humidity_pct,
+            wind_gusts_ms=wind_gusts_ms,
+            shortwave_radiation_wm2=shortwave_radiation_wm2,
             thermal_scales=_thermal,
             settings=_s,
         )

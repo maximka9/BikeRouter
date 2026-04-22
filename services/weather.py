@@ -86,6 +86,17 @@ class WeatherWeightParams:
     heat_open_wet_synergy: float = 0.14
     heat_edge_factor_min: float = 0.65
     heat_edge_factor_max: float = 1.75
+    # Нормированные сигналы и edge-stress (заполняются при enabled + settings).
+    weather_stress_global_blend: float = 0.38
+    stress_edge_rain_slip: float = 0.22
+    stress_edge_wind_open: float = 0.20
+    stress_edge_lts_fast: float = 0.17
+    stress_edge_building_shelter: float = 0.11
+    stress_edge_factor_min: float = 0.82
+    stress_edge_factor_max: float = 1.48
+    phys_wet_tier0_cap: float = 0.016
+    phys_wet_tier1_coef: float = 0.048
+    phys_wet_tier2_coef: float = 0.12
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -97,17 +108,21 @@ def snapshot_from_manual(
     temperature_c: Optional[float] = None,
     precipitation_mm: Optional[float] = None,
     wind_speed_ms: Optional[float] = None,
+    wind_gusts_ms: Optional[float] = None,
     cloud_cover_pct: Optional[float] = None,
     humidity_pct: Optional[float] = None,
     apparent_temperature_c: Optional[float] = None,
+    shortwave_radiation_wm2: Optional[float] = None,
 ) -> WeatherSnapshot:
     return WeatherSnapshot(
         temperature_c=float(temperature_c if temperature_c is not None else 20.0),
         apparent_temperature_c=apparent_temperature_c,
         precipitation_mm=float(precipitation_mm if precipitation_mm is not None else 0.0),
         wind_speed_ms=float(wind_speed_ms if wind_speed_ms is not None else 3.0),
+        wind_gusts_ms=wind_gusts_ms,
         cloud_cover_pct=float(cloud_cover_pct if cloud_cover_pct is not None else 50.0),
         humidity_pct=float(humidity_pct if humidity_pct is not None else 60.0),
+        shortwave_radiation_wm2=shortwave_radiation_wm2,
     )
 
 
@@ -229,6 +244,35 @@ def _edge_params_from_settings(s: Any) -> Dict[str, float]:
     }
 
 
+def _stress_and_phys_wet_params_from_settings(s: Any) -> Dict[str, float]:
+    return {
+        "weather_stress_global_blend": float(
+            getattr(s, "weather_stress_global_blend", 0.38)
+        ),
+        "stress_edge_rain_slip": float(getattr(s, "weather_stress_edge_rain_slip", 0.22)),
+        "stress_edge_wind_open": float(
+            getattr(s, "weather_stress_edge_wind_open", 0.20)
+        ),
+        "stress_edge_lts_fast": float(getattr(s, "weather_stress_edge_lts_fast", 0.17)),
+        "stress_edge_building_shelter": float(
+            getattr(s, "weather_stress_edge_building_shelter", 0.11)
+        ),
+        "stress_edge_factor_min": float(
+            getattr(s, "weather_stress_edge_factor_min", 0.82)
+        ),
+        "stress_edge_factor_max": float(
+            getattr(s, "weather_stress_edge_factor_max", 1.48)
+        ),
+        "phys_wet_tier0_cap": float(getattr(s, "weather_phys_wet_penalty_tier0_cap", 0.016)),
+        "phys_wet_tier1_coef": float(
+            getattr(s, "weather_phys_wet_penalty_tier1_coef", 0.048)
+        ),
+        "phys_wet_tier2_coef": float(
+            getattr(s, "weather_phys_wet_penalty_tier2_coef", 0.12)
+        ),
+    }
+
+
 def build_weather_weight_params(
     snap: WeatherSnapshot,
     *,
@@ -247,6 +291,12 @@ def build_weather_weight_params(
     mults = compute_weather_multipliers(snap, policy=pol, response_scale=rs)
     regime = classify_weather_regime(snap)
 
+    sig: Dict[str, float] = {}
+    spw: Dict[str, float] = {}
+    if settings is not None:
+        sig = _normalized_weather_signals(snap, settings)
+        spw = _stress_and_phys_wet_params_from_settings(settings)
+
     base_kw: Dict[str, Any] = dict(
         enabled=True,
         mults=mults,
@@ -258,12 +308,13 @@ def build_weather_weight_params(
         cold_tree_damping=float(scales.get("cold_tree_damp", 0.65)),
         weather_response_scale=rs,
         heat_continuous=False,
+        normalized_signals=sig,
+        **spw,
     )
 
     if settings is not None and bool(
         getattr(settings, "heat_continuous_enable", True)
     ):
-        sig = _normalized_weather_signals(snap, settings)
         tsb, osp, bsb, cbn, wop, wsp = _continuous_six_coefficients(sig, settings)
         ep = _edge_params_from_settings(settings)
         base_kw.update(
@@ -274,7 +325,6 @@ def build_weather_weight_params(
             covered_bonus=cbn,
             wind_open_penalty=wop,
             wet_surface_penalty=wsp,
-            normalized_signals=sig,
             **ep,
         )
     return WeatherWeightParams(**base_kw)
@@ -429,16 +479,8 @@ def compute_weather_multipliers(
     if gust is not None and float(gust) > wind + 4:
         stress *= 1.0 + 0.04 * rs * min(1.0, (float(gust) - wind) / 12.0)
 
-    # surface (merged with physical in routing; separate knob)
+    # surface: глобальный множитель не усиливает дождь/влажность — штраф по покрытию на уровне ребра.
     surface = float(msv.get("base", 1.0))
-    if rain > dry_max:
-        surface *= float(msv.get("rain", 1.08))
-    if hum > float(hu.get("humid_above", 80)):
-        surface *= float(msv.get("humid", 1.04))
-
-    # wet + high LTS roads — approximate: bump stress slightly if rain and wind
-    if rain > light_max and wind_eff > float(wn.get("breeze_max", 8)):
-        stress *= float(ms.get("wet_and_fast_road", 1.08))
 
     # Диапазоны расширяются с response_scale, чтобы агрегаты батча различали контрастные дни.
     phys_lo, phys_hi = 0.72 - 0.04 * (rs - 1.0), 1.48 + 0.08 * (rs - 1.0)
@@ -453,7 +495,7 @@ def compute_weather_multipliers(
         heat=_clamp(heat, heat_lo, heat_hi),
         green=_clamp(green, green_lo, green_hi),
         stress=_clamp(stress, stress_lo, stress_hi),
-        surface=_clamp(surface, 0.88, 1.28),
+        surface=_clamp(surface, 0.97, 1.03),
     )
 
 

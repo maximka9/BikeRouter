@@ -15,6 +15,10 @@
 по умолчанию Europe/Samara); ``test`` — 36 синтетических комбинаций без
 Open-Meteo (см. ``weather_windows_test_grid``).
 
+Логи: по умолчанию движок и HTTP — ``WARNING``; ход батча — ``INFO`` каждые
+``--log-every`` запросов (см. ``DEFAULT_BATCH_LOG_EVERY``). Полные логи:
+``--verbose``.
+
 Результат: ``route_experiment_batch_<YYYYMMDD_HHMMSS>.xlsx`` (UTC) и рядом
 ``*_route_vertices.csv.gz`` при наличии вершин.
 
@@ -50,6 +54,29 @@ except ImportError:
     ZoneInfo = None  # type: ignore[misc, assignment]
 
 _log = logging.getLogger(__name__)
+
+# Периодический INFO в батче (шаг = одна пара O–D × один сценарий погоды, все варианты).
+DEFAULT_BATCH_LOG_EVERY = 100
+
+_NOISY_BATCH_LOGGER_NAMES = (
+    "bike_router.engine",
+    "bike_router.services.weather",
+    "bike_router.services.routing",
+    "bike_router.services.graph",
+    "bike_router.services.area_graph_cache",
+    "bike_router.services.corridor_graph_cache",
+    "urllib3",
+    "requests",
+)
+
+
+def _set_quiet_mode_for_batch(verbose: bool) -> None:
+    """Тихий режим: INFO движка/OSM/HTTP — только WARNING и выше."""
+    if verbose:
+        return
+    for name in _NOISY_BATCH_LOGGER_NAMES:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
 
 # Порядок как в engine._UNIFIED_ROUTE_ORDER
 EXPECTED_VARIANTS: Tuple[str, ...] = (
@@ -1009,6 +1036,8 @@ def run_experiment(
     past_archive_days: int = PAST_ARCHIVE_DAYS,
     precipitation_mm: Optional[float] = None,
     profiles_mode: str = "both",
+    verbose: bool = False,
+    log_every: int = DEFAULT_BATCH_LOG_EVERY,
 ) -> str:
     _ensure_pkg_path()
 
@@ -1138,15 +1167,18 @@ def run_experiment(
     ]
 
     total_steps = len(route_tasks) * n_win
+    _set_quiet_mode_for_batch(verbose)
+
     from tqdm import tqdm
 
-    pbar: Any = tqdm(
+    tqdm_kw: Dict[str, Any] = dict(
         total=total_steps,
         desc="Маршруты",
         unit="запрос",
         leave=True,
-        mininterval=0.3,
+        mininterval=2.0 if not verbose else 0.3,
     )
+    pbar: Any = tqdm(**tqdm_kw)
 
     for wdate_str, wt_iso, syn_case in weather_jobs:
         for i, j, prof in route_tasks:
@@ -1292,6 +1324,20 @@ def run_experiment(
                             vx["weather_date"] = wdate_str
                         vertices.append(vx)
             pbar.update(1)
+            if log_every > 0 and pbar.n > 0 and pbar.n % log_every == 0:
+                elapsed = time.perf_counter() - t_start
+                _log.info(
+                    "Промежуточно %d/%d запросов: day=%s ok_строк=%d fail=%d skip=%d "
+                    "elapsed=%.0f с (~%.2f с/запрос)",
+                    pbar.n,
+                    total_steps,
+                    wdate_str or "—",
+                    n_ok_route_rows,
+                    n_fail_rows,
+                    n_skipped_no_path_100m,
+                    elapsed,
+                    elapsed / pbar.n,
+                )
 
     pbar.close()
 
@@ -1414,6 +1460,21 @@ def main() -> None:
         default="both",
         help="Профили: только велосипед, только пешеход или оба (по умолчанию).",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Полные INFO-логи движка и сервисов (по умолчанию — только WARNING).",
+    )
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=DEFAULT_BATCH_LOG_EVERY,
+        metavar="N",
+        help=(
+            "Каждые N завершённых запросов (пара O–D × погода) писать строку прогресса в лог; "
+            f"0 — отключить. По умолчанию {DEFAULT_BATCH_LOG_EVERY}."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -1428,6 +1489,8 @@ def main() -> None:
         past_archive_days=args.past_days,
         precipitation_mm=args.precipitation_mm,
         profiles_mode=args.profiles,
+        verbose=bool(args.verbose),
+        log_every=max(0, int(args.log_every)),
     )
     print(path)
 

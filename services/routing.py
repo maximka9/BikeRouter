@@ -129,48 +129,6 @@ def weather_edge_stress_factor(
     return max(lo, min(hi, raw))
 
 
-def route_shelter_length_weighted_averages(
-    G: nx.MultiDiGraph,
-    route: Optional[Any],
-) -> Dict[str, float]:
-    """Средние по длине: открытость, тень зданий, укрытие, «плохое мокрое» покрытие."""
-    if route is None or getattr(route, "edge_count", 0) <= 0:
-        return {
-            "route_open_sky_share": 0.0,
-            "route_building_shade_share": 0.0,
-            "route_covered_share": 0.0,
-            "route_bad_wet_surface_share": 0.0,
-        }
-    tlen = 0.0
-    so = 0.0
-    sb = 0.0
-    sc = 0.0
-    sw = 0.0
-    for i in range(route.edge_count):
-        d = G.edges[route.edges[i]]
-        ln = float(d.get("length", 0.0) or 0.0)
-        if ln <= 0:
-            continue
-        tlen += ln
-        so += ln * float(d.get("thermal_open_sky_share", 0.5) or 0.5)
-        sb += ln * float(d.get("thermal_building_shade_share", 0.0) or 0.0)
-        sc += ln * float(d.get("thermal_covered_share", 0.0) or 0.0)
-        sw += ln * wet_surface_edge_slip_factor(d.get("surface_effective"))
-    if tlen <= 0:
-        return {
-            "route_open_sky_share": 0.0,
-            "route_building_shade_share": 0.0,
-            "route_covered_share": 0.0,
-            "route_bad_wet_surface_share": 0.0,
-        }
-    return {
-        "route_open_sky_share": float(so / tlen),
-        "route_building_shade_share": float(sb / tlen),
-        "route_covered_share": float(sc / tlen),
-        "route_bad_wet_surface_share": float(sw / tlen),
-    }
-
-
 def continuous_heat_edge_weather_factor(
     edge_data: dict, weather: WeatherWeightParams
 ) -> float:
@@ -1086,6 +1044,48 @@ class RouteService:
         return {
             "vegetation_shade_share": float(sv / tlen),
             "building_shade_share": float(sb / tlen),
+        }
+
+    @staticmethod
+    def route_shelter_length_weighted_averages(
+        G: nx.MultiDiGraph,
+        route: Optional["RouteResult"],
+    ) -> Dict[str, float]:
+        """Средние по длине: открытость, тень зданий, укрытие, «плохое мокрое» покрытие."""
+        if route is None or route.edge_count <= 0:
+            return {
+                "route_open_sky_share": 0.0,
+                "route_building_shade_share": 0.0,
+                "route_covered_share": 0.0,
+                "route_bad_wet_surface_share": 0.0,
+            }
+        tlen = 0.0
+        so = 0.0
+        sb = 0.0
+        sc = 0.0
+        sw = 0.0
+        for i in range(route.edge_count):
+            d = G.edges[route.edges[i]]
+            ln = float(d.get("length", 0.0) or 0.0)
+            if ln <= 0:
+                continue
+            tlen += ln
+            so += ln * float(d.get("thermal_open_sky_share", 0.5) or 0.5)
+            sb += ln * float(d.get("thermal_building_shade_share", 0.0) or 0.0)
+            sc += ln * float(d.get("thermal_covered_share", 0.0) or 0.0)
+            sw += ln * wet_surface_edge_slip_factor(d.get("surface_effective"))
+        if tlen <= 0:
+            return {
+                "route_open_sky_share": 0.0,
+                "route_building_shade_share": 0.0,
+                "route_covered_share": 0.0,
+                "route_bad_wet_surface_share": 0.0,
+            }
+        return {
+            "route_open_sky_share": float(so / tlen),
+            "route_building_shade_share": float(sb / tlen),
+            "route_covered_share": float(sc / tlen),
+            "route_bad_wet_surface_share": float(sw / tlen),
         }
 
     @staticmethod

@@ -2382,6 +2382,172 @@ class RouteEngine:
         merged = self._annotate_unified_routes(merged)
         return AlternativesResponse(routes=merged, criteria_bundle=None)
 
+    def compute_heat_alternative(
+        self,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        profile_key: str,
+        *,
+        green_enabled: bool = True,
+        departure_time: Optional[str] = None,
+        time_slot_override: Optional[str] = None,
+        air_temperature_c: Optional[float] = None,
+        weather_mode: str = "none",
+        use_live_weather: bool = False,
+        weather_time: Optional[str] = None,
+        temperature_c: Optional[float] = None,
+        precipitation_mm: Optional[float] = None,
+        wind_speed_ms: Optional[float] = None,
+        cloud_cover_pct: Optional[float] = None,
+        humidity_pct: Optional[float] = None,
+        wind_gusts_ms: Optional[float] = None,
+        shortwave_radiation_wm2: Optional[float] = None,
+        corridor_expand_schedule_meters: Optional[Sequence[float]] = None,
+    ) -> AlternativesResponse:
+        """Только вариант ``heat`` (один критерий), без shortest/full/green/stress.
+
+        Используется пакетными synthetic-экспериментами, чтобы не считать лишние
+        альтернативы. Погода и слот — как в ``compute_alternatives``.
+        """
+        if profile_key not in _PROFILE_MAP:
+            raise ValueError(
+                f"Неизвестный профиль: {profile_key!r}. "
+                f"Допустимые: {list(_PROFILE_MAP)}"
+            )
+
+        rp_internal = "balanced"
+        now_utc = datetime.now(timezone.utc)
+        dep_for_weather = departure_time or now_utc.replace(microsecond=0).isoformat()
+
+        _s = self._app.settings
+        _thermal = {
+            "hot_tree": float(_s.heat_hot_tree_bonus_scale),
+            "hot_open": float(_s.heat_hot_open_sky_penalty_scale),
+            "cold_canyon": float(_s.heat_cold_building_canyon_bonus_scale),
+            "cold_tree_damp": float(_s.heat_cold_tree_bonus_damping),
+            "response": float(_s.heat_weather_response_scale),
+        }
+        w_snap, wsrc, wp = _resolve_route_weather(
+            start,
+            end,
+            request_mode=weather_mode,
+            use_live_weather=use_live_weather,
+            weather_time=weather_time,
+            departure_time=dep_for_weather,
+            temperature_c=temperature_c,
+            precipitation_mm=precipitation_mm,
+            wind_speed_ms=wind_speed_ms,
+            cloud_cover_pct=cloud_cover_pct,
+            humidity_pct=humidity_pct,
+            wind_gusts_ms=wind_gusts_ms,
+            shortwave_radiation_wm2=shortwave_radiation_wm2,
+            thermal_scales=_thermal,
+            settings=_s,
+        )
+        season_val = _infer_season_from_month(now_utc.month)
+        air_eff: Optional[float] = air_temperature_c
+        if air_eff is None:
+            air_eff = float(w_snap.temperature_c)
+
+        slot_key = _resolve_time_slot_key(dep_for_weather, time_slot_override)
+        disp_mode = _engine_weather_mode(weather_mode, use_live_weather)
+        weather_ctx = _build_weather_route_context(
+            request_mode=disp_mode,
+            use_live_weather=use_live_weather,
+            weather_time=weather_time,
+            departure_time=dep_for_weather,
+            snap=w_snap,
+            source=wsrc,
+            wp=wp,
+        )
+        _log_route_weather_line(
+            built_at_utc=now_utc,
+            start=start,
+            end=end,
+            snap=w_snap,
+            source=wsrc,
+            wp=wp,
+            weather_time_effective=weather_ctx.weather_time,
+        )
+
+        inc_route_disk_miss()
+        logger.info(
+            "Alternatives heat-only: профиль=%s green=%s slot=%s season=%s",
+            profile_key,
+            green_enabled,
+            slot_key,
+            season_val,
+        )
+
+        s = _s
+
+        buf_sched = (
+            list(corridor_expand_schedule_meters)
+            if corridor_expand_schedule_meters is not None
+            else s.corridor_expand_schedule_meters
+        )
+
+        def _heat_once(
+            corridor_buffer_meters: Optional[float],
+        ) -> List[RouteResponse]:
+            return self._compute_alternatives_criterion_once(
+                start,
+                end,
+                profile_key,
+                criterion="heat",
+                routing_profile_key=rp_internal,
+                time_slot_key=slot_key,
+                green_enabled=green_enabled,
+                corridor_buffer_meters=corridor_buffer_meters,
+                season=season_val,
+                air_temperature_c=air_eff,
+                weather=wp,
+                weather_ctx=weather_ctx,
+            )
+
+        heat_routes: List[RouteResponse]
+        if not s.use_dynamic_corridor_graph or not buf_sched:
+            heat_routes = _heat_once(None)
+        else:
+            heat_routes = []
+            last_nf: Optional[RouteNotFoundError] = None
+            for attempt, eff in enumerate(buf_sched, start=1):
+                try:
+                    heat_routes = _heat_once(float(eff))
+                    logger.info(
+                        "heat_only auto_expand_corridor attempt=%d corridor_m=%.0f "
+                        "result=ok routes=%d",
+                        attempt,
+                        eff,
+                        len(heat_routes),
+                    )
+                    break
+                except RouteNotFoundError as e:
+                    last_nf = e
+                    logger.warning(
+                        "heat_only auto_expand_corridor attempt=%d corridor_m=%.0f "
+                        "result=no_path code=%s",
+                        attempt,
+                        eff,
+                        e.code,
+                    )
+                    if attempt >= len(buf_sched):
+                        logger.warning(
+                            "heat_only auto_expand_corridor exhausted schedule (%s) м",
+                            ",".join(f"{x:.0f}" for x in buf_sched),
+                        )
+                        assert last_nf is not None
+                        _raise_route_not_found_after_schedule(
+                            last_nf,
+                            schedule=buf_sched,
+                            last_eff=float(eff),
+                            attempts=attempt,
+                        )
+
+        merged = self._order_unified_routes(heat_routes)
+        merged = self._annotate_unified_routes(merged)
+        return AlternativesResponse(routes=merged, criteria_bundle=None)
+
     def compute_alternatives_phase1_two_routes(
         self,
         start: Tuple[float, float],

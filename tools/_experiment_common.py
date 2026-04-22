@@ -1,0 +1,1135 @@
+"""Общие функции пакетных экспериментов маршрутов (Excel, точки, сводки).
+
+Используется ``route_variants_experiment`` и ``heat_weather_experiment``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import sys
+import time
+import uuid
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, time as dt_time, timedelta, timezone
+from math import asin, cos, radians, sin, sqrt
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None  # type: ignore[misc, assignment]
+
+_log = logging.getLogger(__name__)
+
+# Периодический INFO в батче (шаг = одна пара O–D × один сценарий погоды, все варианты).
+DEFAULT_BATCH_LOG_EVERY = 100
+
+_NOISY_BATCH_LOGGER_NAMES = (
+    "bike_router.engine",
+    "bike_router.services.weather",
+    "bike_router.services.routing",
+    "bike_router.services.graph",
+    "bike_router.services.area_graph_cache",
+    "bike_router.services.corridor_graph_cache",
+    "urllib3",
+    "requests",
+)
+
+
+def _set_quiet_mode_for_batch(verbose: bool) -> None:
+    """Тихий режим: INFO движка/OSM/HTTP — только WARNING и выше."""
+    if verbose:
+        return
+    for name in _NOISY_BATCH_LOGGER_NAMES:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+# Порядок как в engine._UNIFIED_ROUTE_ORDER
+EXPECTED_VARIANTS: Tuple[str, ...] = (
+    "shortest",
+    "full",
+    "green",
+    "heat",
+    "stress",
+    "heat_stress",
+)
+
+PROFILES: Tuple[str, ...] = ("cyclist", "pedestrian")
+
+# Перебор буфера коридора в этом эксперименте; дальше — пропуск пары (см. RouteNotFoundError).
+EXPERIMENT_CORRIDOR_EXPAND_M: Tuple[float, ...] = (10.0, 100.0)
+
+# Часовой пояс для «локального часа» в multi-day Open-Meteo (можно переопределить BATCH_WEATHER_TZ).
+_DEFAULT_BATCH_WEATHER_TZ = "Europe/Samara"
+
+# Фиксированные параметры батча (CLI урезан).
+DEFAULT_ROUTE_BATCH_SEED = 42
+DEFAULT_MIN_SPACING_M = 100.0
+DEFAULT_MAX_SAMPLE_ATTEMPTS = 50_000
+# Режим ``past``: столько дней архива, каждый день — 14:00 локально.
+PAST_ARCHIVE_DAYS = 10
+PAST_ARCHIVE_LOCAL_HOUR = 14
+
+# Режим ``--weather test``: фиксированный ISO без Open-Meteo.
+SYNTHETIC_TEST_WEATHER_ISO = "2000-06-15T12:00:00+00:00"
+
+
+@dataclass(frozen=True)
+class SyntheticWeatherCase:
+    case_id: str
+    temperature_c: float
+    precipitation_mm: float
+    wind_speed_ms: float
+    wind_gusts_ms: float
+    cloud_cover_pct: float
+    humidity_pct: float
+    shortwave_radiation_wm2: float
+
+
+def weather_windows_test_grid() -> List[SyntheticWeatherCase]:
+    """3×2×2×3 = 36 синтетических сценариев (температура × дождь × ветер × облачность)."""
+    temps = (0.0, 12.5, 25.0)
+    rains = ((False, 0.0), (True, 1.5))
+    winds = ((False, 2.0, 3.0), (True, 9.0, 14.0))
+    clouds = ((0.0, 750.0), (50.0, 400.0), (100.0, 80.0))
+    out: List[SyntheticWeatherCase] = []
+    for T in temps:
+        for rain_on, precip in rains:
+            for wind_flag, w_ms, g_ms in winds:
+                for c_pct, sw in clouds:
+                    hum = 85.0 if rain_on else 55.0
+                    tid = int(round(T * 10))
+                    cid = f"test_T{tid}_R{int(rain_on)}_W{int(wind_flag)}_C{int(c_pct)}"
+                    out.append(
+                        SyntheticWeatherCase(
+                            case_id=cid,
+                            temperature_c=T,
+                            precipitation_mm=precip,
+                            wind_speed_ms=w_ms,
+                            wind_gusts_ms=g_ms,
+                            cloud_cover_pct=c_pct,
+                            humidity_pct=hum,
+                            shortwave_radiation_wm2=sw,
+                        )
+                    )
+    assert len(out) == 36
+    return out
+
+
+def _batch_profiles_from_arg(arg: str) -> Tuple[str, ...]:
+    v = (arg or "both").strip().lower()
+    if v == "both":
+        return ("cyclist", "pedestrian")
+    if v == "cyclist":
+        return ("cyclist",)
+    if v == "pedestrian":
+        return ("pedestrian",)
+    raise ValueError("profiles: ожидается both | cyclist | pedestrian")
+
+
+def _batch_output_xlsx_path() -> str:
+    """Уникальное имя: route_experiment_batch_YYYYMMDD_HHMMSS.xlsx (UTC)."""
+    return datetime.now(timezone.utc).strftime(
+        "route_experiment_batch_%Y%m%d_%H%M%S.xlsx"
+    )
+
+
+def variants_output_xlsx_path() -> str:
+    return datetime.now(timezone.utc).strftime(
+        "route_variants_experiment_%Y%m%d_%H%M%S.xlsx"
+    )
+
+
+def heat_weather_output_xlsx_path() -> str:
+    return datetime.now(timezone.utc).strftime(
+        "heat_weather_experiment_%Y%m%d_%H%M%S.xlsx"
+    )
+
+
+def centroid_lat_lon_for_weather(poly: Any) -> Tuple[float, float]:
+    """Центр bounds полигона: (lat, lon) для одного запроса погоды."""
+    minx, miny, maxx, maxy = poly.bounds
+    lon_mid = (float(minx) + float(maxx)) * 0.5
+    lat_mid = (float(miny) + float(maxy)) * 0.5
+    return lat_mid, lon_mid
+
+
+def kwargs_fixed_snapshot_from_case(
+    case: SyntheticWeatherCase, *, weather_time_iso: str
+) -> Dict[str, Any]:
+    return {
+        "weather_mode": "fixed-snapshot",
+        "use_live_weather": False,
+        "weather_time": weather_time_iso,
+        "temperature_c": case.temperature_c,
+        "precipitation_mm": case.precipitation_mm,
+        "wind_speed_ms": case.wind_speed_ms,
+        "cloud_cover_pct": case.cloud_cover_pct,
+        "humidity_pct": case.humidity_pct,
+        "wind_gusts_ms": case.wind_gusts_ms,
+        "shortwave_radiation_wm2": case.shortwave_radiation_wm2,
+    }
+
+
+def resolve_live_weather_once_for_polygon(
+    poly: Any,
+    *,
+    settings: Any,
+    departure_iso: Optional[str] = None,
+) -> Tuple[Any, str, Any, str, float, float]:
+    """Один вызов Open-Meteo в центре полигона; возвращает snap, src, wp, dep, lat, lon."""
+    from bike_router.engine import _resolve_route_weather
+
+    lat_c, lon_c = centroid_lat_lon_for_weather(poly)
+    start = (lat_c, lon_c)
+    end = (lat_c, lon_c)
+    dep = departure_iso or datetime.now(timezone.utc).replace(
+        microsecond=0
+    ).isoformat()
+    _thermal = {
+        "hot_tree": float(settings.heat_hot_tree_bonus_scale),
+        "hot_open": float(settings.heat_hot_open_sky_penalty_scale),
+        "cold_canyon": float(settings.heat_cold_building_canyon_bonus_scale),
+        "cold_tree_damp": float(settings.heat_cold_tree_bonus_damping),
+        "response": float(settings.heat_weather_response_scale),
+    }
+    w_snap, wsrc, wp = _resolve_route_weather(
+        start,
+        end,
+        request_mode="auto",
+        use_live_weather=True,
+        weather_time=None,
+        departure_time=dep,
+        temperature_c=None,
+        precipitation_mm=None,
+        wind_speed_ms=None,
+        cloud_cover_pct=None,
+        humidity_pct=None,
+        wind_gusts_ms=None,
+        shortwave_radiation_wm2=None,
+        thermal_scales=_thermal,
+        settings=settings,
+    )
+    return w_snap, wsrc, wp, dep, lat_c, lon_c
+
+
+def meta_append_batch_weather_snapshot(
+    base: List[Tuple[str, Any]],
+    *,
+    snap: Any,
+    source: str,
+    departure_iso: str,
+    center_lat: float,
+    center_lon: float,
+    experiment_kind: str,
+) -> List[Tuple[str, Any]]:
+    """Поля снимка погоды для листа «Метаданные» (сырые величины)."""
+    out = list(base)
+    out.append(("experiment_kind", experiment_kind))
+    out.append(("batch_weather_center_lat", center_lat))
+    out.append(("batch_weather_center_lon", center_lon))
+    out.append(("batch_weather_departure_iso", departure_iso))
+    out.append(("snapshot_temperature_c", getattr(snap, "temperature_c", None)))
+    out.append(
+        (
+            "snapshot_apparent_temperature_c",
+            getattr(snap, "apparent_temperature_c", None),
+        )
+    )
+    out.append(("snapshot_precipitation_mm", getattr(snap, "precipitation_mm", None)))
+    out.append(
+        (
+            "snapshot_precipitation_probability",
+            getattr(snap, "precipitation_probability", None),
+        )
+    )
+    out.append(("snapshot_wind_speed_ms", getattr(snap, "wind_speed_ms", None)))
+    out.append(("snapshot_wind_gusts_ms", getattr(snap, "wind_gusts_ms", None)))
+    out.append(("snapshot_cloud_cover_pct", getattr(snap, "cloud_cover_pct", None)))
+    out.append(("snapshot_humidity_pct", getattr(snap, "humidity_pct", None)))
+    out.append(
+        (
+            "snapshot_shortwave_radiation_wm2",
+            getattr(snap, "shortwave_radiation_wm2", None),
+        )
+    )
+    out.append(("weather_snapshot_source", source))
+    return out
+
+
+def _zoneinfo_or_raise(name: str) -> Any:
+    if ZoneInfo is None:
+        raise RuntimeError(
+            "Нужен Python 3.9+ с tzdata для часового пояса погоды (zoneinfo)."
+        )
+    return ZoneInfo(name)
+
+
+def weather_windows_past_local_days(
+    *,
+    past_days: int,
+    local_hour: int,
+    tz_name: str,
+) -> List[Tuple[str, str]]:
+    """Календарные даты в прошлом (вчера, позавчера, …) и ISO-время для Open-Meteo.
+
+    Возвращает список из ``past_days`` пар
+    ``(weather_date YYYY-MM-DD, weather_time локальный ISO)``.
+    """
+    tz = _zoneinfo_or_raise(tz_name)
+    if not (0 <= int(local_hour) <= 23):
+        raise ValueError("local_hour должен быть 0..23")
+    out: List[Tuple[str, str]] = []
+    today = datetime.now(tz).date()
+    for k in range(1, int(past_days) + 1):
+        d = today - timedelta(days=k)
+        dt = datetime.combine(d, dt_time(hour=int(local_hour)), tzinfo=tz)
+        out.append((d.isoformat(), dt.isoformat()))
+    return out
+
+
+SUMMARY_NUM_KEYS = (
+    "length_m",
+    "time_s",
+    "climb_m",
+    "descent_m",
+    "max_gradient_pct",
+    "green_percent",
+    "avg_trees_pct",
+    "avg_grass_pct",
+    "stress_cost_total",
+    "weather_temperature_c",
+    "weather_apparent_temperature_c",
+    "weather_precipitation_mm",
+    "weather_precipitation_probability",
+    "weather_wind_speed_ms",
+    "weather_wind_gusts_ms",
+    "weather_cloud_cover_pct",
+    "weather_humidity_pct",
+    "weather_shortwave_radiation_wm2",
+    "weather_heat_continuous",
+    "heat_tree_shade_bonus",
+    "heat_open_sky_penalty",
+    "heat_building_shade_bonus",
+    "heat_covered_bonus",
+    "heat_wind_open_penalty",
+    "heat_wet_surface_penalty",
+    "heat_norm_temp",
+    "heat_norm_rain",
+    "heat_norm_wind",
+    "heat_norm_gust",
+    "heat_norm_cloud",
+    "heat_norm_humidity",
+    "heat_norm_cold_like",
+    "route_open_sky_share",
+    "route_building_shade_share",
+    "route_covered_share",
+    "route_bad_wet_surface_share",
+    "weather_test_temperature_c",
+    "weather_test_precipitation_mm",
+    "weather_test_wind_speed_ms",
+    "weather_test_wind_gusts_ms",
+    "weather_test_cloud_cover_pct",
+    "weather_test_humidity_pct",
+    "weather_test_shortwave_radiation_wm2",
+)
+
+
+def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
+    """Числовые поля снимка Open-Meteo из ответа движка (для Excel и сводок)."""
+    empty: Dict[str, Any] = {
+        "weather_temperature_c": None,
+        "weather_apparent_temperature_c": None,
+        "weather_precipitation_mm": None,
+        "weather_precipitation_probability": None,
+        "weather_wind_speed_ms": None,
+        "weather_wind_gusts_ms": None,
+        "weather_cloud_cover_pct": None,
+        "weather_humidity_pct": None,
+        "weather_shortwave_radiation_wm2": None,
+        "weather_heat_continuous": None,
+        "heat_tree_shade_bonus": None,
+        "heat_open_sky_penalty": None,
+        "heat_building_shade_bonus": None,
+        "heat_covered_bonus": None,
+        "heat_wind_open_penalty": None,
+        "heat_wet_surface_penalty": None,
+        "heat_norm_temp": None,
+        "heat_norm_rain": None,
+        "heat_norm_wind": None,
+        "heat_norm_gust": None,
+        "heat_norm_cloud": None,
+        "heat_norm_humidity": None,
+        "heat_norm_cold_like": None,
+    }
+    w = getattr(r, "weather", None)
+    if not w or not bool(getattr(w, "enabled", False)):
+        return empty
+    s = getattr(w, "snapshot", None)
+    if s is None:
+        return empty
+
+    def _f(name: str) -> Optional[float]:
+        v = getattr(s, name, None)
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    out = {
+        "weather_temperature_c": _f("temperature_c"),
+        "weather_apparent_temperature_c": _f("apparent_temperature_c"),
+        "weather_precipitation_mm": _f("precipitation_mm"),
+        "weather_precipitation_probability": _f("precipitation_probability"),
+        "weather_wind_speed_ms": _f("wind_speed_ms"),
+        "weather_wind_gusts_ms": _f("wind_gusts_ms"),
+        "weather_cloud_cover_pct": _f("cloud_cover_pct"),
+        "weather_humidity_pct": _f("humidity_pct"),
+        "weather_shortwave_radiation_wm2": _f("shortwave_radiation_wm2"),
+        "weather_heat_continuous": bool(getattr(w, "heat_continuous", False)),
+        "heat_tree_shade_bonus": None,
+        "heat_open_sky_penalty": None,
+        "heat_building_shade_bonus": None,
+        "heat_covered_bonus": None,
+        "heat_wind_open_penalty": None,
+        "heat_wet_surface_penalty": None,
+        "heat_norm_temp": None,
+        "heat_norm_rain": None,
+        "heat_norm_wind": None,
+        "heat_norm_gust": None,
+        "heat_norm_cloud": None,
+        "heat_norm_humidity": None,
+        "heat_norm_cold_like": None,
+    }
+    hm = getattr(w, "heat_microclimate", None) or {}
+    if isinstance(hm, dict):
+        mapping = {
+            "tree_shade_bonus": "heat_tree_shade_bonus",
+            "open_sky_penalty": "heat_open_sky_penalty",
+            "building_shade_bonus": "heat_building_shade_bonus",
+            "covered_bonus": "heat_covered_bonus",
+            "wind_open_penalty": "heat_wind_open_penalty",
+            "wet_surface_penalty": "heat_wet_surface_penalty",
+            "norm_temp_norm": "heat_norm_temp",
+            "norm_rain_norm": "heat_norm_rain",
+            "norm_wind_norm": "heat_norm_wind",
+            "norm_gust_norm": "heat_norm_gust",
+            "norm_cloud_norm": "heat_norm_cloud",
+            "norm_humidity_norm": "heat_norm_humidity",
+            "norm_cold_like_norm": "heat_norm_cold_like",
+        }
+        for sk, dk in mapping.items():
+            if sk in hm:
+                try:
+                    out[dk] = float(hm[sk])
+                except (TypeError, ValueError):
+                    pass
+    return out
+
+
+def _ensure_pkg_path() -> None:
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Расстояние по поверхности сферы (м)."""
+    r = 6371000.0
+    p1, p2 = radians(lat1), radians(lat2)
+    dphi = radians(lat2 - lat1)
+    dl = radians(lon2 - lon1)
+    a = sin(dphi / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
+    return 2 * r * asin(min(1.0, sqrt(a)))
+
+
+def _point_id_fmt(i: int) -> str:
+    return f"P{i + 1:02d}"
+
+
+@dataclass
+class SampledPoint:
+    idx: int
+    lat: float
+    lon: float
+    nearest_node_id: int
+
+
+def _iter_directed_pairs(n: int) -> Iterator[Tuple[int, int]]:
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            yield i, j
+
+
+def _direction_key(a: int, b: int) -> str:
+    return f"{_point_id_fmt(a)}->{_point_id_fmt(b)}"
+
+
+def sample_points_in_polygon(
+    *,
+    poly: Any,
+    n_target: int,
+    rng: Any,
+    engine: Any,
+    min_spacing_m: float,
+    max_attempts: int,
+) -> List[SampledPoint]:
+    """Случайные точки в полигоне: уникальность, min_spacing_m, валидация на графе."""
+    from shapely.geometry import Point
+
+    import osmnx as ox
+
+    from bike_router.exceptions import PointOutsideZoneError
+
+    minx, miny, maxx, maxy = poly.bounds
+    out: List[SampledPoint] = []
+    attempts = 0
+    while len(out) < n_target and attempts < max_attempts:
+        attempts += 1
+        x = float(rng.uniform(minx, maxx))
+        y = float(rng.uniform(miny, maxy))
+        p = Point(x, y)
+        if not poly.contains(p):
+            continue
+        lat, lon = y, x
+        if any(
+            haversine_m(lat, lon, sp.lat, sp.lon) < min_spacing_m for sp in out
+        ):
+            continue
+        try:
+            engine._validate_point((lat, lon), "sample")  # noqa: SLF001
+        except PointOutsideZoneError:
+            continue
+        G = engine.graph
+        if G is None:
+            raise RuntimeError("Граф не загружен после warmup")
+        nid = int(ox.distance.nearest_nodes(G, X=lon, Y=lat))
+        out.append(SampledPoint(idx=len(out), lat=lat, lon=lon, nearest_node_id=nid))
+
+    if len(out) < n_target:
+        raise RuntimeError(
+            f"Не удалось набрать {n_target} точек за {max_attempts} попыток "
+            f"(получено {len(out)}). Увеличьте max_attempts или ослабьте min_spacing_m."
+        )
+    _log.info(
+        "Точки: готово %d шт. (попыток %d, min %.0f м)",
+        len(out),
+        attempts,
+        min_spacing_m,
+    )
+    return out
+
+
+def _warnings_text(r: Any) -> Tuple[int, str]:
+    qh = r.quality_hints
+    if not qh or not qh.warnings:
+        return 0, ""
+    w = qh.warnings
+    return len(w), " | ".join(str(x) for x in w)
+
+
+def _stress_fields(r: Any) -> Dict[str, Any]:
+    hs = r.heat_stress
+    out: Dict[str, Any] = {
+        "stress_cost_total": float(r.stress_cost_total or 0.0),
+        "avg_stress_lts": None,
+        "max_stress_lts": None,
+        "high_stress_segments_count": int(r.high_stress_segments_count or 0),
+        "stressful_intersections_count": int(r.stressful_intersections_count or 0),
+    }
+    if hs:
+        out["avg_stress_lts"] = float(hs.avg_stress_lts)
+        out["max_stress_lts"] = float(hs.max_stress_lts)
+        if out["stress_cost_total"] == 0.0 and hs.stress_cost_total:
+            out["stress_cost_total"] = float(hs.stress_cost_total)
+        if not out["high_stress_segments_count"] and hs.high_stress_segments_count:
+            out["high_stress_segments_count"] = int(hs.high_stress_segments_count)
+        if (
+            not out["stressful_intersections_count"]
+            and hs.stressful_intersections_count
+        ):
+            out["stressful_intersections_count"] = int(
+                hs.stressful_intersections_count
+            )
+    return out
+
+
+def route_to_raw_row(
+    *,
+    experiment_id: str,
+    seed: int,
+    route_id: int,
+    profile: str,
+    origin_id: int,
+    dest_id: int,
+    o_lat: float,
+    o_lon: float,
+    d_lat: float,
+    d_lon: float,
+    r: Any,
+    baseline_full: Any = None,
+    weather_date: str = "",
+    test_weather_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    st = _stress_fields(r)
+    wn, wt = _warnings_text(r)
+    elev = r.elevation
+    green = r.green
+    wc = r.weather.weather_time if r.weather else None
+    wsrc = str(r.weather.source or "") if r.weather else ""
+    geom = r.geometry or []
+    geom_json = json.dumps(geom, ensure_ascii=False, separators=(",", ":"))
+
+    out: Dict[str, Any] = {
+        "route_id": route_id,
+        "experiment_id": experiment_id,
+        "seed": seed,
+        "profile": profile,
+        "variant_key": r.mode,
+        "variant_label": r.variant_label or "",
+        "origin_point_id": _point_id_fmt(origin_id),
+        "destination_point_id": _point_id_fmt(dest_id),
+        "direction_key": _direction_key(origin_id, dest_id),
+        "direction_order": "forward"
+        if origin_id < dest_id
+        else "reverse",
+        "origin_lat": o_lat,
+        "origin_lon": o_lon,
+        "destination_lat": d_lat,
+        "destination_lon": d_lon,
+        "route_built_at_utc": r.route_built_at_utc or "",
+        "weather_date": weather_date or (str(wc)[:10] if wc else ""),
+        "weather_time": wc or "",
+        "weather_source": wsrc,
+        **_weather_metrics_from_route(r),
+        "length_m": float(r.length_m),
+        "length_km": round(float(r.length_m) / 1000.0, 6),
+        "time_s": float(r.time_s),
+        "time_min": round(float(r.time_s) / 60.0, 4),
+        "time_display": r.time_display or "",
+        "climb_m": float(elev.climb_m),
+        "descent_m": float(elev.descent_m),
+        "max_gradient_pct": float(elev.max_gradient_pct),
+        "avg_gradient_pct": float(elev.avg_gradient_pct),
+        "max_above_start_m": float(elev.max_above_start_m),
+        "max_below_start_m": float(elev.max_below_start_m),
+        "end_diff_m": float(elev.end_diff_m),
+        "green_percent": float(green.percent),
+        "avg_trees_pct": float(green.avg_trees_pct),
+        "avg_grass_pct": float(green.avg_grass_pct),
+        "stress_cost_total": st["stress_cost_total"],
+        "avg_stress_lts": st["avg_stress_lts"],
+        "max_stress_lts": st["max_stress_lts"],
+        "high_stress_segments_count": st["high_stress_segments_count"],
+        "stressful_intersections_count": st["stressful_intersections_count"],
+        "cost": float(r.cost),
+        "mode": r.mode,
+        "warnings_count": wn,
+        "warnings_text": wt,
+        "geometry_json": geom_json,
+        "route_open_sky_share": round(float(getattr(r, "route_open_sky_share", 0.0)), 4),
+        "route_building_shade_share": round(
+            float(getattr(r, "route_building_shade_share", 0.0)), 4
+        ),
+        "route_covered_share": round(float(getattr(r, "route_covered_share", 0.0)), 4),
+        "route_bad_wet_surface_share": round(
+            float(getattr(r, "route_bad_wet_surface_share", 0.0)), 4
+        ),
+        "weather_test_case_id": None,
+        "weather_test_temperature_c": None,
+        "weather_test_precipitation_mm": None,
+        "weather_test_wind_speed_ms": None,
+        "weather_test_wind_gusts_ms": None,
+        "weather_test_cloud_cover_pct": None,
+        "weather_test_humidity_pct": None,
+        "weather_test_shortwave_radiation_wm2": None,
+    }
+    if test_weather_meta:
+        out.update(test_weather_meta)
+    if baseline_full is not None:
+        out["full_baseline_length_m"] = round(float(baseline_full.length_m), 2)
+        be = baseline_full.elevation
+        out["delta_length_vs_full_m"] = round(
+            float(r.length_m) - float(baseline_full.length_m), 2
+        )
+        out["delta_climb_vs_full_m"] = round(
+            float(elev.climb_m) - float(be.climb_m), 2
+        )
+    else:
+        out["full_baseline_length_m"] = None
+        out["delta_length_vs_full_m"] = None
+        out["delta_climb_vs_full_m"] = None
+    return out
+
+
+def _mean(xs: List[float]) -> Optional[float]:
+    if not xs:
+        return None
+    return sum(xs) / len(xs)
+
+
+def _write_sheet_table(
+    ws: Any, headers: Sequence[str], rows: List[Dict[str, Any]]
+) -> None:
+    for c, h in enumerate(headers, start=1):
+        ws.cell(row=1, column=c, value=h)
+    for ri, row in enumerate(rows, start=2):
+        for c, h in enumerate(headers, start=1):
+            v = row.get(h)
+            ws.cell(row=ri, column=c, value=v)
+
+
+def _make_summary_row(prefix: Dict[str, Any], rs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    row = dict(prefix)
+    for k in SUMMARY_NUM_KEYS:
+        vals: List[float] = []
+        for r in rs:
+            v = r.get(k)
+            if v is None or v == "":
+                continue
+            try:
+                vals.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        m = _mean(vals)
+        row[f"mean_{k}"] = round(m, 4) if m is not None else None
+    row["routes_count"] = len(rs)
+    return row
+
+
+def build_summaries(
+    raw_rows: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """SummaryByVariant, SummaryByProfile, SummaryDirection."""
+
+    def make_row(prefix: Dict[str, Any], rs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return _make_summary_row(prefix, rs)
+
+    by_pv: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    by_prof: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    by_dir: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+    for r in raw_rows:
+        by_pv[(str(r["profile"]), str(r["variant_key"]))].append(r)
+        by_prof[str(r["profile"])].append(r)
+        by_dir[str(r["direction_order"])].append(r)
+
+    s_var = [
+        make_row({"profile": pk, "variant_key": vk}, rs)
+        for (pk, vk), rs in sorted(by_pv.items())
+    ]
+    s_prof = [make_row({"profile": pk}, rs) for pk, rs in sorted(by_prof.items())]
+    s_dir = [
+        make_row({"direction_order": dk}, rs) for dk, rs in sorted(by_dir.items())
+    ]
+    return s_var, s_prof, s_dir
+
+
+def build_summaries_by_weather_date(
+    raw_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Средние по календарной дате погоды (multi-day)."""
+    by_d: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        wd = str(r.get("weather_date") or "").strip()
+        if wd:
+            by_d[wd].append(r)
+    return [
+        _make_summary_row({"weather_date": d}, rs)
+        for d, rs in sorted(by_d.items())
+    ]
+
+
+def build_summaries_by_weather_date_and_variant(
+    raw_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Средние по паре (дата погоды, вариант маршрута)."""
+    g: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        wd = str(r.get("weather_date") or "").strip()
+        vk = str(r.get("variant_key") or "")
+        if wd:
+            g[(wd, vk)].append(r)
+    return [
+        _make_summary_row({"weather_date": a, "variant_key": b}, rs)
+        for (a, b), rs in sorted(g.items())
+    ]
+
+
+def build_pair_comparison(
+    raw_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Сводка по (origin, dest, profile[, дата погоды]): min/max/avg length и time."""
+    has_wd = bool(raw_rows and str(raw_rows[0].get("weather_date") or "").strip())
+    groups: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        base = (
+            r["origin_point_id"],
+            r["destination_point_id"],
+            str(r["profile"]),
+            str(r["direction_key"]),
+        )
+        key: Tuple[Any, ...] = (
+            base + (str(r.get("weather_date") or "").strip(),) if has_wd else base
+        )
+        groups[key].append(r)
+
+    out: List[Dict[str, Any]] = []
+    for key in sorted(groups.keys()):
+        rs = groups[key]
+        if has_wd:
+            o, d, prof, dk, wdate = key
+        else:
+            o, d, prof, dk = key
+            wdate = ""
+        lengths = [float(x["length_m"]) for x in rs]
+        times = [float(x["time_s"]) for x in rs]
+        row: Dict[str, Any] = {
+            "origin_point_id": o,
+            "destination_point_id": d,
+            "profile": prof,
+            "direction_key": dk,
+            "variants_count": len(rs),
+            "length_min_m": min(lengths) if lengths else None,
+            "length_max_m": max(lengths) if lengths else None,
+            "length_mean_m": _mean(lengths),
+            "time_min_s": min(times) if times else None,
+            "time_max_s": max(times) if times else None,
+            "time_mean_s": _mean(times),
+        }
+        if has_wd:
+            row["weather_date"] = wdate
+        out.append(row)
+    return out
+
+
+def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
+    ru = {
+        "experiment_id": "ID эксперимента",
+        "started_at_utc": "Время старта (UTC)",
+        "seed": "Seed",
+        "n_points": "Число точек",
+        "n_directed_pairs": "Направленных пар O–D",
+        "batch_profiles": "Профили (батч)",
+        "n_profiles": "Профилей",
+        "n_variants": "Вариантов маршрута",
+        "expected_route_cells": "Ожидалось строк маршрутов",
+        "successful_route_rows": "Успешных строк",
+        "skipped_od_no_path_buffer_100m": "Пропущено (нет пути до 100 м)",
+        "failure_rows": "Строк ошибок",
+        "precache_polygon_wkt_sha256": "SHA256 полигона precache",
+        "precache_polygon_bounds_lonlat": "Границы полигона (lon/lat)",
+        "precache_polygon_wkt_prefix": "Префикс WKT полигона",
+        "routing_algo_version": "Версия алгоритма",
+        "routing_weights_fingerprint": "Отпечаток весов",
+        "elapsed_seconds": "Время работы, с",
+        "weather_schedule": "Сценарий погоды (none / now / past / test)",
+        "synthetic_test_cases": "Число синтетических сценариев (test)",
+        "weather_mode_engine": "Режим погоды (движок)",
+        "weather_time_utc_snapshot": "Снимок времени UTC (режим now)",
+        "past_days": "Дней архива (режим past)",
+        "past_slot_local_hour": "Локальный час слота (режим past)",
+        "batch_weather_tz": "Часовой пояс IANA (режим past)",
+        "vertices_file": "Файл вершин (отдельно)",
+        "experiment_kind": "Тип эксперимента",
+        "batch_weather_center_lat": "Центр запроса погоды: широта",
+        "batch_weather_center_lon": "Центр запроса погоды: долгота",
+        "batch_weather_departure_iso": "ISO времени для погоды (батч)",
+        "snapshot_temperature_c": "Снимок: температура, °C",
+        "snapshot_apparent_temperature_c": "Снимок: ощущается, °C",
+        "snapshot_precipitation_mm": "Снимок: осадки, мм/ч",
+        "snapshot_precipitation_probability": "Снимок: вероятность осадков, %",
+        "snapshot_wind_speed_ms": "Снимок: ветер, м/с",
+        "snapshot_wind_gusts_ms": "Снимок: порывы, м/с",
+        "snapshot_cloud_cover_pct": "Снимок: облачность, %",
+        "snapshot_humidity_pct": "Снимок: влажность, %",
+        "snapshot_shortwave_radiation_wm2": "Снимок: КВ, Вт/м²",
+        "weather_snapshot_source": "Источник погодного снимка (батч)",
+        "synthetic_weather_time_iso": "Synthetic: ISO времени снимка",
+    }
+    return [(ru.get(str(k), str(k)), v) for k, v in rows]
+
+
+_ROUTE_COL_RU: Dict[str, str] = {
+    "route_id": "ID маршрута",
+    "experiment_id": "ID эксперимента",
+    "seed": "Seed",
+    "profile": "Профиль",
+    "variant_key": "Вариант (ключ)",
+    "variant_label": "Вариант",
+    "origin_point_id": "Точка отправления",
+    "destination_point_id": "Точка назначения",
+    "direction_key": "Направление",
+    "direction_order": "Порядок",
+    "origin_lat": "Широта начала",
+    "origin_lon": "Долгота начала",
+    "destination_lat": "Широта конца",
+    "destination_lon": "Долгота конца",
+    "route_built_at_utc": "Построен в (UTC)",
+    "weather_date": "Дата погоды",
+    "weather_time": "Время погоды (ISO)",
+    "weather_source": "Источник погоды",
+    "weather_temperature_c": "Температура, °C",
+    "weather_apparent_temperature_c": "Ощущается, °C",
+    "weather_precipitation_mm": "Осадки, мм/ч",
+    "weather_precipitation_probability": "Вероятность осадков, %",
+    "weather_wind_speed_ms": "Ветер, м/с",
+    "weather_wind_gusts_ms": "Порывы ветра, м/с",
+    "weather_cloud_cover_pct": "Облачность, %",
+    "weather_humidity_pct": "Влажность, %",
+    "weather_shortwave_radiation_wm2": "КВ радиация, Вт/м²",
+    "weather_heat_continuous": "Непрерывная тепло-модель",
+    "heat_tree_shade_bonus": "Heat: бонус тени деревьев",
+    "heat_open_sky_penalty": "Heat: штраф открытого неба",
+    "heat_building_shade_bonus": "Heat: бонус тени зданий",
+    "heat_covered_bonus": "Heat: бонус укрытий",
+    "heat_wind_open_penalty": "Heat: ветровой штраф (открыто)",
+    "heat_wet_surface_penalty": "Heat: мокрое покрытие",
+    "heat_norm_temp": "Heat: норм. температура",
+    "heat_norm_rain": "Heat: норм. осадки",
+    "heat_norm_wind": "Heat: норм. ветер",
+    "heat_norm_gust": "Heat: норм. порывы",
+    "heat_norm_cloud": "Heat: норм. облачность",
+    "heat_norm_humidity": "Heat: норм. влажность",
+    "heat_norm_cold_like": "Heat: норм. прохлада",
+    "route_open_sky_share": "Маршрут: доля открытого неба",
+    "route_building_shade_share": "Маршрут: тень зданий",
+    "route_covered_share": "Маршрут: укрытия",
+    "route_bad_wet_surface_share": "Маршрут: плохое мокрое покрытие",
+    "weather_test_case_id": "Test: ID сценария",
+    "weather_test_temperature_c": "Test: температура, °C",
+    "weather_test_precipitation_mm": "Test: осадки, мм/ч",
+    "weather_test_wind_speed_ms": "Test: ветер, м/с",
+    "weather_test_wind_gusts_ms": "Test: порывы, м/с",
+    "weather_test_cloud_cover_pct": "Test: облачность, %",
+    "weather_test_humidity_pct": "Test: влажность, %",
+    "weather_test_shortwave_radiation_wm2": "Test: КВ, Вт/м²",
+    "length_m": "Длина, м",
+    "length_km": "Длина, км",
+    "time_s": "Время, с",
+    "time_min": "Время, мин",
+    "time_display": "Время (текст)",
+    "climb_m": "Набор, м",
+    "descent_m": "Спуск, м",
+    "max_gradient_pct": "Макс. уклон, %",
+    "avg_gradient_pct": "Средн. уклон, %",
+    "max_above_start_m": "Макс. выше старта, м",
+    "max_below_start_m": "Макс. ниже старта, м",
+    "end_diff_m": "Перепад финиша, м",
+    "green_percent": "Озеленение, %",
+    "avg_trees_pct": "Деревья, %",
+    "avg_grass_pct": "Трава, %",
+    "stress_cost_total": "Стресс, суммарно",
+    "avg_stress_lts": "Средний LTS",
+    "max_stress_lts": "Макс. LTS",
+    "high_stress_segments_count": "Высокий стресс, сегм.",
+    "stressful_intersections_count": "Стресс. пересечения",
+    "cost": "Стоимость модели",
+    "mode": "Режим (техн.)",
+    "warnings_count": "Число предупреждений",
+    "warnings_text": "Предупреждения",
+    "geometry_json": "Геометрия (JSON)",
+    "full_baseline_length_m": "Длина эталона full, м",
+    "delta_length_vs_full_m": "Δ длины к full, м",
+    "delta_climb_vs_full_m": "Δ набора к full, м",
+}
+
+
+def _rename_row_keys_ru(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {_ROUTE_COL_RU.get(k, k): v for k, v in row.items()}
+
+
+def write_route_vertices_csv_gzip(path: str, vertices: List[Dict[str, Any]]) -> None:
+    import csv
+    import gzip
+
+    if vertices and "weather_date" in vertices[0]:
+        fields = ["weather_date", "route_id", "vertex_index", "lat", "lon"]
+    else:
+        fields = ["route_id", "vertex_index", "lat", "lon"]
+
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as gz:
+        w = csv.DictWriter(gz, fieldnames=fields, extrasaction="ignore")
+        w.writeheader()
+        for row in vertices:
+            w.writerow(row)
+    _log.info("Вершины маршрутов: %s (%d строк)", path, len(vertices))
+
+
+def write_xlsx(
+    path: str,
+    *,
+    meta_rows: List[Tuple[str, Any]],
+    points: List[SampledPoint],
+    raw_rows: List[Dict[str, Any]],
+    vertices: List[Dict[str, Any]],
+    failures: List[Dict[str, Any]],
+    summary_variant: List[Dict[str, Any]],
+    summary_profile: List[Dict[str, Any]],
+    summary_direction: List[Dict[str, Any]],
+    pair_cmp: List[Dict[str, Any]],
+    legacy_multisheet: bool = False,
+    summary_by_weather_date: Optional[List[Dict[str, Any]]] = None,
+    summary_by_weather_date_variant: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    from openpyxl import Workbook
+
+    if legacy_multisheet:
+        wb = Workbook()
+        wm = wb.active
+        wm.title = "Meta"
+        wm.cell(row=1, column=1, value="key")
+        wm.cell(row=1, column=2, value="value")
+        for i, (k, v) in enumerate(meta_rows, start=2):
+            wm.cell(row=i, column=1, value=k)
+            wm.cell(row=i, column=2, value=v)
+
+        def add_sheet(name: str, headers: List[str], rows: List[Dict[str, Any]]) -> None:
+            ws = wb.create_sheet(title=name)
+            _write_sheet_table(ws, headers, rows)
+
+        add_sheet(
+            "SampledPoints",
+            ["point_id", "lat", "lon", "nearest_node_id"],
+            [
+                {
+                    "point_id": _point_id_fmt(sp.idx),
+                    "lat": sp.lat,
+                    "lon": sp.lon,
+                    "nearest_node_id": sp.nearest_node_id,
+                }
+                for sp in points
+            ],
+        )
+
+        if raw_rows:
+            headers = list(raw_rows[0].keys())
+        else:
+            headers = []
+        add_sheet("RoutesRaw", headers, raw_rows)
+        add_sheet(
+            "RouteVertices",
+            ["route_id", "vertex_index", "lat", "lon"],
+            vertices,
+        )
+        if summary_variant:
+            svh = list(summary_variant[0].keys())
+        else:
+            svh = []
+        add_sheet("SummaryByVariant", svh, summary_variant)
+        if summary_profile:
+            sph = list(summary_profile[0].keys())
+        else:
+            sph = []
+        add_sheet("SummaryByProfile", sph, summary_profile)
+        if summary_direction:
+            sdh = list(summary_direction[0].keys())
+        else:
+            sdh = []
+        add_sheet("SummaryDirection", sdh, summary_direction)
+        if pair_cmp:
+            pch = list(pair_cmp[0].keys())
+        else:
+            pch = []
+        add_sheet("PairComparison", pch, pair_cmp)
+
+        fh = [
+            "origin_point_id",
+            "destination_point_id",
+            "profile",
+            "variant",
+            "error_code",
+            "error_message",
+        ]
+        add_sheet("Failures", fh, failures)
+
+        wb.save(path)
+        _log.info("Excel записан (англ. листы): %s", path)
+        return
+
+    wb = Workbook()
+    ws0 = wb.active
+    ws0.title = "Метаданные"
+    ws0.cell(row=1, column=1, value="Параметр")
+    ws0.cell(row=1, column=2, value="Значение")
+    for i, (k, v) in enumerate(_meta_rows_ru(meta_rows), start=2):
+        ws0.cell(row=i, column=1, value=k)
+        ws0.cell(row=i, column=2, value=v)
+
+    ws1 = wb.create_sheet(title="Точки")
+    _write_sheet_table(
+        ws1,
+        ["ID точки", "Широта", "Долгота", "Узел графа"],
+        [
+            {
+                "ID точки": _point_id_fmt(sp.idx),
+                "Широта": sp.lat,
+                "Долгота": sp.lon,
+                "Узел графа": sp.nearest_node_id,
+            }
+            for sp in points
+        ],
+    )
+
+    if raw_rows:
+        rh = [_ROUTE_COL_RU.get(k, k) for k in raw_rows[0].keys()]
+        ru_rows = [_rename_row_keys_ru(dict(rw)) for rw in raw_rows]
+    else:
+        rh, ru_rows = [], []
+    ws2 = wb.create_sheet(title="Маршруты")
+    _write_sheet_table(ws2, rh, ru_rows)
+
+    ws3 = wb.create_sheet(title="Сводка")
+    rr = 1
+    s_wd = summary_by_weather_date or []
+    s_wdv = summary_by_weather_date_variant or []
+    for title, block in (
+        ("Средние по дате погоды", s_wd),
+        ("Средние по дате погоды и варианту", s_wdv),
+        ("Средние по варианту", summary_variant),
+        ("Средние по профилю", summary_profile),
+        ("Средние по направлению", summary_direction),
+        ("Сводка по парам O–D", pair_cmp),
+    ):
+        ws3.cell(row=rr, column=1, value=title)
+        rr += 1
+        if block and block[0]:
+            hdr = list(block[0].keys())
+            for c, h in enumerate(hdr, start=1):
+                ws3.cell(row=rr, column=c, value=h)
+            rr += 1
+            for i, row in enumerate(block):
+                for c, h in enumerate(hdr, start=1):
+                    ws3.cell(row=rr + i, column=c, value=row.get(h))
+            rr += len(block) + 1
+        else:
+            rr += 1
+
+    ws4 = wb.create_sheet(title="Ошибки")
+    _write_sheet_table(
+        ws4,
+        ["Отправление", "Назначение", "Профиль", "Вариант", "Код", "Сообщение"],
+        [
+            {
+                "Отправление": f.get("origin_point_id"),
+                "Назначение": f.get("destination_point_id"),
+                "Профиль": f.get("profile"),
+                "Вариант": f.get("variant"),
+                "Код": f.get("error_code"),
+                "Сообщение": f.get("error_message"),
+            }
+            for f in failures
+        ],
+    )
+
+    wb.save(path)
+    _log.info("Excel записан (компактный RU): %s", path)
+

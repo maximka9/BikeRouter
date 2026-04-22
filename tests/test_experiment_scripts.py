@@ -1,0 +1,72 @@
+"""Импорт и сетка synthetic; обёртка route_batch_experiment."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+
+def test_weather_windows_test_grid_len_36() -> None:
+    from bike_router.tools._experiment_common import weather_windows_test_grid
+
+    g = weather_windows_test_grid()
+    assert len(g) == 36
+
+
+def test_route_batch_experiment_wrapper_exits_2() -> None:
+    root = Path(__file__).resolve().parents[2]
+    script = root / "bike_router" / "tools" / "route_batch_experiment.py"
+    r = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 2
+    assert "route_variants_experiment" in (r.stderr or "")
+
+
+def test_resolve_live_weather_once_single_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bike_router.config import Settings
+    from bike_router.services.weather import WeatherSnapshot, WeatherWeightParams
+    from bike_router.tools._experiment_common import (
+        centroid_lat_lon_for_weather,
+        resolve_live_weather_once_for_polygon,
+    )
+
+    calls: list = []
+
+    def fake_resolve(*a, **k):
+        calls.append((a, k))
+        snap = WeatherSnapshot(
+            temperature_c=21.0,
+            precipitation_mm=0.0,
+            wind_speed_ms=3.0,
+            cloud_cover_pct=40.0,
+            humidity_pct=55.0,
+        )
+        wp = WeatherWeightParams(enabled=True, heat_continuous=True)
+        return snap, "unit_test", wp
+
+    monkeypatch.setattr(
+        "bike_router.engine._resolve_route_weather", fake_resolve, raising=True
+    )
+    s = Settings()
+    class _Poly:
+        bounds = (50.0, 53.0, 51.0, 54.0)
+
+    lat, lon = centroid_lat_lon_for_weather(_Poly())
+    assert abs(lat - 53.5) < 1e-9 and abs(lon - 50.5) < 1e-9
+
+    snap, src, wp, dep, la, lo = resolve_live_weather_once_for_polygon(
+        _Poly(), settings=s
+    )
+    assert len(calls) == 1
+    assert src == "unit_test"
+    assert snap.temperature_c == 21.0
+    assert wp.enabled is True
+    assert isinstance(dep, str) and len(dep) > 4
+    assert la == lat and lo == lon

@@ -148,12 +148,27 @@ def continuous_heat_edge_weather_factor(
     w3 = float(getattr(weather, "heat_wind_exp_w3", 0.35))
     wind_exp = _clamp01(w1 * O + w2 * (1.0 - B) + w3 * (1.0 - C))
 
-    k1 = float(getattr(weather, "heat_edge_k_open", 0.38))
-    k2 = float(getattr(weather, "heat_edge_k_tree", 0.36))
+    k1 = float(getattr(weather, "heat_edge_k_open", 0.54))
+    k2 = float(getattr(weather, "heat_edge_k_tree", 0.44))
     k3 = float(getattr(weather, "heat_edge_k_building", 0.34))
-    k4 = float(getattr(weather, "heat_edge_k_covered", 0.32))
+    k4 = float(getattr(weather, "heat_edge_k_covered", 0.16))
     k5 = float(getattr(weather, "heat_edge_k_wet", 0.28))
     k6 = float(getattr(weather, "heat_edge_k_wind", 0.30))
+
+    sig = getattr(weather, "normalized_signals", None) or {}
+    rn = _clamp01(float(sig.get("rain_norm", 0.0)))
+    rain_open_amp = 1.0 + float(
+        getattr(weather, "heat_edge_rain_open_mult", 0.34)
+    ) * rn
+    rain_build_amp = 1.0 + float(
+        getattr(weather, "heat_edge_rain_building_mult", 0.42)
+    ) * rn
+    rain_wind_exp_amp = 1.0 + float(
+        getattr(weather, "heat_edge_rain_wind_exp_mult", 0.16)
+    ) * rn
+    k1_eff = k1 * rain_open_amp
+    k3_eff = k3 * rain_build_amp
+    k6_eff = k6 * rain_wind_exp_amp
 
     osp = float(getattr(weather, "open_sky_penalty", 1.0))
     tsb = float(getattr(weather, "tree_shade_bonus", 1.0))
@@ -168,12 +183,12 @@ def continuous_heat_edge_weather_factor(
 
     raw = (
         1.0
-        + rs * k1 * osp * O
+        + rs * k1_eff * osp * O
         - rs * k2 * tsb * V
-        - rs * k3 * bsb * B
+        - rs * k3_eff * bsb * B
         - rs * k4 * cbn * C
         + rs * k5 * wsp * wet_eff
-        + rs * k6 * wop * wind_exp
+        + rs * k6_eff * wop * wind_exp
         + rs * syn * O * wet_eff * wind_exp
     )
     lo = float(getattr(weather, "heat_edge_factor_min", 0.65))

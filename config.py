@@ -474,7 +474,7 @@ class Settings:
         "HEAT_BUILDING_SHADE_WIND_GAIN", 0.32, float
     )
     heat_building_shade_rain_gain: float = _env(
-        "HEAT_BUILDING_SHADE_RAIN_GAIN", 0.26, float
+        "HEAT_BUILDING_SHADE_RAIN_GAIN", 0.30, float
     )
     heat_building_shade_humid_gain: float = _env(
         "HEAT_BUILDING_SHADE_HUMID_GAIN", 0.14, float
@@ -490,12 +490,20 @@ class Settings:
     heat_wet_surface_rain_gain: float = _env("HEAT_WET_SURFACE_RAIN_GAIN", 0.38, float)
     heat_wet_surface_humid_gain: float = _env("HEAT_WET_SURFACE_HUMID_GAIN", 0.22, float)
 
-    heat_edge_k_open: float = _env("HEAT_EDGE_K_OPEN", 0.44, float)
-    heat_edge_k_tree: float = _env("HEAT_EDGE_K_TREE", 0.36, float)
+    heat_edge_k_open: float = _env("HEAT_EDGE_K_OPEN", 0.54, float)
+    heat_edge_k_tree: float = _env("HEAT_EDGE_K_TREE", 0.44, float)
     heat_edge_k_building: float = _env("HEAT_EDGE_K_BUILDING", 0.40, float)
-    heat_edge_k_covered: float = _env("HEAT_EDGE_K_COVERED", 0.20, float)
+    heat_edge_k_covered: float = _env("HEAT_EDGE_K_COVERED", 0.16, float)
     heat_edge_k_wet: float = _env("HEAT_EDGE_K_WET", 0.34, float)
     heat_edge_k_wind: float = _env("HEAT_EDGE_K_WIND", 0.36, float)
+    # Усиление дождевого отклика на рёбрах через O/B (rain_norm), без опоры на covered.
+    heat_edge_rain_open_mult: float = _env("HEAT_EDGE_RAIN_OPEN_MULT", 0.34, float)
+    heat_edge_rain_building_mult: float = _env(
+        "HEAT_EDGE_RAIN_BUILDING_MULT", 0.42, float
+    )
+    heat_edge_rain_wind_exp_mult: float = _env(
+        "HEAT_EDGE_RAIN_WIND_EXP_MULT", 0.16, float
+    )
 
     heat_wind_exp_w1: float = _env("HEAT_WIND_EXP_W1", 0.45, float)
     heat_wind_exp_w2: float = _env("HEAT_WIND_EXP_W2", 0.35, float)
@@ -807,6 +815,19 @@ def routing_engine_cache_fingerprint() -> str:
         "heat_gust_delta_ref_max": _env("HEAT_GUST_DELTA_REF_MAX", 10.0, float),
         "heat_edge_factor_min": _env("HEAT_EDGE_FACTOR_MIN", 0.65, float),
         "heat_edge_factor_max": _env("HEAT_EDGE_FACTOR_MAX", 1.75, float),
+        "heat_edge_k_open": _env("HEAT_EDGE_K_OPEN", 0.54, float),
+        "heat_edge_k_tree": _env("HEAT_EDGE_K_TREE", 0.44, float),
+        "heat_edge_k_covered": _env("HEAT_EDGE_K_COVERED", 0.16, float),
+        "heat_edge_rain_open_mult": _env("HEAT_EDGE_RAIN_OPEN_MULT", 0.34, float),
+        "heat_edge_rain_building_mult": _env(
+            "HEAT_EDGE_RAIN_BUILDING_MULT", 0.42, float
+        ),
+        "heat_edge_rain_wind_exp_mult": _env(
+            "HEAT_EDGE_RAIN_WIND_EXP_MULT", 0.16, float
+        ),
+        "heat_building_shade_rain_gain": _env(
+            "HEAT_BUILDING_SHADE_RAIN_GAIN", 0.30, float
+        ),
         "heat_tree_shade_temp_gain": _env("HEAT_TREE_SHADE_TEMP_GAIN", 0.42, float),
         "heat_open_sky_temp_gain": _env("HEAT_OPEN_SKY_TEMP_GAIN", 0.52, float),
         "heat_coeff_clamp_lo": _env("HEAT_COEFF_CLAMP_LO", 0.72, float),

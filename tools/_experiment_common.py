@@ -1,6 +1,7 @@
 """Общие функции пакетных экспериментов маршрутов (Excel, точки, сводки).
 
-Используется ``route_variants_experiment`` и ``heat_weather_experiment``.
+Используется ``route_variants_experiment``, ``heat_weather_experiment`` и ``route_batch_experiment``.
+Выходные .xlsx пишутся в ``bike_router/experiment_outputs/`` (см. ``experiment_output_xlsx_path``).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import os
 import sys
 import time
 import uuid
+from pathlib import Path
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta, timezone
@@ -75,6 +77,18 @@ _DEFAULT_BATCH_WEATHER_TZ = "Europe/Samara"
 DEFAULT_ROUTE_BATCH_SEED = 42
 DEFAULT_MIN_SPACING_M = 100.0
 DEFAULT_MAX_SAMPLE_ATTEMPTS = 50_000
+
+# Все Excel-выходы пакетных экспериментов — в этой папке (от корня пакета bike_router).
+EXPERIMENT_OUTPUT_DIR_NAME = "experiment_outputs"
+
+
+def experiment_output_xlsx_path(*, script_stem: str) -> str:
+    """Путь к .xlsx: ``bike_router/experiment_outputs/{script_stem}_YYYYMMDD_HHMMSS.xlsx`` (UTC)."""
+    pkg_root = Path(__file__).resolve().parent.parent
+    out_dir = pkg_root / EXPERIMENT_OUTPUT_DIR_NAME
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fn = datetime.now(timezone.utc).strftime(f"{script_stem}_%Y%m%d_%H%M%S.xlsx")
+    return str(out_dir / fn)
 # Режим ``past``: столько дней архива, каждый день — 14:00 локально.
 PAST_ARCHIVE_DAYS = 10
 PAST_ARCHIVE_LOCAL_HOUR = 14
@@ -220,18 +234,6 @@ def _batch_output_xlsx_path() -> str:
     """Уникальное имя: route_experiment_batch_YYYYMMDD_HHMMSS.xlsx (UTC)."""
     return datetime.now(timezone.utc).strftime(
         "route_experiment_batch_%Y%m%d_%H%M%S.xlsx"
-    )
-
-
-def variants_output_xlsx_path() -> str:
-    return datetime.now(timezone.utc).strftime(
-        "route_variants_experiment_%Y%m%d_%H%M%S.xlsx"
-    )
-
-
-def heat_weather_output_xlsx_path() -> str:
-    return datetime.now(timezone.utc).strftime(
-        "heat_weather_experiment_%Y%m%d_%H%M%S.xlsx"
     )
 
 

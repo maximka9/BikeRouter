@@ -1,16 +1,36 @@
 """Только маршрут ``heat`` на synthetic-сетке погоды (fixed-snapshot, без Open-Meteo).
 
+Выход: ``bike_router/experiment_outputs/heat_weather_experiment_YYYYMMDD_HHMMSS.xlsx`` (UTC в имени).
+
+Сетка ``--grid`` (см. ``_experiment_common``):
+
+**summer** (36 кейсов) — декартово произведение:
+
+  - температура: 0, 12.5, 25 °C (3);
+  - дождь: выкл / вкл с осадками 1.5 мм·ч⁻¹ (2);
+  - ветер: слабый (2/3 м·с⁻¹) или сильный (9/14 м·с⁻¹) (2);
+  - облачность + КВ: три уровня (0%+750, 50%+400, 100%+80 Вт·м⁻²) (3).
+
+  Итого 3×2×2×3 = **36** сценариев. Направление ветра в кейсе не задано (direction-aware выключен).
+
+**summer_wind** (144 кейса) — те же **36** базовых сценариев, для каждого четыре направления ветра
+«откуда дует» в градусах: **0°, 90°, 180°, 270°** (метеоконвенция как у Open-Meteo). Итого 36×4 = **144**.
+
+**winter** (96 кейсов) — зимняя сетка:
+
+  - температура: −15, −5, 0, 2 °C (4);
+  - свежий снег см·ч⁻¹: 0 / 0.45 / 3.2 с метками F0,F1,F2 (3);
+  - глубина снега на земле: 0, 0.03, 0.10, 0.22 м (4);
+  - ветер: слабый (2/3) или сильный (11/15) м·с⁻¹ (2).
+
+  Итого 4×3×4×2 = **96**. Календарная дата снимка для сезона — зимняя (см. ``WINTER_SYNTH_WEATHER_ISO`` в общем модуле).
+
+``WEATHER_STRESS_GLOBAL_BLEND`` не подменяется: используются значения из .env / Settings.
+
 Запуск::
 
-    python -m bike_router.tools.heat_weather_experiment --n-points 10
-    python -m bike_router.tools.heat_weather_experiment --grid winter --limit 50
-
-``--grid summer`` — 36 сценариев (температура×дождь×ветер×облачность).
-``--grid summer_wind`` — 144 сценария: те же 36 × 4 направления ветра (0/90/180/270°).
-``--grid winter`` — 96 зимних (температура×снегопад×глубина×ветер).
-
-По умолчанию для чистоты анализа heat снижается ``WEATHER_STRESS_GLOBAL_BLEND``
-до 0.12 на время прогона (не трогая .env). См. ``--stress-blend-from-settings``.
+    python -m bike_router.tools.heat_weather_experiment
+    python -m bike_router.tools.heat_weather_experiment --grid winter --verbose
 """
 
 from __future__ import annotations
@@ -34,34 +54,12 @@ def _ensure_pkg_path() -> None:
         sys.path.insert(0, root)
 
 
-def _apply_limit_offset(
-    tasks: List[Tuple[int, int, str]],
-    *,
-    limit: Optional[int],
-    offset: int,
-) -> List[Tuple[int, int, str]]:
-    off = max(0, int(offset))
-    out = tasks[off:]
-    if limit is not None and int(limit) > 0:
-        out = out[: int(limit)]
-    return out
-
-
 def run_heat_weather_experiment(
     *,
     n_points: int,
-    seed: int,
-    min_spacing_m: float,
-    max_sample_attempts: int,
     profiles_mode: str,
     verbose: bool,
     log_every: int,
-    output_path: Optional[str],
-    limit: Optional[int],
-    offset: int,
-    stress_blend_from_settings: bool,
-    weather_stress_global_blend: Optional[float],
-    stress_blend_analysis_default: bool,
     weather_grid: str = "summer",
 ) -> str:
     _ensure_pkg_path()
@@ -72,7 +70,6 @@ def run_heat_weather_experiment(
     from bike_router.services.area_graph_cache import parse_precache_polygon
 
     from bike_router.tools._experiment_common import (
-        DEFAULT_BATCH_LOG_EVERY,
         DEFAULT_MAX_SAMPLE_ATTEMPTS,
         DEFAULT_MIN_SPACING_M,
         DEFAULT_ROUTE_BATCH_SEED,
@@ -88,7 +85,7 @@ def run_heat_weather_experiment(
         build_winter_kpi_rows,
         build_pair_comparison,
         build_summaries,
-        heat_weather_output_xlsx_path,
+        experiment_output_xlsx_path,
         kwargs_fixed_snapshot_from_case,
         route_to_raw_row,
         sample_points_in_polygon,
@@ -107,6 +104,10 @@ def run_heat_weather_experiment(
             "В .env должен быть задан PRECACHE_AREA_POLYGON_WKT (полигон арены)."
         )
 
+    seed = int(DEFAULT_ROUTE_BATCH_SEED)
+    min_spacing_m = float(DEFAULT_MIN_SPACING_M)
+    max_sample_attempts = int(DEFAULT_MAX_SAMPLE_ATTEMPTS)
+
     experiment_id = str(uuid.uuid4())
     wkt_stripped = settings.precache_area_polygon_wkt_stripped
     precache_wkt_sha256 = hashlib.sha256(wkt_stripped.encode("utf-8")).hexdigest()
@@ -120,34 +121,7 @@ def run_heat_weather_experiment(
     if eng.graph is None or not eng.is_loaded:
         raise SystemExit("Warmup не загрузил граф.")
 
-    project_stress_blend = float(eng._app.settings.weather_stress_global_blend)
-    effective_stress_blend: Optional[float] = None
-    stress_blend_note = "project_settings"
-    if stress_blend_from_settings:
-        effective_stress_blend = project_stress_blend
-    elif weather_stress_global_blend is not None:
-        eng._app.settings.weather_stress_global_blend = float(
-            weather_stress_global_blend
-        )
-        effective_stress_blend = float(weather_stress_global_blend)
-        stress_blend_note = (
-            "default_analysis" if stress_blend_analysis_default else "cli_override"
-        )
-        _log.info(
-            "Heat experiment: WEATHER_STRESS_GLOBAL_BLEND %.4f -> %.4f (для прогона)",
-            project_stress_blend,
-            effective_stress_blend,
-        )
-    else:
-        stress_blend_note = "default_analysis"
-        effective_stress_blend = 0.12
-        eng._app.settings.weather_stress_global_blend = effective_stress_blend
-        _log.info(
-            "Heat experiment: WEATHER_STRESS_GLOBAL_BLEND %.4f -> %.4f "
-            "(дефолт анализа; отключить: --stress-blend-from-settings)",
-            project_stress_blend,
-            effective_stress_blend,
-        )
+    stress_blend_used = float(eng._app.settings.weather_stress_global_blend)
 
     points = sample_points_in_polygon(
         poly=poly,
@@ -176,7 +150,6 @@ def run_heat_weather_experiment(
         for i, j in _iter_directed_pairs(n_points)
         for prof in profile_tuple
     ]
-    route_tasks = _apply_limit_offset(route_tasks, limit=limit, offset=offset)
 
     expected_routes = len(route_tasks) * len(grid)
     raw_rows: List[Dict[str, Any]] = []
@@ -328,7 +301,7 @@ def run_heat_weather_experiment(
     pair_cmp = build_pair_comparison(raw_rows)
     heat_kpi = build_heat_weather_kpi_rows(raw_rows)
     winter_kpi = build_winter_kpi_rows(raw_rows) if wg == "winter" else None
-    out = output_path or heat_weather_output_xlsx_path()
+    out = experiment_output_xlsx_path(script_stem="heat_weather_experiment")
     wkt_fp = routing_engine_cache_fingerprint()
     meta_rows: List[Tuple[str, Any]] = [
         ("experiment_id", experiment_id),
@@ -353,13 +326,9 @@ def run_heat_weather_experiment(
         ("routing_algo_version", ROUTING_ALGO_VERSION),
         ("routing_weights_fingerprint", wkt_fp),
         ("elapsed_seconds", round(time.perf_counter() - t_start, 2)),
-        ("pair_limit", limit if limit is not None else ""),
-        ("pair_offset", offset),
         ("experiment_kind", "heat_weather_synthetic"),
         ("synthetic_weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO),
-        ("project_weather_stress_global_blend", project_stress_blend),
-        ("experiment_weather_stress_global_blend_effective", effective_stress_blend),
-        ("experiment_stress_blend_mode", stress_blend_note),
+        ("weather_stress_global_blend", stress_blend_used),
     ]
 
     vgz_path: Optional[str] = None
@@ -391,55 +360,32 @@ def run_heat_weather_experiment(
 
 
 def main() -> None:
-    from bike_router.tools._experiment_common import (
-        DEFAULT_BATCH_LOG_EVERY,
-        DEFAULT_MAX_SAMPLE_ATTEMPTS,
-        DEFAULT_MIN_SPACING_M,
-        DEFAULT_ROUTE_BATCH_SEED,
-    )
+    from bike_router.tools._experiment_common import DEFAULT_BATCH_LOG_EVERY
 
+    grid_help = (
+        "summer: 3 темп × 2 дождя × 2 ветра × 3 облачности = 36 (без направления ветра). "
+        "summer_wind: те же 36 × 4 направления (0/90/180/270°) = 144. "
+        "winter: 4 темп × 3 снегопада × 4 глубины × 2 ветра = 96."
+    )
     parser = argparse.ArgumentParser(
-        description="Только heat на сетке synthetic fixed-snapshot (summer: 36, summer_wind: 144, winter: 96)."
+        description="Heat на synthetic-сетке; см. модульный docstring.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=grid_help,
     )
     parser.add_argument(
         "--grid",
         choices=("summer", "summer_wind", "winter"),
         default="summer",
-        help="summer — 3×2×2×3; summer_wind — то же × 4 направления ветра; winter — снег×глубина×ветер×температура.",
+        metavar="NAME",
     )
     parser.add_argument("--n-points", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=DEFAULT_ROUTE_BATCH_SEED)
-    parser.add_argument("--min-spacing-m", type=float, default=DEFAULT_MIN_SPACING_M)
-    parser.add_argument(
-        "--max-sample-attempts",
-        type=int,
-        default=DEFAULT_MAX_SAMPLE_ATTEMPTS,
-    )
     parser.add_argument(
         "--profiles",
         choices=("both", "cyclist", "pedestrian"),
         default="both",
     )
-    parser.add_argument("--output", type=str, default=None)
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--log-every", type=int, default=DEFAULT_BATCH_LOG_EVERY)
-    parser.add_argument(
-        "--stress-blend-from-settings",
-        action="store_true",
-        help="Не менять WEATHER_STRESS_GLOBAL_BLEND (брать из .env / Settings).",
-    )
-    parser.add_argument(
-        "--weather-stress-global-blend",
-        type=float,
-        default=None,
-        metavar="X",
-        help=(
-            "Явное значение blend на время прогона. "
-            "Если не задано и без --stress-blend-from-settings — используется 0.12."
-        ),
-    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -447,30 +393,11 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
-    blend_cli: Optional[float] = args.weather_stress_global_blend
-    analysis_default = False
-    if args.stress_blend_from_settings:
-        blend_cli = None
-    elif blend_cli is None:
-        blend_cli = 0.12
-        analysis_default = True
-
     path = run_heat_weather_experiment(
         n_points=args.n_points,
-        seed=args.seed,
-        min_spacing_m=float(args.min_spacing_m),
-        max_sample_attempts=int(args.max_sample_attempts),
         profiles_mode=args.profiles,
         verbose=bool(args.verbose),
         log_every=max(0, int(args.log_every)),
-        output_path=args.output,
-        limit=args.limit,
-        offset=int(args.offset),
-        stress_blend_from_settings=bool(args.stress_blend_from_settings),
-        weather_stress_global_blend=blend_cli
-        if not args.stress_blend_from_settings
-        else None,
-        stress_blend_analysis_default=analysis_default,
         weather_grid=str(args.grid),
     )
     print(path)

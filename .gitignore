@@ -16,6 +16,9 @@ venv/
 dist/
 build/
 
+# Batch experiment outputs (Excel)
+experiment_outputs/
+
 # Caches / runtime
 .cache/
 # Локальный bind mount Docker (./data → /data), OSM/тайлы/area_precache

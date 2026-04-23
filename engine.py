@@ -2035,45 +2035,6 @@ class RouteEngine:
                 f"Ожидалось heat, stress, heat_stress"
             )
 
-        rs = router.find_route_safe(G, start, end, "length")
-        if rs is not None:
-            hm_short = self._make_heat_stress_metrics(
-                G,
-                rs,
-                profile_key,
-                time_slot_key,
-                routing_profile_key,
-                season=season,
-                air_temperature_c=air_temperature_c,
-                heat_mult=hm_ctx,
-                weather=weather,
-                physical_weight_key=w_full_key,
-            )
-            rc_s = self._routing_context_meta(
-                time_slot_key=time_slot_key,
-                season=season,
-                routing_profile_key=routing_profile_key,
-                air_temperature_c=air_temperature_c,
-                heat_mult=hm_ctx,
-                criterion="shortest",
-                G=G,
-                route=rs,
-            )
-            routes_out.append(
-                self._build_route_response(
-                    start,
-                    end,
-                    profile_key,
-                    "shortest",
-                    rs,
-                    f"weight_{profile_key}_full",
-                    "Кратчайший по карте (для сравнения)",
-                    graph=G,
-                    heat_stress_metrics=hm_short,
-                    routing_context=rc_s,
-                    weather=weather_ctx,
-                )
-            )
         return routes_out
 
     def _compute_alternatives_criterion_once(

@@ -9,6 +9,9 @@ from bike_router.services.seasonal import (
     resolve_season_routing_context,
     routing_season_label,
     season_green_route_multiplier,
+    season_stairs_route_multiplier,
+    season_stress_route_multiplier,
+    season_wind_orientation_route_multiplier,
     snow_depth_phys_multiplier,
     snow_fresh_phys_multiplier,
     snow_route_model_strength,
@@ -67,6 +70,19 @@ def test_adaptive_season_warm_winter_without_snow() -> None:
     assert ctx.calendar_season == "winter"
     assert ctx.effective_season == "early_spring"
     assert ctx.source == "adaptive"
+
+
+def test_winter_sensitive_season_multipliers() -> None:
+    s = Settings()
+    assert season_stress_route_multiplier("winter", s) >= season_stress_route_multiplier(
+        "green_season", s
+    )
+    assert season_stairs_route_multiplier("winter", s) >= season_stairs_route_multiplier(
+        "green_season", s
+    )
+    assert season_wind_orientation_route_multiplier(
+        "winter", s
+    ) >= season_wind_orientation_route_multiplier("green_season", s)
 
 
 def test_snapshot_from_manual_snow() -> None:

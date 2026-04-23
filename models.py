@@ -382,6 +382,22 @@ class WeatherRouteContext(BaseModel):
         default=1.0,
         description="Множитель роли тени деревьев в heat (до весов winter_heat_*)",
     )
+    season_stress_route_mult: float = Field(
+        default=1.0,
+        description="Сезонный множитель к stress_route_regime",
+    )
+    season_stairs_route_mult: float = Field(
+        default=1.0,
+        description="Сезонный множитель к критерию stairs",
+    )
+    season_wind_orientation_route_mult: float = Field(
+        default=1.0,
+        description="Сезонный множитель к ориентации улицы к ветру",
+    )
+    stress_route_regime_factor: float = Field(
+        default=1.0,
+        description="Итоговый глобальный stress-regime для маршрута",
+    )
     snow_model_strength: float = Field(
         default=0.0,
         description="Сила зимней snow-модели 0..1",
@@ -507,6 +523,24 @@ class HeatStressMetrics(BaseModel):
         le=1.0,
         description="Доля длины: ветер поперёк + тень зданий + ветер",
     )
+    stress_route_regime_factor: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Глобальный множитель stress (blend×mults.stress + snow_add)×сезон",
+    )
+    route_mean_base_route_factor: float = Field(
+        default=0.0,
+        description="Длина-взвешенное среднее base_route_factor по рёбрам",
+    )
+    route_mean_slope_weather_factor: float = Field(default=0.0)
+    route_mean_surface_weather_factor: float = Field(default=0.0)
+    route_mean_green_route_factor: float = Field(default=0.0)
+    route_mean_open_sky_weather_factor: float = Field(default=0.0)
+    route_mean_building_shelter_factor: float = Field(default=0.0)
+    route_mean_covered_shelter_factor: float = Field(default=0.0)
+    route_mean_stress_weather_factor: float = Field(default=0.0)
+    route_mean_stairs_weather_factor: float = Field(default=0.0)
+    route_mean_wind_orientation_factor: float = Field(default=0.0)
     avg_stress_lts: float = Field(default=0.0, description="Средний уровень стресса (1–4)")
     max_stress_lts: float = Field(default=0.0, description="Максимальный стресс на сегменте")
     high_stress_length_fraction: float = Field(

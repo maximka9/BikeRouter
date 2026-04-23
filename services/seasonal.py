@@ -14,6 +14,9 @@ __all__ = (
     "routing_season_label",
     "season_green_route_multiplier",
     "season_tree_heat_route_multiplier",
+    "season_stress_route_multiplier",
+    "season_stairs_route_multiplier",
+    "season_wind_orientation_route_multiplier",
     "snow_route_model_strength",
     "SeasonRoutingContext",
     "resolve_season_routing_context",
@@ -165,6 +168,48 @@ def season_tree_heat_route_multiplier(season: str, s: Any) -> float:
             "spring_ramp": getattr(s, "season_tree_heat_mult_spring_ramp", 0.55),
             "green_season": getattr(s, "season_tree_heat_mult_green", 1.0),
             "late_autumn": getattr(s, "season_tree_heat_mult_late_autumn", 0.45),
+        }.get(key, 1.0)
+    )
+
+
+def season_stress_route_multiplier(season: str, s: Any) -> float:
+    """Сезонный множитель к глобальному stress-regime (зима чуть стрессовее до edge-факторов)."""
+    key = (season or "green_season").strip().lower()
+    return float(
+        {
+            "winter": getattr(s, "season_stress_route_mult_winter", 1.045),
+            "early_spring": getattr(s, "season_stress_route_mult_early_spring", 1.03),
+            "spring_ramp": getattr(s, "season_stress_route_mult_spring_ramp", 1.02),
+            "green_season": getattr(s, "season_stress_route_mult_green", 1.0),
+            "late_autumn": getattr(s, "season_stress_route_mult_late_autumn", 1.035),
+        }.get(key, 1.0)
+    )
+
+
+def season_stairs_route_multiplier(season: str, s: Any) -> float:
+    """Зимой лестницы дороже даже при слабом снеге (отдельный критерий stairs)."""
+    key = (season or "green_season").strip().lower()
+    return float(
+        {
+            "winter": getattr(s, "season_stairs_route_mult_winter", 1.06),
+            "early_spring": getattr(s, "season_stairs_route_mult_early_spring", 1.04),
+            "spring_ramp": getattr(s, "season_stairs_route_mult_spring_ramp", 1.025),
+            "green_season": getattr(s, "season_stairs_route_mult_green", 1.0),
+            "late_autumn": getattr(s, "season_stairs_route_mult_late_autumn", 1.05),
+        }.get(key, 1.0)
+    )
+
+
+def season_wind_orientation_route_multiplier(season: str, s: Any) -> float:
+    """Зимой ориентация улицы к ветру важнее (ветер×open / stairs / heat)."""
+    key = (season or "green_season").strip().lower()
+    return float(
+        {
+            "winter": getattr(s, "season_wind_orientation_route_mult_winter", 1.08),
+            "early_spring": getattr(s, "season_wind_orientation_route_mult_early_spring", 1.04),
+            "spring_ramp": getattr(s, "season_wind_orientation_route_mult_spring_ramp", 1.025),
+            "green_season": getattr(s, "season_wind_orientation_route_mult_green", 1.0),
+            "late_autumn": getattr(s, "season_wind_orientation_route_mult_late_autumn", 1.06),
         }.get(key, 1.0)
     )
 

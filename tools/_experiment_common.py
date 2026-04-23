@@ -26,6 +26,10 @@ except ImportError:
 
 _log = logging.getLogger(__name__)
 
+from bike_router.services.routing_criteria import CRITERION_KEYS
+
+_CRITERIA_ROUTE_MEAN_COLS = tuple(f"route_mean_{k}" for k in CRITERION_KEYS)
+
 # Периодический INFO в батче (шаг = одна пара O–D × один сценарий погоды, все варианты).
 DEFAULT_BATCH_LOG_EVERY = 100
 
@@ -452,6 +456,10 @@ SUMMARY_NUM_KEYS = (
     "weather_routing_season_source",
     "weather_season_green_mult",
     "weather_season_tree_heat_mult",
+    "weather_season_stress_route_mult",
+    "weather_season_stairs_route_mult",
+    "weather_season_wind_orientation_route_mult",
+    "weather_stress_route_regime_factor",
     "weather_snow_model_strength",
     "weather_snow_export_phys_amp",
     "weather_snow_export_stress_amp",
@@ -483,6 +491,8 @@ SUMMARY_NUM_KEYS = (
     "route_mean_heat_building_wind_factor",
     "route_frac_wind_along_open_hostile",
     "route_frac_wind_cross_building_screen",
+    *_CRITERIA_ROUTE_MEAN_COLS,
+    "stress_route_regime_factor",
     "route_stairs_length_m",
     "route_stairs_length_fraction",
     "route_winter_open_stress_proxy",
@@ -519,6 +529,10 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "weather_routing_season_source": None,
         "weather_season_green_mult": None,
         "weather_season_tree_heat_mult": None,
+        "weather_season_stress_route_mult": None,
+        "weather_season_stairs_route_mult": None,
+        "weather_season_wind_orientation_route_mult": None,
+        "weather_stress_route_regime_factor": None,
         "weather_snow_model_strength": None,
         "weather_snow_export_phys_amp": None,
         "weather_snow_export_stress_amp": None,
@@ -587,6 +601,18 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         ),
         "weather_season_tree_heat_mult": float(
             getattr(w, "season_tree_heat_route_mult", 1.0) or 1.0
+        ),
+        "weather_season_stress_route_mult": float(
+            getattr(w, "season_stress_route_mult", 1.0) or 1.0
+        ),
+        "weather_season_stairs_route_mult": float(
+            getattr(w, "season_stairs_route_mult", 1.0) or 1.0
+        ),
+        "weather_season_wind_orientation_route_mult": float(
+            getattr(w, "season_wind_orientation_route_mult", 1.0) or 1.0
+        ),
+        "weather_stress_route_regime_factor": float(
+            getattr(w, "stress_route_regime_factor", 1.0) or 1.0
         ),
         "weather_snow_model_strength": float(
             getattr(w, "snow_model_strength", 0.0) or 0.0
@@ -917,6 +943,29 @@ def route_to_raw_row(
                 getattr(
                     getattr(r, "heat_stress", None),
                     "route_frac_wind_cross_building_screen",
+                    0.0,
+                )
+            ),
+            4,
+        ),
+        **{
+            f"route_mean_{k}": round(
+                float(
+                    getattr(
+                        getattr(r, "heat_stress", None),
+                        f"route_mean_{k}",
+                        0.0,
+                    )
+                ),
+                4,
+            )
+            for k in CRITERION_KEYS
+        },
+        "stress_route_regime_factor": round(
+            float(
+                getattr(
+                    getattr(r, "heat_stress", None),
+                    "stress_route_regime_factor",
                     0.0,
                 )
             ),
@@ -1350,6 +1399,27 @@ def build_winter_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]
         if "2000-04-25" in str(r.get("weather_test_time_iso") or "")
         and float(r.get("weather_season_green_mult") or 0.0) > 0.85
     )
+    april_rows_early = [
+        r
+        for r in wr
+        if "2000-04-05" in str(r.get("weather_test_time_iso") or "")
+    ]
+    april_rows_late = [
+        r
+        for r in wr
+        if "2000-04-25" in str(r.get("weather_test_time_iso") or "")
+    ]
+    mixed_slip_wc: List[Dict[str, Any]] = []
+    for r in wr:
+        wcv = r.get("weather_test_weather_code")
+        if wcv is None or wcv == "":
+            continue
+        try:
+            ci = int(round(float(wcv)))
+        except (TypeError, ValueError):
+            continue
+        if ci in (56, 57, 66, 67):
+            mixed_slip_wc.append(r)
 
     return [
         {
@@ -1377,6 +1447,39 @@ def build_winter_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]
             "cyclist_vs_ped_cost_per_km_ratio_high_snow": round(ratio, 6)
             if ratio is not None
             else None,
+            "mean_route_mean_surface_weather_factor_high_snow": round(
+                _avg(high_snow, "route_mean_surface_weather_factor") or 0.0, 6
+            )
+            if high_snow
+            else None,
+            "mean_route_mean_stairs_weather_factor_high_snow": round(
+                _avg(high_snow, "route_mean_stairs_weather_factor") or 0.0, 6
+            )
+            if high_snow
+            else None,
+            "mean_route_mean_green_route_factor_april_early": round(
+                _avg(april_rows_early, "route_mean_green_route_factor") or 0.0, 6
+            )
+            if april_rows_early
+            else None,
+            "mean_route_mean_green_route_factor_april_late": round(
+                _avg(april_rows_late, "route_mean_green_route_factor") or 0.0, 6
+            )
+            if april_rows_late
+            else None,
+            "mean_route_mean_wind_orientation_factor_wind_snow": round(
+                _avg(wind_snow, "route_mean_wind_orientation_factor") or 0.0, 6
+            )
+            if wind_snow
+            else None,
+            "mean_route_mean_stress_weather_factor_mixed_wc_rows": round(
+                _avg(mixed_slip_wc, "route_mean_stress_weather_factor") or 0.0, 6
+            )
+            if mixed_slip_wc
+            else None,
+            "mean_stress_route_regime_factor_all_winter_rows": round(
+                _avg(wr, "stress_route_regime_factor") or 0.0, 6
+            ),
         }
     ]
 
@@ -1479,6 +1582,10 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "weather_routing_season_source": "Источник сезона (calendar/adaptive)",
     "weather_season_green_mult": "Сезон: множитель зелёного бонуса",
     "weather_season_tree_heat_mult": "Сезон: множитель тени деревьев (heat)",
+    "weather_season_stress_route_mult": "Сезон: множитель глобального stress",
+    "weather_season_stairs_route_mult": "Сезон: множитель критерия лестниц",
+    "weather_season_wind_orientation_route_mult": "Сезон: множитель ориентации к ветру",
+    "weather_stress_route_regime_factor": "Глобальный stress-regime (blend+snow+сезон)",
     "weather_snow_model_strength": "Сила зимней snow-модели",
     "weather_snow_export_phys_amp": "Snow: множитель физики (экспорт)",
     "weather_snow_export_stress_amp": "Snow: множитель stress (экспорт)",
@@ -1510,6 +1617,17 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "route_mean_heat_building_wind_factor": "Маршрут: средний фактор экрана зданий",
     "route_frac_wind_along_open_hostile": "Маршрут: доля «вдоль ветра и открыто»",
     "route_frac_wind_cross_building_screen": "Маршрут: доля «поперёк и экран зданий»",
+    "route_mean_base_route_factor": "Маршрут: ср. base_route_factor",
+    "route_mean_slope_weather_factor": "Маршрут: ср. slope_weather_factor",
+    "route_mean_surface_weather_factor": "Маршрут: ср. surface_weather_factor",
+    "route_mean_green_route_factor": "Маршрут: ср. green_route_factor",
+    "route_mean_open_sky_weather_factor": "Маршрут: ср. open_sky_weather_factor",
+    "route_mean_building_shelter_factor": "Маршрут: ср. building_shelter_factor",
+    "route_mean_covered_shelter_factor": "Маршрут: ср. covered_shelter_factor",
+    "route_mean_stress_weather_factor": "Маршрут: ср. stress_weather_factor (ребро)",
+    "route_mean_stairs_weather_factor": "Маршрут: ср. stairs_weather_factor",
+    "route_mean_wind_orientation_factor": "Маршрут: ср. wind_orientation_factor",
+    "stress_route_regime_factor": "Маршрут: глобальный stress-regime (как в весах)",
     "route_stairs_length_m": "Маршрут: длина по лестницам, м",
     "route_stairs_length_fraction": "Маршрут: доля длины по лестницам",
     "route_winter_open_stress_proxy": "Маршрут: открытость × сила зимней модели",

@@ -16,7 +16,10 @@ from .policy_data import load_weather_policy
 from .seasonal import (
     normalized_snow_signals,
     resolve_season_routing_context,
+    season_stairs_route_multiplier,
+    season_stress_route_multiplier,
     season_tree_heat_route_multiplier,
+    season_wind_orientation_route_multiplier,
     snow_depth_phys_multiplier,
     snow_fresh_phys_multiplier,
     snow_route_model_strength,
@@ -120,6 +123,10 @@ class WeatherWeightParams:
     routing_season: str = ""
     season_green_route_mult: float = 1.0
     season_tree_heat_route_mult: float = 1.0
+    season_stress_route_mult: float = 1.0
+    season_stairs_route_mult: float = 1.0
+    season_wind_orientation_route_mult: float = 1.0
+    stress_route_regime_factor: float = 1.0
     reference_temperature_c: float = 20.0
     weather_code: Optional[int] = None
     snow_model_strength: float = 0.0
@@ -166,6 +173,8 @@ class WeatherWeightParams:
     wc_mixed_surface_amp: float = 0.18
     wc_wet_stairs_amp: float = 0.14
     wc_mixed_snow_stress_amp: float = 0.16
+    wc_winter_open_sky_penalty_amp: float = 0.05
+    wc_winter_building_shelter_bonus_amp: float = 0.06
     winter_clearance_low_amp: float = 0.32
     winter_clearance_low_amp_cyclist: float = 0.22
     winter_clearance_high_mitigate: float = 0.22
@@ -436,6 +445,12 @@ def _wc_routing_params_from_settings(s: Any) -> Dict[str, float]:
         "winter_clearance_high_mitigate": float(
             getattr(s, "winter_clearance_high_mitigate", 0.22)
         ),
+        "wc_winter_open_sky_penalty_amp": float(
+            getattr(s, "wc_winter_open_sky_penalty_amp", 0.05)
+        ),
+        "wc_winter_building_shelter_bonus_amp": float(
+            getattr(s, "wc_winter_building_shelter_bonus_amp", 0.06)
+        ),
     }
 
 
@@ -586,6 +601,26 @@ def build_weather_weight_params(
         wind_dir_kw = _wind_direction_params_from_settings(settings)
         wc_kw = _wc_routing_params_from_settings(settings)
 
+    season_stress_rm = 1.0
+    season_stairs_rm = 1.0
+    season_wind_orient_rm = 1.0
+    if settings is not None:
+        lab = (
+            (routing_season_effective or routing_season or "green_season")
+            .strip()
+            .lower()
+            or "green_season"
+        )
+        season_stress_rm = season_stress_route_multiplier(lab, settings)
+        season_stairs_rm = season_stairs_route_multiplier(lab, settings)
+        season_wind_orient_rm = season_wind_orientation_route_multiplier(
+            lab, settings
+        )
+    blend_sg = float(spw.get("weather_stress_global_blend", 0.38)) if spw else 0.38
+    stress_route_regime_factor = (
+        1.0 + blend_sg * (float(mults.stress) - 1.0) + float(snow_stress_add)
+    ) * float(season_stress_rm)
+
     base_kw: Dict[str, Any] = dict(
         enabled=True,
         mults=mults,
@@ -604,6 +639,10 @@ def build_weather_weight_params(
         routing_season_source=routing_season_source,
         season_green_route_mult=float(season_green_rm),
         season_tree_heat_route_mult=float(tree_heat_rm),
+        season_stress_route_mult=float(season_stress_rm),
+        season_stairs_route_mult=float(season_stairs_rm),
+        season_wind_orientation_route_mult=float(season_wind_orient_rm),
+        stress_route_regime_factor=float(stress_route_regime_factor),
         reference_temperature_c=float(snap.temperature_c),
         weather_code=snap.weather_code,
         snow_model_strength=float(snow_strength),

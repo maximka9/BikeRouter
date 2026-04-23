@@ -20,6 +20,12 @@ from ..config import (
     TIME_SLOTS,
 )
 from .heat import angle_diff_deg, wet_surface_edge_slip_factor
+from .routing_criteria import (
+    CRITERION_KEYS,
+    EdgeRouteCriteriaFactors,
+    EffectiveEdgeComponents,
+    compute_edge_route_criteria,
+)
 from .stress import stress_metrics_for_route
 from .weather import WeatherWeightParams
 from ..exceptions import RouteNotFoundError
@@ -433,8 +439,8 @@ def effective_edge_components(
     weather: Optional[WeatherWeightParams],
     *,
     physical_weight_key: Optional[str] = None,
-) -> Tuple[float, float, float]:
-    """Физическая, тепловая и стрессовая составляющие с учётом погоды (как в поиске пути)."""
+) -> EffectiveEdgeComponents:
+    """Физика без green_route, heat, stress и явные критерии (таблица критериев)."""
     phys_k = physical_weight_key or f"weight_{profile_key}_full"
     heat_k = f"heat_{time_slot_key}"
     phys = coerce_edge_weight_numeric(
@@ -445,90 +451,16 @@ def effective_edge_components(
     hm = float(heat_context_mult) if math.isfinite(heat_context_mult) else 1.0
     st = coerce_edge_weight_numeric(edge_data.get("stress_cost"), fallback=0.0)
     if not weather or not weather.enabled:
-        return phys, h * hm, st
-    wm = weather.mults
-    gcc = float(weather.green_coupling)
-    g_edge = min(1.0, max(0.0, float(edge_data.get("trees_pct") or 0) / 100.0))
-    # Озеленение как поправка к физике: при прохладе не раздувать «зелёный рычаг» для тепла.
-    g_coupling = gcc * float(getattr(weather, "season_green_route_mult", 1.0))
-    if wm.heat < 1.0:
-        g_coupling *= max(0.25, float(wm.heat))
-    surf_edge = wet_surface_route_penalty(
-        edge_data.get("surface_effective"), weather
-    ) * snow_surface_route_penalty(edge_data, weather)
-    ss = float(getattr(weather, "snow_model_strength", 0.0))
-    if ss > 1e-9 and profile_key == "cyclist":
-        clr = winter_clearance_priority_01(edge_data)
-        snd = float(getattr(weather, "snow_depth_norm", 0.0))
-        snf = float(getattr(weather, "snow_fresh_norm", 0.0))
-        cclr = float(getattr(weather, "winter_clearance_low_amp_cyclist", 0.22))
-        surf_edge *= 1.0 + cclr * ss * max(snd, snf) * max(0.0, 1.0 - clr)
-    phys_eff = (
-        phys
-        * wm.physical
-        * wm.surface
-        * surf_edge
-        * (1.0 + max(0.0, wm.green - 1.0) * g_edge * g_coupling)
+        return EffectiveEdgeComponents(phys, h * hm, st, EdgeRouteCriteriaFactors())
+    factors, phys_eff, heat_eff, st_eff = compute_edge_route_criteria(
+        edge_data,
+        profile_key,
+        time_slot_key,
+        heat_context_mult,
+        weather,
+        physical_weight_key=physical_weight_key,
     )
-    if ss > 1e-9 and profile_key == "cyclist":
-        cboost = float(getattr(weather, "snow_phys_cyclist_mult_boost", 0.12))
-        snd = float(getattr(weather, "snow_depth_norm", 0.0))
-        snf = float(getattr(weather, "snow_fresh_norm", 0.0))
-        phys_eff *= 1.0 + cboost * ss * max(snd, snf)
-    hw = str(edge_data.get("highway") or "").strip().lower()
-    if hw == "steps":
-        phys_eff *= snow_stairs_phys_mult(weather, profile_key)
-    # Прокси геометрии улицы (тепловая модель графа): открытость, тень зданий, тень растений.
-    O = float(edge_data.get("thermal_open_sky_share") or 0.5) or 0.5
-    O = max(0.0, min(1.0, O))
-    B = float(edge_data.get("thermal_building_shade_share") or 0.0) or 0.0
-    B = max(0.0, min(1.0, B))
-    V = float(edge_data.get("thermal_vegetation_shade_share") or 0.0) or 0.0
-    V = max(0.0, min(1.0, V))
-    rs = float(getattr(weather, "weather_response_scale", 1.0) or 1.0)
-    regime = str(getattr(weather, "regime", "neutral") or "neutral")
-    heat_excess = max(0.0, float(wm.heat) - 1.0)
-    heat_deficit = max(0.0, 1.0 - float(wm.heat))
-
-    if getattr(weather, "heat_continuous", False):
-        ef = continuous_heat_edge_weather_factor(edge_data, weather)
-        heat_eff = h * hm * wm.heat * ef
-    elif regime == "hot":
-        op = float(getattr(weather, "hot_open_penalty_scale", 1.0) or 1.0)
-        tb = float(getattr(weather, "hot_tree_bonus_scale", 1.0) or 1.0)
-        h = h * (
-            1.0
-            + 0.32 * rs * op * O * min(1.35, heat_excess + 0.12)
-        )
-        h = h * (
-            1.0
-            - 0.26 * rs * tb * V * min(1.2, heat_excess + 0.08)
-        )
-        heat_eff = h * hm * wm.heat
-    elif regime == "cold":
-        cc = float(getattr(weather, "cold_canyon_bonus_scale", 1.0) or 1.0)
-        td = float(getattr(weather, "cold_tree_damping", 0.65) or 0.65)
-        td = max(0.0, min(1.0, td))
-        canyon = max(0.0, min(1.0, B * (0.65 + 0.35 * (1.0 - O))))
-        h = h * (1.0 - 0.22 * rs * cc * canyon * min(1.0, heat_deficit + 0.18))
-        h = h * (
-            1.0
-            + 0.16 * rs * (1.0 - td) * V * (0.6 + 0.4 * heat_deficit)
-        )
-        heat_eff = h * hm * wm.heat
-    else:
-        if wm.heat >= 1.03:
-            h = h * (1.0 + 0.28 * O * min(1.2, wm.heat - 1.0))
-        elif wm.heat <= 0.97:
-            h = h * (1.0 - 0.18 * B * (1.0 - float(wm.heat)))
-        heat_eff = h * hm * wm.heat
-    se_st = weather_edge_stress_factor(edge_data, weather)
-    blend = float(getattr(weather, "weather_stress_global_blend", 0.38))
-    stress_global = 1.0 + blend * (float(wm.stress) - 1.0) + float(
-        getattr(weather, "snow_stress_global_add", 0.0)
-    )
-    st_eff = st * stress_global * se_st
-    return phys_eff, heat_eff, st_eff
+    return EffectiveEdgeComponents(phys_eff, heat_eff, st_eff, factors)
 
 
 def _edge_gradient_abs_raw(edge_data: dict) -> float:
@@ -894,7 +826,7 @@ class RouteService:
         physical_weight_key: Optional[str] = None,
     ) -> float:
         """α·physical' + β·heat' + γ·stress' (без поворотов). Погода — в effective_edge_components."""
-        phys_eff, heat_eff, st_eff = effective_edge_components(
+        ec = effective_edge_components(
             edge_data,
             profile_key,
             time_slot_key,
@@ -902,7 +834,8 @@ class RouteService:
             weather,
             physical_weight_key=physical_weight_key,
         )
-        c = pref.alpha * phys_eff + pref.beta * heat_eff + pref.gamma * st_eff
+        phys_r = ec.phys_eff * ec.criteria.green_route_factor
+        c = pref.alpha * phys_r + pref.beta * ec.heat_eff + pref.gamma * ec.st_eff
         if not math.isfinite(c) or c <= 0:
             return float("inf")
         return float(c)
@@ -1142,7 +1075,7 @@ class RouteService:
         physical_weight_key: Optional[str] = None,
     ) -> Dict[str, float]:
         """Суммы physical, heat (с κ), stress по выбранному слоту."""
-        z = {
+        z: Dict[str, float] = {
             "physical": 0.0,
             "heat": 0.0,
             "heat_raw": 0.0,
@@ -1150,7 +1083,11 @@ class RouteService:
             "stress_segment": 0.0,
             "stress_intersection": 0.0,
             "length_m": 0.0,
+            "stress_route_regime_factor": 0.0,
+            "_criteria_weight_len": 0.0,
         }
+        for _ck in CRITERION_KEYS:
+            z[f"route_mean_{_ck}"] = 0.0
         if route is None:
             return z
         hm = float(heat_context_mult) if math.isfinite(heat_context_mult) else 1.0
@@ -1159,12 +1096,15 @@ class RouteService:
         sw = 1.0
         if weather and weather.enabled:
             sw = float(weather.mults.stress)
+            z["stress_route_regime_factor"] = float(
+                getattr(weather, "stress_route_regime_factor", 1.0) or 1.0
+            )
         for i in range(route.edge_count):
             d = G.edges[route.edges[i]]
             hr = coerce_edge_weight_numeric(d.get(heat_k), fallback=0.0)
             z["heat_raw"] += hr
             if weather and weather.enabled:
-                pe, he, se = effective_edge_components(
+                ec = effective_edge_components(
                     d,
                     profile_key,
                     time_slot_key,
@@ -1172,9 +1112,14 @@ class RouteService:
                     weather,
                     physical_weight_key=physical_weight_key,
                 )
+                ln = float(d.get("length", 0.0) or 0.0)
+                z["_criteria_weight_len"] += ln
+                for _ck in CRITERION_KEYS:
+                    z[f"route_mean_{_ck}"] += ln * float(getattr(ec.criteria, _ck))
+                pe = ec.phys_eff * ec.criteria.green_route_factor
                 z["physical"] += pe
-                z["heat"] += he
-                z["stress"] += se
+                z["heat"] += ec.heat_eff
+                z["stress"] += ec.st_eff
                 z["stress_segment"] += coerce_edge_weight_numeric(
                     d.get("stress_segment_cost"), fallback=0.0
                 ) * sw
@@ -1196,6 +1141,11 @@ class RouteService:
                     d.get("stress_intersection_cost"), fallback=0.0
                 )
             z["length_m"] += float(d.get("length", 0.0) or 0.0)
+        wl = float(z.pop("_criteria_weight_len", 0.0) or 0.0)
+        if wl > 1e-9:
+            for _ck in CRITERION_KEYS:
+                k = f"route_mean_{_ck}"
+                z[k] = float(z[k]) / wl
         return z
 
     @staticmethod

@@ -74,6 +74,7 @@ from .metrics import (
     inc_route_disk_hit,
     inc_route_disk_miss,
 )
+from .services.routing_criteria import CRITERION_KEYS
 from .services.routing import (
     RouteResult,
     RouteService,
@@ -234,6 +235,14 @@ def _build_weather_route_context(
         season_green_route_mult=float(getattr(wp, "season_green_route_mult", 1.0)),
         season_tree_heat_route_mult=float(
             getattr(wp, "season_tree_heat_route_mult", 1.0)
+        ),
+        season_stress_route_mult=float(getattr(wp, "season_stress_route_mult", 1.0)),
+        season_stairs_route_mult=float(getattr(wp, "season_stairs_route_mult", 1.0)),
+        season_wind_orientation_route_mult=float(
+            getattr(wp, "season_wind_orientation_route_mult", 1.0)
+        ),
+        stress_route_regime_factor=float(
+            getattr(wp, "stress_route_regime_factor", 1.0)
         ),
         snow_model_strength=float(getattr(wp, "snow_model_strength", 0.0)),
         snow_export_phys_amp=float(getattr(wp, "snow_export_phys_amp", 1.0)),
@@ -1748,6 +1757,10 @@ class RouteEngine:
             heat_context_multiplier=round(hm, 4),
             weather_multipliers=wm_dict,
         )
+        crit_means = {
+            f"route_mean_{k}": round(float(seg.get(f"route_mean_{k}", 0.0)), 4)
+            for k in CRITERION_KEYS
+        }
         return HeatStressMetrics(
             time_slot=time_slot_key,
             season=(season or "summer").lower(),
@@ -1785,6 +1798,33 @@ class RouteEngine:
             route_frac_wind_cross_building_screen=round(
                 float(wdm.get("route_frac_wind_cross_building_screen", 0.0)), 4
             ),
+            stress_route_regime_factor=round(
+                float(seg.get("stress_route_regime_factor", 0.0)), 4
+            ),
+            route_mean_base_route_factor=crit_means["route_mean_base_route_factor"],
+            route_mean_slope_weather_factor=crit_means["route_mean_slope_weather_factor"],
+            route_mean_surface_weather_factor=crit_means[
+                "route_mean_surface_weather_factor"
+            ],
+            route_mean_green_route_factor=crit_means["route_mean_green_route_factor"],
+            route_mean_open_sky_weather_factor=crit_means[
+                "route_mean_open_sky_weather_factor"
+            ],
+            route_mean_building_shelter_factor=crit_means[
+                "route_mean_building_shelter_factor"
+            ],
+            route_mean_covered_shelter_factor=crit_means[
+                "route_mean_covered_shelter_factor"
+            ],
+            route_mean_stress_weather_factor=crit_means[
+                "route_mean_stress_weather_factor"
+            ],
+            route_mean_stairs_weather_factor=crit_means[
+                "route_mean_stairs_weather_factor"
+            ],
+            route_mean_wind_orientation_factor=crit_means[
+                "route_mean_wind_orientation_factor"
+            ],
             avg_stress_lts=round(st["avg_lts"], 2),
             max_stress_lts=round(st["max_lts"], 2),
             high_stress_length_fraction=round(st["high_stress_fraction"], 3),

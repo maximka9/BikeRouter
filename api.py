@@ -305,8 +305,14 @@ async def alternatives(req: AlternativesRequest):
             temperature_c=req.temperature_c,
             precipitation_mm=req.precipitation_mm,
             wind_speed_ms=req.wind_speed_ms,
+            wind_direction_deg=req.wind_direction_deg,
             cloud_cover_pct=req.cloud_cover_pct,
             humidity_pct=req.humidity_pct,
+            wind_gusts_ms=req.wind_gusts_ms,
+            shortwave_radiation_wm2=req.shortwave_radiation_wm2,
+            snowfall_cm_h=req.snowfall_cm_h,
+            snow_depth_m=req.snow_depth_m,
+            weather_code=req.weather_code,
         )
         ms = (time.perf_counter() - t0) * 1000
         reqlog.info(
@@ -464,8 +470,14 @@ async def alternatives_start(req: AlternativesStartRequest):
             temperature_c=req.temperature_c,
             precipitation_mm=req.precipitation_mm,
             wind_speed_ms=req.wind_speed_ms,
+            wind_direction_deg=req.wind_direction_deg,
             cloud_cover_pct=req.cloud_cover_pct,
             humidity_pct=req.humidity_pct,
+            wind_gusts_ms=req.wind_gusts_ms,
+            shortwave_radiation_wm2=req.shortwave_radiation_wm2,
+            snowfall_cm_h=req.snowfall_cm_h,
+            snow_depth_m=req.snow_depth_m,
+            weather_code=req.weather_code,
         )
         routes = list(out.routes)
         cb = out.criteria_bundle

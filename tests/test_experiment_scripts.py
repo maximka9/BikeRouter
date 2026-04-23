@@ -16,6 +16,14 @@ def test_weather_windows_test_grid_len_36() -> None:
     assert len(g) == 36
 
 
+def test_weather_summer_wind_grid_len_144() -> None:
+    from bike_router.tools._experiment_common import weather_summer_test_grid_with_wind_dirs
+
+    g = weather_summer_test_grid_with_wind_dirs()
+    assert len(g) == 144
+    assert all(getattr(c, "wind_direction_deg", None) is not None for c in g)
+
+
 def test_route_batch_experiment_wrapper_exits_2() -> None:
     root = Path(__file__).resolve().parents[2]
     script = root / "bike_router" / "tools" / "route_batch_experiment.py"

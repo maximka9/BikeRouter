@@ -1,8 +1,13 @@
-"""Только маршрут ``heat`` на сетке из 36 синтетических погод (без Open-Meteo).
+"""Только маршрут ``heat`` на synthetic-сетке погоды (fixed-snapshot, без Open-Meteo).
 
 Запуск::
 
     python -m bike_router.tools.heat_weather_experiment --n-points 10
+    python -m bike_router.tools.heat_weather_experiment --grid winter --limit 50
+
+``--grid summer`` — 36 сценариев (температура×дождь×ветер×облачность).
+``--grid summer_wind`` — 144 сценария: те же 36 × 4 направления ветра (0/90/180/270°).
+``--grid winter`` — 96 зимних (температура×снегопад×глубина×ветер).
 
 По умолчанию для чистоты анализа heat снижается ``WEATHER_STRESS_GLOBAL_BLEND``
 до 0.12 на время прогона (не трогая .env). См. ``--stress-blend-from-settings``.
@@ -57,6 +62,7 @@ def run_heat_weather_experiment(
     stress_blend_from_settings: bool,
     weather_stress_global_blend: Optional[float],
     stress_blend_analysis_default: bool,
+    weather_grid: str = "summer",
 ) -> str:
     _ensure_pkg_path()
 
@@ -72,6 +78,7 @@ def run_heat_weather_experiment(
         DEFAULT_ROUTE_BATCH_SEED,
         EXPERIMENT_CORRIDOR_EXPAND_M,
         SYNTHETIC_TEST_WEATHER_ISO,
+        weather_winter_synthetic_grid,
         _batch_profiles_from_arg,
         _direction_key,
         _iter_directed_pairs,
@@ -85,6 +92,7 @@ def run_heat_weather_experiment(
         route_to_raw_row,
         sample_points_in_polygon,
         weather_windows_test_grid,
+        weather_summer_test_grid_with_wind_dirs,
         write_route_vertices_csv_gzip,
         write_xlsx,
     )
@@ -150,8 +158,17 @@ def run_heat_weather_experiment(
     )
     n_pairs = n_points * (n_points - 1)
     profile_tuple = _batch_profiles_from_arg(profiles_mode)
-    grid = weather_windows_test_grid()
-    assert len(grid) == 36
+    wg = (weather_grid or "summer").strip().lower()
+    if wg == "winter":
+        grid = weather_winter_synthetic_grid()
+        grid_name = "96 зимних погод"
+    elif wg in ("summer_wind", "summer-wind"):
+        grid = weather_summer_test_grid_with_wind_dirs()
+        grid_name = "144 погод (36×4 направления)"
+    else:
+        grid = weather_windows_test_grid()
+        grid_name = "36 погод"
+    assert len(grid) in (36, 96, 144)
 
     route_tasks: List[Tuple[int, int, str]] = [
         (i, j, prof)
@@ -173,16 +190,14 @@ def run_heat_weather_experiment(
     total_steps = len(route_tasks) * len(grid)
     pbar = tqdm(
         total=total_steps,
-        desc="Heat×36 погод",
+        desc=f"Heat×{grid_name}",
         unit="запрос",
         leave=True,
         mininterval=2.0 if not verbose else 0.3,
     )
 
     for syn_case in grid:
-        wkw = kwargs_fixed_snapshot_from_case(
-            syn_case, weather_time_iso=SYNTHETIC_TEST_WEATHER_ISO
-        )
+        wkw = kwargs_fixed_snapshot_from_case(syn_case)
         for i, j, prof in route_tasks:
             o_pt = points[i]
             d_pt = points[j]
@@ -204,6 +219,19 @@ def run_heat_weather_experiment(
                 "weather_test_cloud_cover_pct": syn_case.cloud_cover_pct,
                 "weather_test_humidity_pct": syn_case.humidity_pct,
                 "weather_test_shortwave_radiation_wm2": syn_case.shortwave_radiation_wm2,
+                "weather_test_wind_direction_deg": getattr(
+                    syn_case, "wind_direction_deg", None
+                ),
+                "weather_test_snowfall_cm_h": float(
+                    getattr(syn_case, "snowfall_cm_h", 0.0) or 0.0
+                ),
+                "weather_test_snow_depth_m": float(
+                    getattr(syn_case, "snow_depth_m", 0.0) or 0.0
+                ),
+                "weather_test_weather_code": getattr(syn_case, "weather_code", None),
+                "weather_test_time_iso": getattr(
+                    syn_case, "weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO
+                ),
             }
             try:
                 alt = eng.compute_heat_alternative(
@@ -212,7 +240,7 @@ def run_heat_weather_experiment(
                     profile_key=prof,
                     green_enabled=True,
                     corridor_expand_schedule_meters=EXPERIMENT_CORRIDOR_EXPAND_M,
-                    departure_time=SYNTHETIC_TEST_WEATHER_ISO,
+                    departure_time=str(wkw.get("weather_time") or ""),
                     **wkw,
                 )
             except RouteNotFoundError:
@@ -308,7 +336,8 @@ def run_heat_weather_experiment(
         ("n_directed_pairs", n_pairs),
         ("batch_profiles", ",".join(profile_tuple)),
         ("n_profiles", len(profile_tuple)),
-        ("synthetic_test_cases", 36),
+        ("experiment_weather_grid", wg),
+        ("synthetic_test_cases", len(grid)),
         ("expected_route_cells", expected_routes),
         ("successful_route_rows", len(raw_rows)),
         ("skipped_od_no_path_buffer_100m", n_skip),
@@ -367,7 +396,13 @@ def main() -> None:
     )
 
     parser = argparse.ArgumentParser(
-        description="Только heat на 36 синтетических погодах (fixed-snapshot)."
+        description="Только heat на сетке synthetic fixed-snapshot (summer: 36, summer_wind: 144, winter: 96)."
+    )
+    parser.add_argument(
+        "--grid",
+        choices=("summer", "summer_wind", "winter"),
+        default="summer",
+        help="summer — 3×2×2×3; summer_wind — то же × 4 направления ветра; winter — снег×глубина×ветер×температура.",
     )
     parser.add_argument("--n-points", type=int, default=10)
     parser.add_argument("--seed", type=int, default=DEFAULT_ROUTE_BATCH_SEED)
@@ -433,6 +468,7 @@ def main() -> None:
         if not args.stress_blend_from_settings
         else None,
         stress_blend_analysis_default=analysis_default,
+        weather_grid=str(args.grid),
     )
     print(path)
 

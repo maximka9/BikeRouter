@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from bike_router.services.routing import continuous_heat_edge_weather_factor
+from dataclasses import replace
+
+from bike_router.services.routing import (
+    continuous_heat_edge_weather_factor,
+    weather_edge_stress_factor,
+)
 from bike_router.services.weather import WeatherMultipliers, WeatherWeightParams
 
 
@@ -20,6 +25,7 @@ def _edge(
         "thermal_vegetation_shade_share": V,
         "thermal_covered_share": C,
         "surface_effective": surface,
+        "edge_bearing_deg": 0.0,
     }
 
 
@@ -99,3 +105,103 @@ def test_covered_share_near_zero_does_not_dominate() -> None:
     f0 = continuous_heat_edge_weather_factor(ed0, wp)
     f1 = continuous_heat_edge_weather_factor(ed1, wp)
     assert abs(f1 - f0) < 0.22
+
+
+def test_wind_direction_along_open_increases_heat_vs_cross() -> None:
+    """Ось улицы 0° (север): ветер с севера (0°) — вдоль коридора и открыто сильнее нагревает."""
+    ed = _edge(O=0.72, B=0.12, V=0.0)
+    ed["edge_bearing_deg"] = 0.0
+    sig = {"wind_norm": 0.55, "gust_norm": 0.55, "rain_norm": 0.0}
+    base = WeatherWeightParams(
+        enabled=True,
+        mults=WeatherMultipliers(),
+        heat_continuous=True,
+        weather_response_scale=0.55,
+        open_sky_penalty=1.0,
+        tree_shade_bonus=1.0,
+        building_shade_bonus=1.0,
+        covered_bonus=1.0,
+        wet_surface_penalty=1.0,
+        wind_open_penalty=1.0,
+        normalized_signals=sig,
+        heat_edge_factor_max=2.0,
+        wind_direction_available=False,
+    )
+    wp_along = replace(
+        base, wind_direction_available=True, wind_direction_deg=0.0
+    )
+    wp_cross = replace(
+        base, wind_direction_available=True, wind_direction_deg=90.0
+    )
+    f_along = continuous_heat_edge_weather_factor(ed, wp_along)
+    f_cross = continuous_heat_edge_weather_factor(ed, wp_cross)
+    assert f_along > f_cross
+
+
+def test_wind_direction_unavailable_ignores_deg_value() -> None:
+    """При wind_direction_available=False угол в снимке не влияет (omni-модель)."""
+    ed = _edge(O=0.7, B=0.2)
+    ed["edge_bearing_deg"] = 42.0
+    sig = {"wind_norm": 0.8, "gust_norm": 0.7, "rain_norm": 0.0}
+    wp_a = WeatherWeightParams(
+        enabled=True,
+        mults=WeatherMultipliers(),
+        heat_continuous=True,
+        weather_response_scale=1.0,
+        open_sky_penalty=1.0,
+        tree_shade_bonus=1.0,
+        building_shade_bonus=1.0,
+        covered_bonus=1.0,
+        wet_surface_penalty=1.0,
+        wind_open_penalty=1.0,
+        normalized_signals=sig,
+        wind_direction_available=False,
+        wind_direction_deg=0.0,
+    )
+    wp_b = WeatherWeightParams(
+        enabled=True,
+        mults=WeatherMultipliers(),
+        heat_continuous=True,
+        weather_response_scale=1.0,
+        open_sky_penalty=1.0,
+        tree_shade_bonus=1.0,
+        building_shade_bonus=1.0,
+        covered_bonus=1.0,
+        wet_surface_penalty=1.0,
+        wind_open_penalty=1.0,
+        normalized_signals=sig,
+        wind_direction_available=False,
+        wind_direction_deg=270.0,
+    )
+    assert abs(
+        continuous_heat_edge_weather_factor(ed, wp_a)
+        - continuous_heat_edge_weather_factor(ed, wp_b)
+    ) < 1e-9
+
+
+def test_stress_shelter_increases_when_wind_cross_and_buildings() -> None:
+    ed = {
+        "thermal_open_sky_share": 0.35,
+        "thermal_building_shade_share": 0.55,
+        "thermal_covered_share": 0.0,
+        "surface_effective": "asphalt",
+        "stress_lts": 1.2,
+        "maxspeed": "30",
+        "edge_bearing_deg": 0.0,
+    }
+    sig = {"wind_norm": 0.95, "gust_norm": 0.9, "rain_norm": 0.0}
+    base = WeatherWeightParams(
+        enabled=True,
+        mults=WeatherMultipliers(),
+        heat_continuous=True,
+        weather_response_scale=1.0,
+        normalized_signals=sig,
+        stress_edge_wind_open=0.2,
+        stress_edge_building_shelter=0.12,
+        wind_direction_available=True,
+        stress_wind_along_open_amp=0.32,
+        stress_wind_cross_shelter_amp=0.5,
+    )
+    s_along = weather_edge_stress_factor(ed, replace(base, wind_direction_deg=0.0))
+    s_cross = weather_edge_stress_factor(ed, replace(base, wind_direction_deg=90.0))
+    assert s_cross < s_along

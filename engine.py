@@ -139,9 +139,13 @@ def _weather_snapshot_to_values(snap: WeatherSnapshot) -> WeatherSnapshotValues:
         precipitation_probability=snap.precipitation_probability,
         wind_speed_ms=float(snap.wind_speed_ms),
         wind_gusts_ms=snap.wind_gusts_ms,
+        wind_direction_deg=getattr(snap, "wind_direction_deg", None),
         cloud_cover_pct=float(snap.cloud_cover_pct),
         humidity_pct=float(snap.humidity_pct),
         shortwave_radiation_wm2=snap.shortwave_radiation_wm2,
+        snowfall_cm_h=float(getattr(snap, "snowfall_cm_h", 0.0) or 0.0),
+        snow_depth_m=float(getattr(snap, "snow_depth_m", 0.0) or 0.0),
+        weather_code=getattr(snap, "weather_code", None),
     )
 
 
@@ -168,6 +172,10 @@ def _weather_summary_ru(snap: WeatherSnapshot, wp: WeatherWeightParams) -> str:
         lines.append(f"транспортный стресс ниже на {_pct_deviation(m.stress)}%")
     if m.surface > 1.02:
         lines.append(f"учёт покрытия строже на {_pct_deviation(m.surface)}%")
+    if float(getattr(snap, "snowfall_cm_h", 0.0) or 0.0) >= 0.3:
+        lines.append("идёт снег — скользкие и слабые покрытия дороже")
+    elif float(getattr(snap, "snow_depth_m", 0.0) or 0.0) >= 0.05:
+        lines.append("лежит снег — маршрут по плохим покрытиям и лестницам дороже")
     if snap.precipitation_mm > 0.3 and not lines:
         lines.append("осадки усиливают штрафы за подъёмы и скользкое покрытие")
     if not lines:
@@ -218,6 +226,18 @@ def _build_weather_route_context(
         summary_ru=_weather_summary_ru(snap, wp),
         heat_continuous=hc,
         heat_microclimate=hm,
+        routing_season=str(getattr(wp, "routing_season", "") or ""),
+        season_green_route_mult=float(getattr(wp, "season_green_route_mult", 1.0)),
+        season_tree_heat_route_mult=float(
+            getattr(wp, "season_tree_heat_route_mult", 1.0)
+        ),
+        snow_model_strength=float(getattr(wp, "snow_model_strength", 0.0)),
+        snow_export_phys_amp=float(getattr(wp, "snow_export_phys_amp", 1.0)),
+        snow_export_stress_amp=float(getattr(wp, "snow_export_stress_amp", 1.0)),
+        snow_export_surface_amp=float(getattr(wp, "snow_export_surface_amp", 1.0)),
+        wind_direction_available=bool(
+            getattr(wp, "wind_direction_available", False)
+        ),
     )
 
 
@@ -251,10 +271,13 @@ def _log_route_weather_line(
         f"stress:{m.stress:.3f},surface:{m.surface:.3f}"
     )
     regime = getattr(wp, "regime", "—") if wp else "—"
+    wd = getattr(snap, "wind_direction_deg", None)
+    wd_txt = f"{float(wd):.1f}°" if wd is not None else "—"
+    wdir_on = bool(getattr(wp, "wind_direction_available", False))
     logger.info(
         "route_weather: built_at=%s weather_time=%s source=%s lat=%.5f lon=%.5f "
-        "temp_c=%.2f precip_mm=%.4f wind_ms=%.2f cloud_pct=%.1f humidity_pct=%.1f "
-        "sw_wm2=%s mult={%s} regime=%s weather_enabled=%s",
+        "temp_c=%.2f precip_mm=%.4f wind_ms=%.2f wind_dir=%s wind_dir_aware=%s "
+        "cloud_pct=%.1f humidity_pct=%.1f sw_wm2=%s mult={%s} regime=%s weather_enabled=%s",
         _iso_utc_z(built_at_utc),
         weather_time_effective or "—",
         source or "none",
@@ -263,6 +286,8 @@ def _log_route_weather_line(
         snap.temperature_c,
         snap.precipitation_mm,
         snap.wind_speed_ms,
+        wd_txt,
+        wdir_on,
         snap.cloud_cover_pct,
         snap.humidity_pct,
         sw_txt,
@@ -286,7 +311,11 @@ def _resolve_route_weather(
     cloud_cover_pct: Optional[float] = None,
     humidity_pct: Optional[float] = None,
     wind_gusts_ms: Optional[float] = None,
+    wind_direction_deg: Optional[float] = None,
     shortwave_radiation_wm2: Optional[float] = None,
+    snowfall_cm_h: Optional[float] = None,
+    snow_depth_m: Optional[float] = None,
+    weather_code: Optional[int] = None,
     thermal_scales: Optional[Dict[str, float]] = None,
     settings: Any = None,
 ) -> Tuple[WeatherSnapshot, str, WeatherWeightParams]:
@@ -303,6 +332,10 @@ def _resolve_route_weather(
             cloud_cover_pct=cloud_cover_pct,
             humidity_pct=humidity_pct,
             shortwave_radiation_wm2=shortwave_radiation_wm2,
+            snowfall_cm_h=snowfall_cm_h,
+            snow_depth_m=snow_depth_m,
+            weather_code=weather_code,
+            wind_direction_deg=wind_direction_deg,
         )
     return resolve_weather_for_route(
         lat=lat,
@@ -1192,6 +1225,9 @@ class RouteEngine:
             route_bad_wet_surface_share=float(hm.route_bad_wet_surface_share)
             if hm
             else 0.0,
+            route_winter_harsh_surface_share=float(hm.route_winter_harsh_surface_share)
+            if hm
+            else 0.0,
             vegetation_shade_share=float(hm.vegetation_shade_share) if hm else 0.0,
             stressful_intersections_count=int(hm.stressful_intersections_count)
             if hm
@@ -1677,6 +1713,7 @@ class RouteEngine:
         st = router.route_stress_levels(G, route)
         sh = router.route_shade_shares(G, route)
         sh_rt = router.route_shelter_length_weighted_averages(G, route)
+        wdm = router.route_wind_direction_metrics(G, route, weather)
         n_int = router.count_stressful_intersections(G, route)
         n_hi_seg = router.count_high_stress_segments(G, route)
         comb = router.route_combined_total(
@@ -1725,6 +1762,25 @@ class RouteEngine:
             route_building_shade_share=round(sh_rt["route_building_shade_share"], 4),
             route_covered_share=round(sh_rt["route_covered_share"], 4),
             route_bad_wet_surface_share=round(sh_rt["route_bad_wet_surface_share"], 4),
+            route_winter_harsh_surface_share=round(
+                float(sh_rt.get("route_winter_harsh_surface_share", 0.0)), 4
+            ),
+            route_wind_direction_aware=float(wdm.get("route_wind_direction_aware", 0.0)),
+            route_mean_wind_to_street_angle_deg=round(
+                float(wdm.get("route_mean_wind_to_street_angle_deg", 0.0)), 2
+            ),
+            route_mean_heat_directional_wind_exp=round(
+                float(wdm.get("route_mean_heat_directional_wind_exp", 0.0)), 4
+            ),
+            route_mean_heat_building_wind_factor=round(
+                float(wdm.get("route_mean_heat_building_wind_factor", 0.0)), 4
+            ),
+            route_frac_wind_along_open_hostile=round(
+                float(wdm.get("route_frac_wind_along_open_hostile", 0.0)), 4
+            ),
+            route_frac_wind_cross_building_screen=round(
+                float(wdm.get("route_frac_wind_cross_building_screen", 0.0)), 4
+            ),
             avg_stress_lts=round(st["avg_lts"], 2),
             max_stress_lts=round(st["max_lts"], 2),
             high_stress_length_fraction=round(st["high_stress_fraction"], 3),
@@ -2139,10 +2195,14 @@ class RouteEngine:
         temperature_c: Optional[float] = None,
         precipitation_mm: Optional[float] = None,
         wind_speed_ms: Optional[float] = None,
+        wind_direction_deg: Optional[float] = None,
         cloud_cover_pct: Optional[float] = None,
         humidity_pct: Optional[float] = None,
         wind_gusts_ms: Optional[float] = None,
         shortwave_radiation_wm2: Optional[float] = None,
+        snowfall_cm_h: Optional[float] = None,
+        snow_depth_m: Optional[float] = None,
+        weather_code: Optional[int] = None,
         corridor_expand_schedule_meters: Optional[Sequence[float]] = None,
     ) -> AlternativesResponse:
         """Все доступные варианты сразу: кратчайший, энергия, зелёный, тепло, стресс, тепло+безопасность.
@@ -2186,7 +2246,11 @@ class RouteEngine:
             cloud_cover_pct=cloud_cover_pct,
             humidity_pct=humidity_pct,
             wind_gusts_ms=wind_gusts_ms,
+            wind_direction_deg=wind_direction_deg,
             shortwave_radiation_wm2=shortwave_radiation_wm2,
+            snowfall_cm_h=snowfall_cm_h,
+            snow_depth_m=snow_depth_m,
+            weather_code=weather_code,
             thermal_scales=_thermal,
             settings=_s,
         )
@@ -2359,10 +2423,14 @@ class RouteEngine:
         temperature_c: Optional[float] = None,
         precipitation_mm: Optional[float] = None,
         wind_speed_ms: Optional[float] = None,
+        wind_direction_deg: Optional[float] = None,
         cloud_cover_pct: Optional[float] = None,
         humidity_pct: Optional[float] = None,
         wind_gusts_ms: Optional[float] = None,
         shortwave_radiation_wm2: Optional[float] = None,
+        snowfall_cm_h: Optional[float] = None,
+        snow_depth_m: Optional[float] = None,
+        weather_code: Optional[int] = None,
         corridor_expand_schedule_meters: Optional[Sequence[float]] = None,
     ) -> AlternativesResponse:
         """Только вариант ``heat`` (один критерий), без shortest/full/green/stress.
@@ -2401,7 +2469,11 @@ class RouteEngine:
             cloud_cover_pct=cloud_cover_pct,
             humidity_pct=humidity_pct,
             wind_gusts_ms=wind_gusts_ms,
+            wind_direction_deg=wind_direction_deg,
             shortwave_radiation_wm2=shortwave_radiation_wm2,
+            snowfall_cm_h=snowfall_cm_h,
+            snow_depth_m=snow_depth_m,
+            weather_code=weather_code,
             thermal_scales=_thermal,
             settings=_s,
         )

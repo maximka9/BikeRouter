@@ -7,11 +7,22 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import requests
 
 from .policy_data import load_weather_policy
+from .seasonal import (
+    normalized_snow_signals,
+    routing_season_label,
+    season_green_route_multiplier,
+    season_tree_heat_route_multiplier,
+    snow_depth_phys_multiplier,
+    snow_fresh_phys_multiplier,
+    snow_route_model_strength,
+    parse_route_calendar_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +44,15 @@ class WeatherSnapshot:
     precipitation_probability: Optional[float] = None
     wind_speed_ms: float = 3.0
     wind_gusts_ms: Optional[float] = None
+    # Направление ветра по метеоконвенции Open-Meteo: градусы, **откуда** дует ветер (0° — север).
+    wind_direction_deg: Optional[float] = None
     cloud_cover_pct: float = 50.0
     humidity_pct: float = 60.0
     shortwave_radiation_wm2: Optional[float] = None
+    # Снег и код WMO (Open-Meteo). snow_depth — модельная глубина, не состояние тротуара.
+    snowfall_cm_h: float = 0.0
+    snow_depth_m: float = 0.0
+    weather_code: Optional[int] = None
 
 
 @dataclass
@@ -100,6 +117,44 @@ class WeatherWeightParams:
     phys_wet_tier0_cap: float = 0.016
     phys_wet_tier1_coef: float = 0.048
     phys_wet_tier2_coef: float = 0.12
+    # Сезон и зима (заполняется в build_weather_weight_params при settings).
+    routing_season: str = ""
+    season_green_route_mult: float = 1.0
+    season_tree_heat_route_mult: float = 1.0
+    reference_temperature_c: float = 20.0
+    weather_code: Optional[int] = None
+    snow_model_strength: float = 0.0
+    snow_depth_norm: float = 0.0
+    snow_fresh_norm: float = 0.0
+    snow_depth_phys_mult: float = 1.0
+    snow_fresh_phys_mult: float = 1.0
+    snow_stress_global_add: float = 0.0
+    snow_export_surface_amp: float = 1.0
+    snow_export_stress_amp: float = 1.0
+    snow_export_phys_amp: float = 1.0
+    winter_heat_tree_scale: float = 1.0
+    winter_heat_open_scale: float = 1.0
+    winter_heat_wind_scale: float = 1.0
+    stress_edge_snow_open: float = 0.18
+    stress_edge_snow_surface: float = 0.22
+    stress_edge_snow_stairs: float = 0.16
+    snow_surface_tier0_amp: float = 0.012
+    snow_surface_tier1_amp: float = 0.055
+    snow_surface_tier2_amp: float = 0.14
+    snow_stairs_ped_base: float = 1.08
+    snow_stairs_ped_frozen_boost: float = 1.12
+    snow_stairs_cyclist_base: float = 1.18
+    snow_stairs_cyclist_frozen_boost: float = 1.22
+    snow_phys_cyclist_mult_boost: float = 0.12
+    # Направление ветра (если False — используется прежняя безнаправленная модель).
+    wind_direction_deg: Optional[float] = None
+    wind_direction_available: bool = False
+    heat_wind_along_open_amp: float = 0.28
+    heat_wind_cross_build_amp: float = 0.35
+    stress_wind_along_open_amp: float = 0.32
+    stress_wind_cross_shelter_amp: float = 0.40
+    # Ослабление бонуса зданий, когда ветер «вдоль» коридора (мало экранирования фасадом).
+    heat_wind_along_build_damp: float = 0.24
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -116,7 +171,19 @@ def snapshot_from_manual(
     humidity_pct: Optional[float] = None,
     apparent_temperature_c: Optional[float] = None,
     shortwave_radiation_wm2: Optional[float] = None,
+    snowfall_cm_h: Optional[float] = None,
+    snow_depth_m: Optional[float] = None,
+    weather_code: Optional[int] = None,
+    wind_direction_deg: Optional[float] = None,
 ) -> WeatherSnapshot:
+    wd_norm: Optional[float] = None
+    if wind_direction_deg is not None:
+        try:
+            fv = float(wind_direction_deg)
+            if math.isfinite(fv):
+                wd_norm = fv % 360.0
+        except (TypeError, ValueError):
+            wd_norm = None
     return WeatherSnapshot(
         temperature_c=float(temperature_c if temperature_c is not None else 20.0),
         apparent_temperature_c=apparent_temperature_c,
@@ -126,6 +193,10 @@ def snapshot_from_manual(
         cloud_cover_pct=float(cloud_cover_pct if cloud_cover_pct is not None else 50.0),
         humidity_pct=float(humidity_pct if humidity_pct is not None else 60.0),
         shortwave_radiation_wm2=shortwave_radiation_wm2,
+        snowfall_cm_h=float(snowfall_cm_h if snowfall_cm_h is not None else 0.0),
+        snow_depth_m=float(snow_depth_m if snow_depth_m is not None else 0.0),
+        weather_code=weather_code,
+        wind_direction_deg=wd_norm,
     )
 
 
@@ -154,6 +225,7 @@ def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, floa
     cloud_norm = _clamp(clouds / 100.0, 0.0, 1.0)
     humidity_norm = _clamp(hum / 100.0, 0.0, 1.0)
     cold_like_norm = _clamp((tcref - T) / tc_rng, 0.0, 1.0)
+    snd, snf = normalized_snow_signals(snap, s)
     return {
         "temp_norm": temp_norm,
         "rain_norm": rain_norm,
@@ -162,6 +234,8 @@ def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, floa
         "cloud_norm": cloud_norm,
         "humidity_norm": humidity_norm,
         "cold_like_norm": cold_like_norm,
+        "snow_depth_norm": float(snd),
+        "snow_fresh_norm": float(snf),
     }
 
 
@@ -282,6 +356,35 @@ def _stress_and_phys_wet_params_from_settings(s: Any) -> Dict[str, float]:
         "phys_wet_tier2_coef": float(
             getattr(s, "weather_phys_wet_penalty_tier2_coef", 0.12)
         ),
+        "stress_edge_snow_open": float(
+            getattr(s, "weather_stress_edge_snow_open", 0.18)
+        ),
+        "stress_edge_snow_surface": float(
+            getattr(s, "weather_stress_edge_snow_surface", 0.22)
+        ),
+        "stress_edge_snow_stairs": float(
+            getattr(s, "weather_stress_edge_snow_stairs", 0.16)
+        ),
+    }
+
+
+def _wind_direction_params_from_settings(s: Any) -> Dict[str, float]:
+    return {
+        "heat_wind_along_open_amp": float(
+            getattr(s, "heat_wind_along_open_amp", 0.28)
+        ),
+        "heat_wind_cross_build_amp": float(
+            getattr(s, "heat_wind_cross_build_amp", 0.35)
+        ),
+        "stress_wind_along_open_amp": float(
+            getattr(s, "stress_wind_along_open_amp", 0.32)
+        ),
+        "stress_wind_cross_shelter_amp": float(
+            getattr(s, "stress_wind_cross_shelter_amp", 0.40)
+        ),
+        "heat_wind_along_build_damp": float(
+            getattr(s, "heat_wind_along_build_damp", 0.24)
+        ),
     }
 
 
@@ -292,10 +395,22 @@ def build_weather_weight_params(
     policy: Optional[Dict[str, Any]] = None,
     thermal_scales: Optional[Dict[str, float]] = None,
     settings: Optional[Any] = None,
+    reference_iso: Optional[str] = None,
 ) -> WeatherWeightParams:
     """Собрать параметры для RouteService из снимка погоды."""
     if not enabled:
         return WeatherWeightParams(enabled=False)
+    wdir_raw = getattr(snap, "wind_direction_deg", None)
+    wdir_ok = False
+    wdir_val: Optional[float] = None
+    if wdir_raw is not None:
+        try:
+            fv = float(wdir_raw)
+            if math.isfinite(fv):
+                wdir_ok = True
+                wdir_val = fv % 360.0
+        except (TypeError, ValueError):
+            pass
     pol = policy if policy is not None else load_weather_policy()
     gcc = float((pol or {}).get("green_edge_coupling", 0.55))
     scales = thermal_scales or {}
@@ -305,9 +420,80 @@ def build_weather_weight_params(
 
     sig: Dict[str, float] = {}
     spw: Dict[str, float] = {}
+    routing_season = ""
+    season_green_rm = 1.0
+    tree_heat_rm = 1.0
+    snow_strength = 0.0
+    snd = 0.0
+    snf = 0.0
+    dpm = 1.0
+    fpm = 1.0
+    snow_stress_add = 0.0
+    w_tree = 1.0
+    w_open = 1.0
+    w_wind = 1.0
+    snow_surf_export = 1.0
+    snow_stress_export = 1.0
+    stress_before = float(mults.stress)
+    phys_before = float(mults.physical)
+
     if settings is not None:
+        if not wdir_ok:
+            logger.info(
+                "weather: направление ветра недоступно — используется "
+                "омнинаправленная ветровая модель (как до внедрения wind_direction)"
+            )
         sig = _normalized_weather_signals(snap, settings)
         spw = _stress_and_phys_wet_params_from_settings(settings)
+        ref_d = parse_route_calendar_date(reference_iso) or datetime.now(
+            timezone.utc
+        ).date()
+        routing_season = routing_season_label(ref_d, settings)
+        season_green_rm = season_green_route_multiplier(ref_d, settings)
+        tree_heat_rm = season_tree_heat_route_multiplier(routing_season, settings)
+        snow_strength = snow_route_model_strength(routing_season, snap, settings)
+        snd = float(sig.get("snow_depth_norm", 0.0))
+        snf = float(sig.get("snow_fresh_norm", 0.0))
+        dpm = snow_depth_phys_multiplier(float(snap.snow_depth_m or 0.0), settings)
+        fpm = snow_fresh_phys_multiplier(float(snap.snowfall_cm_h or 0.0), settings)
+        comb = float(dpm * fpm)
+        mults.physical *= 1.0 + snow_strength * (comb - 1.0)
+        s_coupling = float(getattr(settings, "snow_stress_phys_coupling", 0.45))
+        mults.stress *= 1.0 + snow_strength * min(0.28, (comb - 1.0) * s_coupling)
+        snow_stress_add = float(
+            getattr(settings, "snow_stress_global_add_winter", 0.035)
+        ) * snow_strength + 0.05 * snow_strength * snd
+        ddamp = float(getattr(settings, "winter_heat_tree_damp_snow_depth", 0.38))
+        fdamp = float(getattr(settings, "winter_heat_tree_damp_snow_fresh", 0.22))
+        w_tree = max(
+            0.05,
+            float(tree_heat_rm)
+            * (1.0 - ddamp * snd * snow_strength)
+            * (1.0 - fdamp * snf * snow_strength),
+        )
+        if routing_season == "winter":
+            wo = float(getattr(settings, "winter_heat_open_scale_winter", 1.18))
+            ww = float(getattr(settings, "winter_heat_wind_scale_winter", 1.22))
+        elif routing_season == "green_season":
+            wo = ww = 1.0
+        else:
+            wo = float(getattr(settings, "winter_heat_open_scale_transition", 1.08))
+            ww = float(getattr(settings, "winter_heat_wind_scale_transition", 1.12))
+        w_open = 1.0 + (wo - 1.0) * snow_strength + 0.06 * snd * snow_strength
+        w_wind = 1.0 + (ww - 1.0) * snow_strength + 0.08 * snf * snow_strength
+        tier0 = float(getattr(settings, "snow_surface_tier0_amp", 0.012))
+        tier1 = float(getattr(settings, "snow_surface_tier1_amp", 0.055))
+        tier2 = float(getattr(settings, "snow_surface_tier2_amp", 0.14))
+        snow_surf_export = 1.0 + snow_strength * (
+            tier0 * (1.0 - max(snd, snf))
+            + tier1 * min(1.0, snd + snf)
+            + tier2 * snd * snf
+        )
+        snow_stress_export = float(mults.stress / max(1e-9, stress_before))
+
+    wind_dir_kw: Dict[str, float] = {}
+    if settings is not None:
+        wind_dir_kw = _wind_direction_params_from_settings(settings)
 
     base_kw: Dict[str, Any] = dict(
         enabled=True,
@@ -321,6 +507,64 @@ def build_weather_weight_params(
         weather_response_scale=rs,
         heat_continuous=False,
         normalized_signals=sig,
+        routing_season=routing_season,
+        season_green_route_mult=float(season_green_rm),
+        season_tree_heat_route_mult=float(tree_heat_rm),
+        reference_temperature_c=float(snap.temperature_c),
+        weather_code=snap.weather_code,
+        snow_model_strength=float(snow_strength),
+        snow_depth_norm=float(snd),
+        snow_fresh_norm=float(snf),
+        snow_depth_phys_mult=float(dpm),
+        snow_fresh_phys_mult=float(fpm),
+        snow_stress_global_add=float(snow_stress_add),
+        snow_export_surface_amp=float(snow_surf_export),
+        snow_export_stress_amp=float(snow_stress_export),
+        snow_export_phys_amp=float(mults.physical / max(1e-9, phys_before)),
+        wind_direction_deg=wdir_val,
+        wind_direction_available=bool(wdir_ok),
+        **wind_dir_kw,
+        winter_heat_tree_scale=float(w_tree),
+        winter_heat_open_scale=float(w_open),
+        winter_heat_wind_scale=float(w_wind),
+        snow_surface_tier0_amp=float(
+            getattr(settings, "snow_surface_tier0_amp", 0.012)
+        )
+        if settings is not None
+        else 0.012,
+        snow_surface_tier1_amp=float(
+            getattr(settings, "snow_surface_tier1_amp", 0.055)
+        )
+        if settings is not None
+        else 0.055,
+        snow_surface_tier2_amp=float(
+            getattr(settings, "snow_surface_tier2_amp", 0.14)
+        )
+        if settings is not None
+        else 0.14,
+        snow_stairs_ped_base=float(getattr(settings, "snow_stairs_ped_base", 1.08))
+        if settings is not None
+        else 1.08,
+        snow_stairs_ped_frozen_boost=float(
+            getattr(settings, "snow_stairs_ped_frozen_boost", 1.12)
+        )
+        if settings is not None
+        else 1.12,
+        snow_stairs_cyclist_base=float(
+            getattr(settings, "snow_stairs_cyclist_base", 1.18)
+        )
+        if settings is not None
+        else 1.18,
+        snow_stairs_cyclist_frozen_boost=float(
+            getattr(settings, "snow_stairs_cyclist_frozen_boost", 1.22)
+        )
+        if settings is not None
+        else 1.22,
+        snow_phys_cyclist_mult_boost=float(
+            getattr(settings, "snow_phys_cyclist_mult_boost", 0.12)
+        )
+        if settings is not None
+        else 0.12,
         **spw,
     )
 
@@ -351,6 +595,8 @@ def classify_weather_regime(snap: WeatherSnapshot) -> str:
     hum = float(snap.humidity_pct)
     clouds = float(snap.cloud_cover_pct)
     rain = float(snap.precipitation_mm)
+    snow_d = float(getattr(snap, "snow_depth_m", 0.0) or 0.0)
+    snow_f = float(getattr(snap, "snowfall_cm_h", 0.0) or 0.0)
 
     hot_score = 0.0
     if max(T, Ta) >= 23.5:
@@ -379,6 +625,8 @@ def classify_weather_regime(snap: WeatherSnapshot) -> str:
         cold_score += 1.0
     if Ta < T - 0.8:
         cold_score += 0.5
+    if snow_d >= 0.02 or snow_f >= 0.25:
+        cold_score += 0.85
 
     if hot_score >= 3.2 and cold_score < 2.2:
         return "hot"
@@ -565,7 +813,11 @@ def fetch_open_meteo_hourly(
                 "relative_humidity_2m",
                 "wind_speed_10m",
                 "wind_gusts_10m",
+                "wind_direction_10m",
                 "shortwave_radiation",
+                "snowfall",
+                "snow_depth",
+                "weather_code",
             ]
         ),
         "start_date": dstr,
@@ -642,6 +894,26 @@ def fetch_open_meteo_hourly(
     if sw_arr and best_i < len(sw_arr) and sw_arr[best_i] is not None:
         sw = float(sw_arr[best_i])
 
+    snow_fall = max(0.0, _arr("snowfall", 0.0))
+    snow_dep = max(0.0, _arr("snow_depth", 0.0))
+    wc_raw = None
+    wc_arr = hourly.get("weather_code")
+    if wc_arr and best_i < len(wc_arr) and wc_arr[best_i] is not None:
+        try:
+            wc_raw = int(round(float(wc_arr[best_i])))
+        except (TypeError, ValueError):
+            wc_raw = None
+
+    wd_snap: Optional[float] = None
+    wd_arr = hourly.get("wind_direction_10m")
+    if wd_arr and best_i < len(wd_arr) and wd_arr[best_i] is not None:
+        try:
+            vwd = float(wd_arr[best_i])
+            if math.isfinite(vwd):
+                wd_snap = vwd % 360.0
+        except (TypeError, ValueError):
+            wd_snap = None
+
     return WeatherSnapshot(
         temperature_c=_arr("temperature_2m", 20.0),
         apparent_temperature_c=app_t,
@@ -649,9 +921,13 @@ def fetch_open_meteo_hourly(
         precipitation_probability=pr_prob,
         wind_speed_ms=wind_ms,
         wind_gusts_ms=gust,
+        wind_direction_deg=wd_snap,
         cloud_cover_pct=_clamp(_arr("cloud_cover", 50.0), 0.0, 100.0),
         humidity_pct=_clamp(_arr("relative_humidity_2m", 60.0), 0.0, 100.0),
         shortwave_radiation_wm2=sw,
+        snowfall_cm_h=snow_fall,
+        snow_depth_m=snow_dep,
+        weather_code=wc_raw,
     )
 
 
@@ -710,4 +986,5 @@ def resolve_weather_for_route(
         enabled=enabled,
         thermal_scales=thermal_scales,
         settings=settings,
+        reference_iso=when,
     )

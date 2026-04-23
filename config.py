@@ -516,6 +516,14 @@ class Settings:
 
     heat_wind_open_penalty_gain: float = _env("HEAT_WIND_OPEN_GAIN", 0.34, float)
     heat_wind_open_gust_gain: float = _env("HEAT_WIND_OPEN_GUST_EXTRA", 0.24, float)
+    # Ветер с направлением (метео ° — откуда дует): вдоль улицы / поперёк и экран зданий.
+    heat_wind_along_open_amp: float = _env("HEAT_WIND_ALONG_OPEN_AMP", 0.28, float)
+    heat_wind_cross_build_amp: float = _env("HEAT_WIND_CROSS_BUILD_AMP", 0.35, float)
+    heat_wind_along_build_damp: float = _env("HEAT_WIND_ALONG_BUILD_DAMP", 0.24, float)
+    stress_wind_along_open_amp: float = _env("STRESS_WIND_ALONG_OPEN_AMP", 0.32, float)
+    stress_wind_cross_shelter_amp: float = _env(
+        "STRESS_WIND_CROSS_SHELTER_AMP", 0.40, float
+    )
 
     heat_edge_factor_min: float = _env("HEAT_EDGE_FACTOR_MIN", 0.65, float)
     heat_edge_factor_max: float = _env("HEAT_EDGE_FACTOR_MAX", 1.75, float)
@@ -546,6 +554,114 @@ class Settings:
     )
     weather_phys_wet_penalty_tier2_coef: float = _env(
         "WEATHER_PHYS_WET_PENALTY_TIER2_COEF", 0.12, float
+    )
+
+    # --- Сезон маршрутизации (зелень / тень / снег): календарь и коэффициенты ---
+    season_green_ramp_start_day: int = int(
+        max(1, round(_env("SEASON_GREEN_RAMP_START_DAY", 10.0, float)))
+    )
+    season_green_ramp_end_day: int = int(
+        max(1, round(_env("SEASON_GREEN_RAMP_END_DAY", 20.0, float)))
+    )
+    season_early_spring_end_day: int = int(
+        max(1, round(_env("SEASON_EARLY_SPRING_END_DAY", 9.0, float)))
+    )
+    season_green_ramp_start_mult: float = _env(
+        "SEASON_GREEN_RAMP_START_MULT", 0.18, float
+    )
+    season_green_ramp_end_mult: float = _env("SEASON_GREEN_RAMP_END_MULT", 1.0, float)
+    season_green_mult_winter: float = _env("SEASON_GREEN_MULT_WINTER", 0.08, float)
+    season_green_mult_early_spring: float = _env(
+        "SEASON_GREEN_MULT_EARLY_SPRING", 0.18, float
+    )
+    season_green_mult_green: float = _env("SEASON_GREEN_MULT_GREEN", 1.0, float)
+    season_green_mult_late_autumn: float = _env(
+        "SEASON_GREEN_MULT_LATE_AUTUMN", 0.42, float
+    )
+    season_tree_heat_mult_winter: float = _env(
+        "SEASON_TREE_HEAT_MULT_WINTER", 0.12, float
+    )
+    season_tree_heat_mult_early_spring: float = _env(
+        "SEASON_TREE_HEAT_MULT_EARLY_SPRING", 0.28, float
+    )
+    season_tree_heat_mult_spring_ramp: float = _env(
+        "SEASON_TREE_HEAT_MULT_SPRING_RAMP", 0.55, float
+    )
+    season_tree_heat_mult_green: float = _env(
+        "SEASON_TREE_HEAT_MULT_GREEN", 1.0, float
+    )
+    season_tree_heat_mult_late_autumn: float = _env(
+        "SEASON_TREE_HEAT_MULT_LATE_AUTUMN", 0.45, float
+    )
+    snow_spring_ramp_strength: float = _env("SNOW_SPRING_RAMP_STRENGTH", 0.88, float)
+    snow_default_strength: float = _env("SNOW_DEFAULT_STRENGTH", 0.9, float)
+    snow_green_season_strength_floor: float = _env(
+        "SNOW_GREEN_SEASON_STRENGTH_FLOOR", 0.06, float
+    )
+    snow_green_season_depth_on_m: float = _env(
+        "SNOW_GREEN_SEASON_DEPTH_ON_M", 0.02, float
+    )
+    snow_green_season_fresh_on_cm_h: float = _env(
+        "SNOW_GREEN_SEASON_FRESH_ON_CM_H", 0.25, float
+    )
+    snow_depth_tier0_max_m: float = _env("SNOW_DEPTH_TIER0_MAX_M", 0.02, float)
+    snow_depth_tier1_max_m: float = _env("SNOW_DEPTH_TIER1_MAX_M", 0.05, float)
+    snow_depth_tier2_max_m: float = _env("SNOW_DEPTH_TIER2_MAX_M", 0.10, float)
+    snow_depth_mult_tier0: float = _env("SNOW_DEPTH_MULT_TIER0", 1.0, float)
+    snow_depth_mult_tier1: float = _env("SNOW_DEPTH_MULT_TIER1", 1.06, float)
+    snow_depth_mult_tier2: float = _env("SNOW_DEPTH_MULT_TIER2", 1.14, float)
+    snow_depth_mult_tier3: float = _env("SNOW_DEPTH_MULT_TIER3", 1.28, float)
+    snow_fresh_tier0_max_cm_h: float = _env("SNOW_FRESH_TIER0_MAX_CM_H", 0.2, float)
+    snow_fresh_tier1_max_cm_h: float = _env("SNOW_FRESH_TIER1_MAX_CM_H", 1.0, float)
+    snow_fresh_tier2_max_cm_h: float = _env("SNOW_FRESH_TIER2_MAX_CM_H", 3.0, float)
+    snow_fresh_mult_tier0: float = _env("SNOW_FRESH_MULT_TIER0", 1.0, float)
+    snow_fresh_mult_tier1: float = _env("SNOW_FRESH_MULT_TIER1", 1.04, float)
+    snow_fresh_mult_tier2: float = _env("SNOW_FRESH_MULT_TIER2", 1.12, float)
+    snow_fresh_mult_tier3: float = _env("SNOW_FRESH_MULT_TIER3", 1.22, float)
+    snow_depth_norm_ref_m: float = _env("SNOW_DEPTH_NORM_REF_M", 0.25, float)
+    snow_fresh_norm_ref_cm_h: float = _env("SNOW_FRESH_NORM_REF_CM_H", 4.0, float)
+    snow_stress_global_add_winter: float = _env(
+        "SNOW_STRESS_GLOBAL_ADD_WINTER", 0.035, float
+    )
+    snow_stress_phys_coupling: float = _env("SNOW_STRESS_PHYS_COUPLING", 0.45, float)
+    winter_heat_open_scale_winter: float = _env(
+        "WINTER_HEAT_OPEN_SCALE_WINTER", 1.18, float
+    )
+    winter_heat_open_scale_transition: float = _env(
+        "WINTER_HEAT_OPEN_SCALE_TRANSITION", 1.08, float
+    )
+    winter_heat_wind_scale_winter: float = _env(
+        "WINTER_HEAT_WIND_SCALE_WINTER", 1.22, float
+    )
+    winter_heat_wind_scale_transition: float = _env(
+        "WINTER_HEAT_WIND_SCALE_TRANSITION", 1.12, float
+    )
+    winter_heat_tree_damp_snow_depth: float = _env(
+        "WINTER_HEAT_TREE_DAMP_SNOW_DEPTH", 0.38, float
+    )
+    winter_heat_tree_damp_snow_fresh: float = _env(
+        "WINTER_HEAT_TREE_DAMP_SNOW_FRESH", 0.22, float
+    )
+    weather_stress_edge_snow_open: float = _env(
+        "WEATHER_STRESS_EDGE_SNOW_OPEN", 0.18, float
+    )
+    weather_stress_edge_snow_surface: float = _env(
+        "WEATHER_STRESS_EDGE_SNOW_SURFACE", 0.22, float
+    )
+    weather_stress_edge_snow_stairs: float = _env(
+        "WEATHER_STRESS_EDGE_SNOW_STAIRS", 0.16, float
+    )
+    snow_surface_tier0_amp: float = _env("SNOW_SURFACE_TIER0_AMP", 0.012, float)
+    snow_surface_tier1_amp: float = _env("SNOW_SURFACE_TIER1_AMP", 0.055, float)
+    snow_surface_tier2_amp: float = _env("SNOW_SURFACE_TIER2_AMP", 0.14, float)
+    snow_stairs_ped_base: float = _env("SNOW_STAIRS_PED_BASE", 1.08, float)
+    snow_stairs_ped_frozen_boost: float = _env("SNOW_STAIRS_PED_FROZEN_BOOST", 1.12, float)
+    snow_stairs_cyclist_base: float = _env("SNOW_STAIRS_CYCLIST_BASE", 1.18, float)
+    snow_stairs_cyclist_frozen_boost: float = _env(
+        "SNOW_STAIRS_CYCLIST_FROZEN_BOOST", 1.22, float
+    )
+    snow_phys_cyclist_mult_boost: float = _env(
+        "SNOW_PHYS_CYCLIST_MULT_BOOST", 0.12, float
     )
 
     # --- Кэш ---
@@ -813,6 +929,13 @@ def routing_engine_cache_fingerprint() -> str:
         "heat_rain_ref_max": _env("HEAT_RAIN_REF_MAX", 3.0, float),
         "heat_wind_ref_max": _env("HEAT_WIND_REF_MAX", 12.0, float),
         "heat_gust_delta_ref_max": _env("HEAT_GUST_DELTA_REF_MAX", 10.0, float),
+        "heat_wind_along_open_amp": _env("HEAT_WIND_ALONG_OPEN_AMP", 0.28, float),
+        "heat_wind_cross_build_amp": _env("HEAT_WIND_CROSS_BUILD_AMP", 0.35, float),
+        "heat_wind_along_build_damp": _env("HEAT_WIND_ALONG_BUILD_DAMP", 0.24, float),
+        "stress_wind_along_open_amp": _env("STRESS_WIND_ALONG_OPEN_AMP", 0.32, float),
+        "stress_wind_cross_shelter_amp": _env(
+            "STRESS_WIND_CROSS_SHELTER_AMP", 0.40, float
+        ),
         "heat_edge_factor_min": _env("HEAT_EDGE_FACTOR_MIN", 0.65, float),
         "heat_edge_factor_max": _env("HEAT_EDGE_FACTOR_MAX", 1.75, float),
         "heat_edge_k_open": _env("HEAT_EDGE_K_OPEN", 0.66, float),
@@ -837,6 +960,10 @@ def routing_engine_cache_fingerprint() -> str:
         "heat_temp_cool_range": _env("HEAT_TEMP_COOL_RANGE", 10.0, float),
         "heat_tree_shade_cold_damp": _env("HEAT_TREE_SHADE_COLD_DAMP", 0.58, float),
         "weather_stress_global_blend": _env("WEATHER_STRESS_GLOBAL_BLEND", 0.38, float),
+        "season_green_mult_winter": _env("SEASON_GREEN_MULT_WINTER", 0.08, float),
+        "season_green_ramp_end_day": _env("SEASON_GREEN_RAMP_END_DAY", 20.0, float),
+        "snow_depth_mult_tier3": _env("SNOW_DEPTH_MULT_TIER3", 1.28, float),
+        "snow_fresh_mult_tier3": _env("SNOW_FRESH_MULT_TIER3", 1.22, float),
         "heat_stress_model_version": HEAT_STRESS_MODEL_VERSION,
         "osm_highway_filter": OSM_HIGHWAY_FILTER,
         "preference_profiles": pref_profiles,

@@ -108,8 +108,26 @@ class AlternativesRequest(BaseModel):
     temperature_c: Optional[float] = Field(default=None, description="Ручая погода °C")
     precipitation_mm: Optional[float] = Field(default=None, description="Осадки мм/ч (ручной режим)")
     wind_speed_ms: Optional[float] = Field(default=None, description="Ветер м/с")
+    wind_direction_deg: Optional[float] = Field(
+        default=None,
+        description="Направление ветра ° (метео: откуда дует), для manual/fixed-snapshot",
+    )
     cloud_cover_pct: Optional[float] = Field(default=None, description="Облачность %")
     humidity_pct: Optional[float] = Field(default=None, description="Влажность %")
+    wind_gusts_ms: Optional[float] = Field(default=None, description="Порывы ветра м/с")
+    shortwave_radiation_wm2: Optional[float] = Field(
+        default=None, description="КВ радиация Вт/м² (ручной снимок)"
+    )
+    snowfall_cm_h: Optional[float] = Field(
+        default=None, description="Снегопад см/ч (ручной снимок)"
+    )
+    snow_depth_m: Optional[float] = Field(
+        default=None,
+        description="Глубина снега м (модельная; ручной снимок)",
+    )
+    weather_code: Optional[int] = Field(
+        default=None, description="Код погоды WMO (Open-Meteo), опционально"
+    )
 
 
 class AlternativesStartRequest(BaseModel):
@@ -140,6 +158,12 @@ class AlternativesStartRequest(BaseModel):
     wind_speed_ms: Optional[float] = None
     cloud_cover_pct: Optional[float] = None
     humidity_pct: Optional[float] = None
+    wind_gusts_ms: Optional[float] = None
+    wind_direction_deg: Optional[float] = None
+    shortwave_radiation_wm2: Optional[float] = None
+    snowfall_cm_h: Optional[float] = None
+    snow_depth_m: Optional[float] = None
+    weather_code: Optional[int] = None
 
 
 class AlternativesStartResponse(BaseModel):
@@ -295,9 +319,16 @@ class WeatherSnapshotValues(BaseModel):
     precipitation_probability: Optional[float] = None
     wind_speed_ms: float = 3.0
     wind_gusts_ms: Optional[float] = None
+    wind_direction_deg: Optional[float] = Field(
+        default=None,
+        description="Направление ветра ° по Open-Meteo: откуда дует (0° — север), не куда",
+    )
     cloud_cover_pct: float = 50.0
     humidity_pct: float = 60.0
     shortwave_radiation_wm2: Optional[float] = None
+    snowfall_cm_h: float = 0.0
+    snow_depth_m: float = 0.0
+    weather_code: Optional[int] = None
 
 
 class WeatherRouteContext(BaseModel):
@@ -330,6 +361,33 @@ class WeatherRouteContext(BaseModel):
     heat_microclimate: Dict[str, float] = Field(
         default_factory=dict,
         description="Коэффициенты и нормированные сигналы (tree_shade_bonus, temp_norm, …)",
+    )
+    routing_season: str = Field(
+        default="",
+        description="winter | early_spring | spring_ramp | green_season | late_autumn",
+    )
+    season_green_route_mult: float = Field(
+        default=1.0,
+        description="Множитель зелёного бонуса к физике по календарю",
+    )
+    season_tree_heat_route_mult: float = Field(
+        default=1.0,
+        description="Множитель роли тени деревьев в heat (до весов winter_heat_*)",
+    )
+    snow_model_strength: float = Field(
+        default=0.0,
+        description="Сила зимней snow-модели 0..1",
+    )
+    snow_export_phys_amp: float = Field(default=1.0, description="Глобальный множитель физики от снега")
+    snow_export_stress_amp: float = Field(
+        default=1.0, description="Глобальный множитель stress от снега"
+    )
+    snow_export_surface_amp: float = Field(
+        default=1.0, description="Показатель усиления покрытия зимой (экспорт)"
+    )
+    wind_direction_available: bool = Field(
+        default=False,
+        description="True если для рёбер использовалась модель ветра с направлением",
     )
 
 
@@ -398,6 +456,48 @@ class HeatStressMetrics(BaseModel):
         ge=0.0,
         le=1.0,
         description="Среднее wet_surface_edge_slip_factor по длине (мокрое плохое покрытие)",
+    )
+    route_winter_harsh_surface_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Доля «тяжёлого» зимнего покрытия и лестниц по длине (прокси)",
+    )
+    route_wind_direction_aware: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="1.0 если ниже учтено направление ветра (direction-aware)",
+    )
+    route_mean_wind_to_street_angle_deg: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=90.0,
+        description="Средняя по длине мин. угол оси улицы к потоку ветра, °",
+    )
+    route_mean_heat_directional_wind_exp: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Средняя direction-aware ветровая экспозиция (heat)",
+    )
+    route_mean_heat_building_wind_factor: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description="Средний множитель экрана зданий для heat при данном ветре",
+    )
+    route_frac_wind_along_open_hostile: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Доля длины: ветер вдоль + открыто + заметная сила ветра",
+    )
+    route_frac_wind_cross_building_screen: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Доля длины: ветер поперёк + тень зданий + ветер",
     )
     avg_stress_lts: float = Field(default=0.0, description="Средний уровень стресса (1–4)")
     max_stress_lts: float = Field(default=0.0, description="Максимальный стресс на сегменте")
@@ -558,6 +658,12 @@ class RouteResponse(BaseModel):
         ge=0.0,
         le=1.0,
         description="Средний индекс плохого мокрого покрытия по длине",
+    )
+    route_winter_harsh_surface_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Прокси доли тяжёлого зимнего покрытия и лестниц",
     )
     vegetation_shade_share: float = Field(default=0.0, ge=0.0, le=1.0)
     stressful_intersections_count: int = Field(default=0)

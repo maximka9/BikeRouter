@@ -31,6 +31,53 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+def _wind_flow_bearing_deg(wind_from_deg: float) -> float:
+    """Направление потока воздуха (°): метео «откуда» → куда дует ветер."""
+    return (float(wind_from_deg) + 180.0) % 360.0
+
+
+def edge_wind_along_cross_01(
+    edge_data: dict, wind_from_deg: float
+) -> Tuple[float, float, float]:
+    """Доля «вдоль ветра» / «поперёк» по оси улицы и мин. угол оси к потоку [0..90]."""
+    brg = float(edge_data.get("edge_bearing_deg") or 0.0) % 360.0
+    flow = _wind_flow_bearing_deg(wind_from_deg)
+    delta = min(
+        angle_diff_deg(brg, flow),
+        angle_diff_deg((brg + 180.0) % 360.0, flow),
+    )
+    dr = math.radians(delta)
+    c = math.cos(dr)
+    s = math.sin(dr)
+    return c * c, s * s, float(delta)
+
+
+def _wind_dir_edge_pack(
+    edge_data: dict, weather: WeatherWeightParams
+) -> Optional[Tuple[float, float, float, float, float]]:
+    """Если direction-aware активен: along01, cross01, delta_deg, wind_act_heat, wind_comb_stress."""
+    if not weather.enabled:
+        return None
+    if not bool(getattr(weather, "wind_direction_available", False)):
+        return None
+    wd = getattr(weather, "wind_direction_deg", None)
+    if wd is None:
+        return None
+    try:
+        wdf = float(wd)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(wdf):
+        return None
+    along01, cross01, delta_deg = edge_wind_along_cross_01(edge_data, wdf)
+    sig = getattr(weather, "normalized_signals", None) or {}
+    wn = _clamp01(float(sig.get("wind_norm", 0.0)))
+    gn = _clamp01(float(sig.get("gust_norm", 0.0)))
+    wind_act_heat = max(wn, gn * 0.75)
+    wind_comb_stress = max(wn, gn * 0.85)
+    return (along01, cross01, delta_deg, wind_act_heat, wind_comb_stress)
+
+
 def _surface_wet_route_tier(surface_effective: Any) -> int:
     """0 — хорошие покрытия; 1 — умеренные; 2 — плохие/скользкие при дожде."""
     s = str(surface_effective or "unknown").strip().lower()
@@ -41,6 +88,76 @@ def _surface_wet_route_tier(surface_effective: Any) -> int:
     if s in ("compacted", "fine_gravel"):
         return 1
     return 2
+
+
+def _edge_winter_harsh_surface_indicator(edge_data: dict) -> float:
+    """0..1: лестницы и «тяжёлые» покрытия для зимней модели (объясняемые метрики)."""
+    hw = str(edge_data.get("highway") or "").strip().lower()
+    if hw == "steps":
+        return 1.0
+    tier = _surface_wet_route_tier(edge_data.get("surface_effective"))
+    if tier >= 2:
+        return 1.0
+    s = str(edge_data.get("surface_effective") or "unknown").strip().lower()
+    if s in (
+        "path",
+        "track",
+        "grass",
+        "gravel",
+        "dirt",
+        "ground",
+        "earth",
+        "mud",
+        "sand",
+        "wood",
+        "unpaved",
+    ) or s.startswith("ground"):
+        return 0.95
+    if tier == 1:
+        return 0.55
+    return 0.12
+
+
+def snow_surface_route_penalty(surface_effective: Any, weather: WeatherWeightParams) -> float:
+    """Снег × покрытие: плохие покрытия и неасфальт сильнее, чем асфальт."""
+    if not weather.enabled:
+        return 1.0
+    ss = float(getattr(weather, "snow_model_strength", 0.0))
+    if ss <= 1e-9:
+        return 1.0
+    tier = _surface_wet_route_tier(surface_effective)
+    t0 = float(getattr(weather, "snow_surface_tier0_amp", 0.012))
+    t1 = float(getattr(weather, "snow_surface_tier1_amp", 0.055))
+    t2 = float(getattr(weather, "snow_surface_tier2_amp", 0.14))
+    amp = (t0, t1, t2)[min(max(tier, 0), 2)]
+    snd = float(getattr(weather, "snow_depth_norm", 0.0))
+    snf = float(getattr(weather, "snow_fresh_norm", 0.0))
+    sn = max(snd, snf * 0.9)
+    tier_w = 1.0 if tier == 0 else 1.65 if tier == 1 else 2.35
+    extra = ss * sn * amp * 12.0 * tier_w
+    return max(1.0, min(1.42, 1.0 + extra))
+
+
+def snow_stairs_phys_mult(weather: WeatherWeightParams, profile_key: str) -> float:
+    """Дополнительный множитель физики для highway=steps при снеге."""
+    ss = float(getattr(weather, "snow_model_strength", 0.0))
+    if ss <= 1e-9:
+        return 1.0
+    T = float(getattr(weather, "reference_temperature_c", 20.0))
+    near_freeze = max(0.0, min(1.0, (2.0 - T) / 2.5)) if T <= 2.0 else 0.0
+    snd = float(getattr(weather, "snow_depth_norm", 0.0))
+    snf = float(getattr(weather, "snow_fresh_norm", 0.0))
+    sn = max(snd, snf * 0.85)
+    if profile_key == "cyclist":
+        base = float(getattr(weather, "snow_stairs_cyclist_base", 1.18))
+        frz = float(getattr(weather, "snow_stairs_cyclist_frozen_boost", 1.22))
+    else:
+        base = float(getattr(weather, "snow_stairs_ped_base", 1.08))
+        frz = float(getattr(weather, "snow_stairs_ped_frozen_boost", 1.12))
+    m = 1.0 + ss * sn * (base - 1.0)
+    if snf > 0.08 and T <= 0.5:
+        m *= 1.0 + ss * near_freeze * (frz - 1.0)
+    return max(1.0, min(1.55, m))
 
 
 def wet_surface_route_penalty(surface_effective: Any, weather: WeatherWeightParams) -> float:
@@ -100,7 +217,19 @@ def weather_edge_stress_factor(
     w1 = float(getattr(weather, "heat_wind_exp_w1", 0.45))
     w2 = float(getattr(weather, "heat_wind_exp_w2", 0.35))
     w3 = float(getattr(weather, "heat_wind_exp_w3", 0.35))
-    wind_exp = _clamp01(w1 * O + w2 * (1.0 - B) + w3 * (1.0 - C))
+    wind_exp_base = _clamp01(w1 * O + w2 * (1.0 - B) + w3 * (1.0 - C))
+    pack = _wind_dir_edge_pack(edge_data, weather)
+    shelter_mult = 1.0
+    if pack is not None:
+        along01, cross01, _delta, _wah, _wcs = pack
+        sa = float(getattr(weather, "stress_wind_along_open_amp", 0.32))
+        wind_exp = _clamp01(
+            wind_exp_base * (1.0 + sa * along01 * wind_comb)
+        )
+        sc = float(getattr(weather, "stress_wind_cross_shelter_amp", 0.40))
+        shelter_mult = 1.0 + sc * cross01 * wind_comb
+    else:
+        wind_exp = wind_exp_base
 
     slip = wet_surface_edge_slip_factor(edge_data.get("surface_effective"))
     lts = float(edge_data.get("stress_lts", 1.5) or 1.5)
@@ -122,8 +251,28 @@ def weather_edge_stress_factor(
     wet_bad = rn * slip * kr
     wind_bad = wind_comb * wind_exp * kw
     lts_bad = lts_excess * (1.0 + fast * 0.95) * (0.05 + rn * 0.2) * kl
-    shelter = B * wind_comb * ks
-    raw = 1.0 + rs * (wet_bad + wind_bad + lts_bad - shelter)
+    shelter = B * wind_comb * ks * shelter_mult
+    snow_bad = 0.0
+    ss = float(getattr(weather, "snow_model_strength", 0.0))
+    if ss > 1e-9:
+        ksurf = float(getattr(weather, "stress_edge_snow_surface", 0.22))
+        kopen = float(getattr(weather, "stress_edge_snow_open", 0.18))
+        kstairs = float(getattr(weather, "stress_edge_snow_stairs", 0.16))
+        snd = float(sig.get("snow_depth_norm", 0.0))
+        snf = float(sig.get("snow_fresh_norm", 0.0))
+        sn = max(snd, snf * 0.88)
+        tier = _surface_wet_route_tier(edge_data.get("surface_effective"))
+        surf_w = 0.35 if tier == 0 else 0.78 if tier == 1 else 1.0
+        hw = str(edge_data.get("highway") or "").strip().lower()
+        stair_e = 1.0 if hw == "steps" else 0.0
+        snow_bad = (
+            ksurf * sn * ss * surf_w * wet_surface_edge_slip_factor(
+                edge_data.get("surface_effective")
+            )
+            + kopen * sn * ss * O * wind_comb
+            + kstairs * sn * ss * stair_e
+        )
+    raw = 1.0 + rs * (wet_bad + wind_bad + lts_bad - shelter + snow_bad)
     lo = float(getattr(weather, "stress_edge_factor_min", 0.82))
     hi = float(getattr(weather, "stress_edge_factor_max", 1.48))
     return max(lo, min(hi, raw))
@@ -146,7 +295,21 @@ def continuous_heat_edge_weather_factor(
     w1 = float(getattr(weather, "heat_wind_exp_w1", 0.45))
     w2 = float(getattr(weather, "heat_wind_exp_w2", 0.35))
     w3 = float(getattr(weather, "heat_wind_exp_w3", 0.35))
-    wind_exp = _clamp01(w1 * O + w2 * (1.0 - B) + w3 * (1.0 - C))
+    wind_exp_base = _clamp01(w1 * O + w2 * (1.0 - B) + w3 * (1.0 - C))
+    pack = _wind_dir_edge_pack(edge_data, weather)
+    b_build = 1.0
+    if pack is not None:
+        along01, cross01, _delta, wind_act, _wcs = pack
+        ha = float(getattr(weather, "heat_wind_along_open_amp", 0.28))
+        wind_exp = _clamp01(
+            wind_exp_base * (1.0 + ha * along01 * wind_act * O)
+        )
+        hc = float(getattr(weather, "heat_wind_cross_build_amp", 0.35))
+        hd = float(getattr(weather, "heat_wind_along_build_damp", 0.24))
+        b_build = 1.0 + hc * cross01 * wind_act - hd * along01 * wind_act
+        b_build = max(0.45, min(1.55, b_build))
+    else:
+        wind_exp = wind_exp_base
 
     k1 = float(getattr(weather, "heat_edge_k_open", 0.66))
     k2 = float(getattr(weather, "heat_edge_k_tree", 0.54))
@@ -181,15 +344,19 @@ def continuous_heat_edge_weather_factor(
     wet_scale = float(getattr(weather, "heat_wet_surface_edge_bad_max", 0.85))
     wet_eff = _clamp01(wet * wet_scale)
 
+    wt = float(getattr(weather, "winter_heat_tree_scale", 1.0))
+    wo = float(getattr(weather, "winter_heat_open_scale", 1.0))
+    wwind = float(getattr(weather, "winter_heat_wind_scale", 1.0))
+
     raw = (
         1.0
-        + rs * k1_eff * osp * O
-        - rs * k2 * tsb * V
-        - rs * k3_eff * bsb * B
+        + rs * k1_eff * osp * O * wo
+        - rs * k2 * tsb * V * wt
+        - rs * k3_eff * bsb * B * b_build
         - rs * k4 * cbn * C
         + rs * k5 * wsp * wet_eff
-        + rs * k6_eff * wop * wind_exp
-        + rs * syn * O * wet_eff * wind_exp
+        + rs * k6_eff * wop * wind_exp * wwind
+        + rs * syn * O * wet_eff * wind_exp * max(1.0, (wo + wwind) * 0.5)
     )
     lo = float(getattr(weather, "heat_edge_factor_min", 0.65))
     hi = float(getattr(weather, "heat_edge_factor_max", 1.75))
@@ -221,10 +388,12 @@ def effective_edge_components(
     gcc = float(weather.green_coupling)
     g_edge = min(1.0, max(0.0, float(edge_data.get("trees_pct") or 0) / 100.0))
     # Озеленение как поправка к физике: при прохладе не раздувать «зелёный рычаг» для тепла.
-    g_coupling = gcc
+    g_coupling = gcc * float(getattr(weather, "season_green_route_mult", 1.0))
     if wm.heat < 1.0:
         g_coupling *= max(0.25, float(wm.heat))
-    surf_edge = wet_surface_route_penalty(edge_data.get("surface_effective"), weather)
+    surf_edge = wet_surface_route_penalty(
+        edge_data.get("surface_effective"), weather
+    ) * snow_surface_route_penalty(edge_data.get("surface_effective"), weather)
     phys_eff = (
         phys
         * wm.physical
@@ -232,6 +401,15 @@ def effective_edge_components(
         * surf_edge
         * (1.0 + max(0.0, wm.green - 1.0) * g_edge * g_coupling)
     )
+    ss = float(getattr(weather, "snow_model_strength", 0.0))
+    if ss > 1e-9 and profile_key == "cyclist":
+        cboost = float(getattr(weather, "snow_phys_cyclist_mult_boost", 0.12))
+        snd = float(getattr(weather, "snow_depth_norm", 0.0))
+        snf = float(getattr(weather, "snow_fresh_norm", 0.0))
+        phys_eff *= 1.0 + cboost * ss * max(snd, snf)
+    hw = str(edge_data.get("highway") or "").strip().lower()
+    if hw == "steps":
+        phys_eff *= snow_stairs_phys_mult(weather, profile_key)
     # Прокси геометрии улицы (тепловая модель графа): открытость, тень зданий, тень растений.
     O = float(edge_data.get("thermal_open_sky_share") or 0.5) or 0.5
     O = max(0.0, min(1.0, O))
@@ -278,7 +456,9 @@ def effective_edge_components(
         heat_eff = h * hm * wm.heat
     se_st = weather_edge_stress_factor(edge_data, weather)
     blend = float(getattr(weather, "weather_stress_global_blend", 0.38))
-    stress_global = 1.0 + blend * (float(wm.stress) - 1.0)
+    stress_global = 1.0 + blend * (float(wm.stress) - 1.0) + float(
+        getattr(weather, "snow_stress_global_add", 0.0)
+    )
     st_eff = st * stress_global * se_st
     return phys_eff, heat_eff, st_eff
 
@@ -1073,12 +1253,14 @@ class RouteService:
                 "route_building_shade_share": 0.0,
                 "route_covered_share": 0.0,
                 "route_bad_wet_surface_share": 0.0,
+                "route_winter_harsh_surface_share": 0.0,
             }
         tlen = 0.0
         so = 0.0
         sb = 0.0
         sc = 0.0
         sw = 0.0
+        sw_h = 0.0
         for i in range(route.edge_count):
             d = G.edges[route.edges[i]]
             ln = float(d.get("length", 0.0) or 0.0)
@@ -1089,18 +1271,92 @@ class RouteService:
             sb += ln * float(d.get("thermal_building_shade_share", 0.0) or 0.0)
             sc += ln * float(d.get("thermal_covered_share", 0.0) or 0.0)
             sw += ln * wet_surface_edge_slip_factor(d.get("surface_effective"))
+            sw_h += ln * _edge_winter_harsh_surface_indicator(d)
         if tlen <= 0:
             return {
                 "route_open_sky_share": 0.0,
                 "route_building_shade_share": 0.0,
                 "route_covered_share": 0.0,
                 "route_bad_wet_surface_share": 0.0,
+                "route_winter_harsh_surface_share": 0.0,
             }
         return {
             "route_open_sky_share": float(so / tlen),
             "route_building_shade_share": float(sb / tlen),
             "route_covered_share": float(sc / tlen),
             "route_bad_wet_surface_share": float(sw / tlen),
+            "route_winter_harsh_surface_share": float(sw_h / tlen),
+        }
+
+    @staticmethod
+    def route_wind_direction_metrics(
+        G: nx.MultiDiGraph,
+        route: Optional["RouteResult"],
+        weather: Optional[WeatherWeightParams],
+    ) -> Dict[str, float]:
+        """Средние по длине и доли «опасного» ветра, если активен direction-aware режим."""
+        z = {
+            "route_wind_direction_aware": 0.0,
+            "route_mean_wind_to_street_angle_deg": 0.0,
+            "route_mean_heat_directional_wind_exp": 0.0,
+            "route_mean_heat_building_wind_factor": 0.0,
+            "route_frac_wind_along_open_hostile": 0.0,
+            "route_frac_wind_cross_building_screen": 0.0,
+        }
+        if (
+            route is None
+            or route.edge_count <= 0
+            or weather is None
+            or not weather.enabled
+        ):
+            return z
+        if not bool(getattr(weather, "wind_direction_available", False)):
+            return z
+        w1 = float(getattr(weather, "heat_wind_exp_w1", 0.45))
+        w2 = float(getattr(weather, "heat_wind_exp_w2", 0.35))
+        w3 = float(getattr(weather, "heat_wind_exp_w3", 0.35))
+        tlen = 0.0
+        s_ang = 0.0
+        s_wexp = 0.0
+        s_bb = 0.0
+        hostile = 0.0
+        screen = 0.0
+        for i in range(route.edge_count):
+            d = G.edges[route.edges[i]]
+            ln = float(d.get("length", 0.0) or 0.0)
+            if ln <= 0:
+                continue
+            O = _clamp01(float(d.get("thermal_open_sky_share") or 0.5) or 0.5)
+            B = _clamp01(float(d.get("thermal_building_shade_share") or 0.0) or 0.0)
+            C = _clamp01(float(d.get("thermal_covered_share") or 0.0) or 0.0)
+            w_base = _clamp01(w1 * O + w2 * (1.0 - B) + w3 * (1.0 - C))
+            pack = _wind_dir_edge_pack(d, weather)
+            if pack is None:
+                continue
+            along01, cross01, delta_deg, wind_act, _wcs = pack
+            ha = float(getattr(weather, "heat_wind_along_open_amp", 0.28))
+            w_exp = _clamp01(w_base * (1.0 + ha * along01 * wind_act * O))
+            hc = float(getattr(weather, "heat_wind_cross_build_amp", 0.35))
+            hd = float(getattr(weather, "heat_wind_along_build_damp", 0.24))
+            b_b = 1.0 + hc * cross01 * wind_act - hd * along01 * wind_act
+            b_b = max(0.45, min(1.55, b_b))
+            tlen += ln
+            s_ang += ln * float(delta_deg)
+            s_wexp += ln * float(w_exp)
+            s_bb += ln * float(b_b)
+            if along01 >= 0.52 and O >= 0.42 and wind_act >= 0.22:
+                hostile += ln
+            if cross01 >= 0.52 and B >= 0.14 and wind_act >= 0.22:
+                screen += ln
+        if tlen <= 0:
+            return z
+        return {
+            "route_wind_direction_aware": 1.0,
+            "route_mean_wind_to_street_angle_deg": float(s_ang / tlen),
+            "route_mean_heat_directional_wind_exp": float(s_wexp / tlen),
+            "route_mean_heat_building_wind_factor": float(s_bb / tlen),
+            "route_frac_wind_along_open_hostile": float(hostile / tlen),
+            "route_frac_wind_cross_building_screen": float(screen / tlen),
         }
 
     @staticmethod

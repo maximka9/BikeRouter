@@ -89,6 +89,13 @@ class SyntheticWeatherCase:
     cloud_cover_pct: float
     humidity_pct: float
     shortwave_radiation_wm2: float
+    # ISO для сезонного профиля (зима / апрель / лето); по умолчанию — летний synthetic.
+    weather_time_iso: str = SYNTHETIC_TEST_WEATHER_ISO
+    snowfall_cm_h: float = 0.0
+    snow_depth_m: float = 0.0
+    weather_code: Optional[int] = None
+    # Метео ° — откуда дует (Open-Meteo); None — без direction-aware ветра.
+    wind_direction_deg: Optional[float] = None
 
 
 def weather_windows_test_grid() -> List[SyntheticWeatherCase]:
@@ -118,6 +125,79 @@ def weather_windows_test_grid() -> List[SyntheticWeatherCase]:
                         )
                     )
     assert len(out) == 36
+    return out
+
+
+def weather_summer_test_grid_with_wind_dirs() -> List[SyntheticWeatherCase]:
+    """36 летних сценариев × 4 направления ветра (0/90/180/270°) = 144 кейса."""
+    base = weather_windows_test_grid()
+    dirs = (0.0, 90.0, 180.0, 270.0)
+    out: List[SyntheticWeatherCase] = []
+    for c in base:
+        for d in dirs:
+            out.append(
+                SyntheticWeatherCase(
+                    case_id=f"{c.case_id}_WD{int(d)}",
+                    temperature_c=c.temperature_c,
+                    precipitation_mm=c.precipitation_mm,
+                    wind_speed_ms=c.wind_speed_ms,
+                    wind_gusts_ms=c.wind_gusts_ms,
+                    cloud_cover_pct=c.cloud_cover_pct,
+                    humidity_pct=c.humidity_pct,
+                    shortwave_radiation_wm2=c.shortwave_radiation_wm2,
+                    weather_time_iso=c.weather_time_iso,
+                    snowfall_cm_h=c.snowfall_cm_h,
+                    snow_depth_m=c.snow_depth_m,
+                    weather_code=c.weather_code,
+                    wind_direction_deg=float(d),
+                )
+            )
+    assert len(out) == 144
+    return out
+
+
+# Зима: для сезонной модели и снега (UTC февраль).
+WINTER_SYNTH_WEATHER_ISO = "2000-02-15T12:00:00+00:00"
+# Ранняя весна: слабая зелень до середины апреля.
+EARLY_SPRING_SYNTH_WEATHER_ISO = "2000-04-05T12:00:00+00:00"
+
+
+def weather_winter_synthetic_grid() -> List[SyntheticWeatherCase]:
+    """4×3×4×2 = 96: температура × снегопад × глубина × ветер (контролируемые зимние кейсы)."""
+    temps = (-15.0, -5.0, 0.0, 2.0)
+    fresh_levels = (
+        (0.0, "F0"),
+        (0.45, "F1"),
+        (3.2, "F2"),
+    )
+    depths_m = (0.0, 0.03, 0.10, 0.22)
+    winds = ((2.0, 3.0, "W0"), (11.0, 15.0, "W1"))
+    out: List[SyntheticWeatherCase] = []
+    for T in temps:
+        for sf, ftag in fresh_levels:
+            for dm in depths_m:
+                for w_ms, g_ms, wtag in winds:
+                    tid = int(round(T))
+                    cid = f"winter_T{tid}_{ftag}_D{int(round(dm * 1000))}_{wtag}"
+                    hum = 72.0 if sf > 0.1 else 58.0
+                    sw = 120.0 if T < 0 else 280.0
+                    out.append(
+                        SyntheticWeatherCase(
+                            case_id=cid,
+                            temperature_c=T,
+                            precipitation_mm=0.0,
+                            wind_speed_ms=w_ms,
+                            wind_gusts_ms=g_ms,
+                            cloud_cover_pct=85.0 if sf > 0.2 else 55.0,
+                            humidity_pct=hum,
+                            shortwave_radiation_wm2=sw,
+                            weather_time_iso=WINTER_SYNTH_WEATHER_ISO,
+                            snowfall_cm_h=sf,
+                            snow_depth_m=dm,
+                            weather_code=73 if sf > 1.0 else (71 if sf > 0.1 else None),
+                        )
+                    )
+    assert len(out) == 96
     return out
 
 
@@ -160,12 +240,17 @@ def centroid_lat_lon_for_weather(poly: Any) -> Tuple[float, float]:
 
 
 def kwargs_fixed_snapshot_from_case(
-    case: SyntheticWeatherCase, *, weather_time_iso: str
+    case: SyntheticWeatherCase,
+    *,
+    weather_time_iso: Optional[str] = None,
 ) -> Dict[str, Any]:
+    wt = weather_time_iso or getattr(
+        case, "weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO
+    )
     return {
         "weather_mode": "fixed-snapshot",
         "use_live_weather": False,
-        "weather_time": weather_time_iso,
+        "weather_time": wt,
         "temperature_c": case.temperature_c,
         "precipitation_mm": case.precipitation_mm,
         "wind_speed_ms": case.wind_speed_ms,
@@ -173,6 +258,10 @@ def kwargs_fixed_snapshot_from_case(
         "humidity_pct": case.humidity_pct,
         "wind_gusts_ms": case.wind_gusts_ms,
         "shortwave_radiation_wm2": case.shortwave_radiation_wm2,
+        "snowfall_cm_h": float(getattr(case, "snowfall_cm_h", 0.0) or 0.0),
+        "snow_depth_m": float(getattr(case, "snow_depth_m", 0.0) or 0.0),
+        "weather_code": getattr(case, "weather_code", None),
+        "wind_direction_deg": getattr(case, "wind_direction_deg", None),
     }
 
 
@@ -211,6 +300,7 @@ def resolve_live_weather_once_for_polygon(
         cloud_cover_pct=None,
         humidity_pct=None,
         wind_gusts_ms=None,
+        wind_direction_deg=None,
         shortwave_radiation_wm2=None,
         thermal_scales=_thermal,
         settings=settings,
@@ -250,6 +340,9 @@ def meta_append_batch_weather_snapshot(
     )
     out.append(("snapshot_wind_speed_ms", getattr(snap, "wind_speed_ms", None)))
     out.append(("snapshot_wind_gusts_ms", getattr(snap, "wind_gusts_ms", None)))
+    out.append(
+        ("snapshot_wind_direction_deg", getattr(snap, "wind_direction_deg", None))
+    )
     out.append(("snapshot_cloud_cover_pct", getattr(snap, "cloud_cover_pct", None)))
     out.append(("snapshot_humidity_pct", getattr(snap, "humidity_pct", None)))
     out.append(
@@ -309,9 +402,21 @@ SUMMARY_NUM_KEYS = (
     "weather_precipitation_probability",
     "weather_wind_speed_ms",
     "weather_wind_gusts_ms",
+    "weather_wind_direction_deg",
+    "weather_wind_direction_aware",
     "weather_cloud_cover_pct",
     "weather_humidity_pct",
     "weather_shortwave_radiation_wm2",
+    "weather_snowfall_cm_h",
+    "weather_snow_depth_m",
+    "weather_weather_code",
+    "weather_routing_season",
+    "weather_season_green_mult",
+    "weather_season_tree_heat_mult",
+    "weather_snow_model_strength",
+    "weather_snow_export_phys_amp",
+    "weather_snow_export_stress_amp",
+    "weather_snow_export_surface_amp",
     "weather_heat_continuous",
     "heat_tree_shade_bonus",
     "heat_open_sky_penalty",
@@ -326,14 +431,27 @@ SUMMARY_NUM_KEYS = (
     "heat_norm_cloud",
     "heat_norm_humidity",
     "heat_norm_cold_like",
+    "heat_norm_snow_depth",
+    "heat_norm_snow_fresh",
     "route_open_sky_share",
     "route_building_shade_share",
     "route_covered_share",
     "route_bad_wet_surface_share",
+    "route_winter_harsh_surface_share",
+    "route_wind_direction_aware",
+    "route_mean_wind_to_street_angle_deg",
+    "route_mean_heat_directional_wind_exp",
+    "route_mean_heat_building_wind_factor",
+    "route_frac_wind_along_open_hostile",
+    "route_frac_wind_cross_building_screen",
+    "route_stairs_length_m",
+    "route_stairs_length_fraction",
+    "route_winter_open_stress_proxy",
     "weather_test_temperature_c",
     "weather_test_precipitation_mm",
     "weather_test_wind_speed_ms",
     "weather_test_wind_gusts_ms",
+    "weather_test_wind_direction_deg",
     "weather_test_cloud_cover_pct",
     "weather_test_humidity_pct",
     "weather_test_shortwave_radiation_wm2",
@@ -349,9 +467,21 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "weather_precipitation_probability": None,
         "weather_wind_speed_ms": None,
         "weather_wind_gusts_ms": None,
+        "weather_wind_direction_deg": None,
+        "weather_wind_direction_aware": None,
         "weather_cloud_cover_pct": None,
         "weather_humidity_pct": None,
         "weather_shortwave_radiation_wm2": None,
+        "weather_snowfall_cm_h": None,
+        "weather_snow_depth_m": None,
+        "weather_weather_code": None,
+        "weather_routing_season": None,
+        "weather_season_green_mult": None,
+        "weather_season_tree_heat_mult": None,
+        "weather_snow_model_strength": None,
+        "weather_snow_export_phys_amp": None,
+        "weather_snow_export_stress_amp": None,
+        "weather_snow_export_surface_amp": None,
         "weather_heat_continuous": None,
         "heat_tree_shade_bonus": None,
         "heat_open_sky_penalty": None,
@@ -366,6 +496,8 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "heat_norm_cloud": None,
         "heat_norm_humidity": None,
         "heat_norm_cold_like": None,
+        "heat_norm_snow_depth": None,
+        "heat_norm_snow_fresh": None,
     }
     w = getattr(r, "weather", None)
     if not w or not bool(getattr(w, "enabled", False)):
@@ -390,9 +522,37 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "weather_precipitation_probability": _f("precipitation_probability"),
         "weather_wind_speed_ms": _f("wind_speed_ms"),
         "weather_wind_gusts_ms": _f("wind_gusts_ms"),
+        "weather_wind_direction_deg": _f("wind_direction_deg"),
+        "weather_wind_direction_aware": bool(
+            getattr(w, "wind_direction_available", False)
+        ),
         "weather_cloud_cover_pct": _f("cloud_cover_pct"),
         "weather_humidity_pct": _f("humidity_pct"),
         "weather_shortwave_radiation_wm2": _f("shortwave_radiation_wm2"),
+        "weather_snowfall_cm_h": _f("snowfall_cm_h"),
+        "weather_snow_depth_m": _f("snow_depth_m"),
+        "weather_weather_code": int(getattr(s, "weather_code"))
+        if getattr(s, "weather_code", None) is not None
+        else None,
+        "weather_routing_season": str(getattr(w, "routing_season", "") or ""),
+        "weather_season_green_mult": float(
+            getattr(w, "season_green_route_mult", 1.0) or 1.0
+        ),
+        "weather_season_tree_heat_mult": float(
+            getattr(w, "season_tree_heat_route_mult", 1.0) or 1.0
+        ),
+        "weather_snow_model_strength": float(
+            getattr(w, "snow_model_strength", 0.0) or 0.0
+        ),
+        "weather_snow_export_phys_amp": float(
+            getattr(w, "snow_export_phys_amp", 1.0) or 1.0
+        ),
+        "weather_snow_export_stress_amp": float(
+            getattr(w, "snow_export_stress_amp", 1.0) or 1.0
+        ),
+        "weather_snow_export_surface_amp": float(
+            getattr(w, "snow_export_surface_amp", 1.0) or 1.0
+        ),
         "weather_heat_continuous": bool(getattr(w, "heat_continuous", False)),
         "heat_tree_shade_bonus": None,
         "heat_open_sky_penalty": None,
@@ -424,6 +584,8 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
             "norm_cloud_norm": "heat_norm_cloud",
             "norm_humidity_norm": "heat_norm_humidity",
             "norm_cold_like_norm": "heat_norm_cold_like",
+            "norm_snow_depth_norm": "heat_norm_snow_depth",
+            "norm_snow_fresh_norm": "heat_norm_snow_fresh",
         }
         for sk, dk in mapping.items():
             if sk in hm:
@@ -644,14 +806,88 @@ def route_to_raw_row(
         "route_bad_wet_surface_share": round(
             float(getattr(r, "route_bad_wet_surface_share", 0.0)), 4
         ),
+        "route_winter_harsh_surface_share": round(
+            float(getattr(r, "route_winter_harsh_surface_share", 0.0)), 4
+        ),
+        "route_stairs_length_m": round(float(r.stairs.total_length_m), 2),
+        "route_stairs_length_fraction": round(
+            float(r.stairs.total_length_m) / max(float(r.length_m), 1.0), 4
+        ),
+        "route_winter_open_stress_proxy": round(
+            float(getattr(r, "route_open_sky_share", 0.0))
+            * float(
+                getattr(getattr(r, "weather", None), "snow_model_strength", 0.0)
+                or 0.0
+            ),
+            4,
+        ),
+        "route_wind_direction_aware": round(
+            float(getattr(getattr(r, "heat_stress", None), "route_wind_direction_aware", 0.0)),
+            4,
+        ),
+        "route_mean_wind_to_street_angle_deg": round(
+            float(
+                getattr(
+                    getattr(r, "heat_stress", None),
+                    "route_mean_wind_to_street_angle_deg",
+                    0.0,
+                )
+            ),
+            2,
+        ),
+        "route_mean_heat_directional_wind_exp": round(
+            float(
+                getattr(
+                    getattr(r, "heat_stress", None),
+                    "route_mean_heat_directional_wind_exp",
+                    0.0,
+                )
+            ),
+            4,
+        ),
+        "route_mean_heat_building_wind_factor": round(
+            float(
+                getattr(
+                    getattr(r, "heat_stress", None),
+                    "route_mean_heat_building_wind_factor",
+                    0.0,
+                )
+            ),
+            4,
+        ),
+        "route_frac_wind_along_open_hostile": round(
+            float(
+                getattr(
+                    getattr(r, "heat_stress", None),
+                    "route_frac_wind_along_open_hostile",
+                    0.0,
+                )
+            ),
+            4,
+        ),
+        "route_frac_wind_cross_building_screen": round(
+            float(
+                getattr(
+                    getattr(r, "heat_stress", None),
+                    "route_frac_wind_cross_building_screen",
+                    0.0,
+                )
+            ),
+            4,
+        ),
         "weather_test_case_id": None,
         "weather_test_temperature_c": None,
         "weather_test_precipitation_mm": None,
         "weather_test_wind_speed_ms": None,
         "weather_test_wind_gusts_ms": None,
+        "weather_test_wind_direction_deg": None,
         "weather_test_cloud_cover_pct": None,
         "weather_test_humidity_pct": None,
         "weather_test_shortwave_radiation_wm2": None,
+        "weather_test_snowfall_cm_h": None,
+        "weather_test_snow_depth_m": None,
+        "weather_test_weather_code": None,
+        "weather_test_time_iso": None,
     }
     if test_weather_meta:
         out.update(test_weather_meta)
@@ -1020,6 +1256,7 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "elapsed_seconds": "Время работы, с",
         "weather_schedule": "Сценарий погоды (none / now / past / test)",
         "synthetic_test_cases": "Число синтетических сценариев (test)",
+        "experiment_weather_grid": "Сетка synthetic (summer / winter)",
         "weather_mode_engine": "Режим погоды (движок)",
         "weather_time_utc_snapshot": "Снимок времени UTC (режим now)",
         "past_days": "Дней архива (режим past)",
@@ -1036,6 +1273,7 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "snapshot_precipitation_probability": "Снимок: вероятность осадков, %",
         "snapshot_wind_speed_ms": "Снимок: ветер, м/с",
         "snapshot_wind_gusts_ms": "Снимок: порывы, м/с",
+        "snapshot_wind_direction_deg": "Снимок: направление ветра, ° (откуда дует)",
         "snapshot_cloud_cover_pct": "Снимок: облачность, %",
         "snapshot_humidity_pct": "Снимок: влажность, %",
         "snapshot_shortwave_radiation_wm2": "Снимок: КВ, Вт/м²",
@@ -1073,9 +1311,21 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "weather_precipitation_probability": "Вероятность осадков, %",
     "weather_wind_speed_ms": "Ветер, м/с",
     "weather_wind_gusts_ms": "Порывы ветра, м/с",
+    "weather_wind_direction_deg": "Направление ветра, ° (метео: откуда)",
+    "weather_wind_direction_aware": "Ветер с направлением (direction-aware)",
     "weather_cloud_cover_pct": "Облачность, %",
     "weather_humidity_pct": "Влажность, %",
     "weather_shortwave_radiation_wm2": "КВ радиация, Вт/м²",
+    "weather_snowfall_cm_h": "Снегопад, см/ч",
+    "weather_snow_depth_m": "Глубина снега, м (модель)",
+    "weather_weather_code": "Код погоды WMO",
+    "weather_routing_season": "Сезонный профиль маршрутизации",
+    "weather_season_green_mult": "Сезон: множитель зелёного бонуса",
+    "weather_season_tree_heat_mult": "Сезон: множитель тени деревьев (heat)",
+    "weather_snow_model_strength": "Сила зимней snow-модели",
+    "weather_snow_export_phys_amp": "Snow: множитель физики (экспорт)",
+    "weather_snow_export_stress_amp": "Snow: множитель stress (экспорт)",
+    "weather_snow_export_surface_amp": "Snow: покрытие (экспорт)",
     "weather_heat_continuous": "Непрерывная тепло-модель",
     "heat_tree_shade_bonus": "Heat: бонус тени деревьев",
     "heat_open_sky_penalty": "Heat: штраф открытого неба",
@@ -1090,18 +1340,35 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "heat_norm_cloud": "Heat: норм. облачность",
     "heat_norm_humidity": "Heat: норм. влажность",
     "heat_norm_cold_like": "Heat: норм. прохлада",
+    "heat_norm_snow_depth": "Heat: норм. глубина снега",
+    "heat_norm_snow_fresh": "Heat: норм. снегопад",
     "route_open_sky_share": "Маршрут: доля открытого неба",
     "route_building_shade_share": "Маршрут: тень зданий",
     "route_covered_share": "Маршрут: укрытия",
     "route_bad_wet_surface_share": "Маршрут: плохое мокрое покрытие",
+    "route_winter_harsh_surface_share": "Маршрут: тяжёлое зимнее покрытие (прокси)",
+    "route_wind_direction_aware": "Маршрут: учтено направление ветра (0/1)",
+    "route_mean_wind_to_street_angle_deg": "Маршрут: средний угол улица–ветер, °",
+    "route_mean_heat_directional_wind_exp": "Маршрут: средняя ветроэкспозиция (heat)",
+    "route_mean_heat_building_wind_factor": "Маршрут: средний фактор экрана зданий",
+    "route_frac_wind_along_open_hostile": "Маршрут: доля «вдоль ветра и открыто»",
+    "route_frac_wind_cross_building_screen": "Маршрут: доля «поперёк и экран зданий»",
+    "route_stairs_length_m": "Маршрут: длина по лестницам, м",
+    "route_stairs_length_fraction": "Маршрут: доля длины по лестницам",
+    "route_winter_open_stress_proxy": "Маршрут: открытость × сила зимней модели",
     "weather_test_case_id": "Test: ID сценария",
     "weather_test_temperature_c": "Test: температура, °C",
     "weather_test_precipitation_mm": "Test: осадки, мм/ч",
     "weather_test_wind_speed_ms": "Test: ветер, м/с",
     "weather_test_wind_gusts_ms": "Test: порывы, м/с",
+    "weather_test_wind_direction_deg": "Test: направление ветра, ° (откуда)",
     "weather_test_cloud_cover_pct": "Test: облачность, %",
     "weather_test_humidity_pct": "Test: влажность, %",
     "weather_test_shortwave_radiation_wm2": "Test: КВ, Вт/м²",
+    "weather_test_snowfall_cm_h": "Test: снегопад, см/ч",
+    "weather_test_snow_depth_m": "Test: глубина снега, м",
+    "weather_test_weather_code": "Test: код погоды WMO",
+    "weather_test_time_iso": "Test: ISO времени сценария",
     "length_m": "Длина, м",
     "length_km": "Длина, км",
     "time_s": "Время, с",

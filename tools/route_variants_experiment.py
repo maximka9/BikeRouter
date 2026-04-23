@@ -141,6 +141,9 @@ def run_variants_experiment(
         "wind_gusts_ms": w_snap.wind_gusts_ms,
         "shortwave_radiation_wm2": w_snap.shortwave_radiation_wm2,
     }
+    wd_live = getattr(w_snap, "wind_direction_deg", None)
+    if wd_live is not None:
+        fixed_kw["wind_direction_deg"] = float(wd_live)
 
     route_tasks: List[Tuple[int, int, str]] = [
         (i, j, prof)

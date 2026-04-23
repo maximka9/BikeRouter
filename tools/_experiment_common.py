@@ -8,11 +8,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta, timezone
 from math import asin, cos, radians, sin, sqrt
@@ -811,6 +812,192 @@ def build_pair_comparison(
     return out
 
 
+def _heat_row_float(r: Dict[str, Any], key: str) -> float:
+    v = r.get(key)
+    if v is None or v == "":
+        return float("nan")
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _heat_row_rain_flag(r: Dict[str, Any]) -> int:
+    pr = _heat_row_float(r, "weather_test_precipitation_mm")
+    if not math.isfinite(pr):
+        return 0
+    return 1 if pr > 0.5 else 0
+
+
+def _heat_row_wind_strong(r: Dict[str, Any]) -> int:
+    ws = _heat_row_float(r, "weather_test_wind_speed_ms")
+    if not math.isfinite(ws):
+        return 0
+    return 1 if ws >= 6.0 else 0
+
+
+def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Сводные KPI для heat_weather (36 synthetic): геометрия vs погода."""
+    if not raw_rows:
+        return [
+            {
+                "changed_pairs_count": 0,
+                "changed_pairs_share": None,
+                "mean_unique_geometries": None,
+                "scenario_alt_rate_min": None,
+                "scenario_alt_rate_max": None,
+                "temp25_vs_0_open_lower_share": None,
+                "rain_vs_dry_open_lower_share": None,
+                "wind_vs_calm_open_lower_share": None,
+                "covered_nonzero_share": None,
+            }
+        ]
+
+    def od_prof(r: Dict[str, Any]) -> Tuple[str, str, str]:
+        return (
+            str(r["origin_point_id"]),
+            str(r["destination_point_id"]),
+            str(r["profile"]),
+        )
+
+    by_pair: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        cid = r.get("weather_test_case_id")
+        if not cid:
+            continue
+        by_pair[od_prof(r)].append(r)
+
+    n_groups = len(by_pair)
+    unique_counts: List[int] = []
+    changed = 0
+    for _k, lst in by_pair.items():
+        geoms = {str(x.get("geometry_json") or "") for x in lst}
+        u = len(geoms)
+        unique_counts.append(u)
+        if u > 1:
+            changed += 1
+    mean_unique = (
+        sum(unique_counts) / len(unique_counts) if unique_counts else None
+    )
+    changed_share = (changed / n_groups) if n_groups else None
+
+    geom_ctr: Dict[Tuple[str, str, str], Counter] = defaultdict(Counter)
+    for r in raw_rows:
+        if not r.get("weather_test_case_id"):
+            continue
+        g = str(r.get("geometry_json") or "")
+        geom_ctr[od_prof(r)][g] += 1
+    modal: Dict[Tuple[str, str, str], str] = {}
+    for k, ctr in geom_ctr.items():
+        modal[k] = ctr.most_common(1)[0][0] if ctr else ""
+
+    by_case: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        cid = r.get("weather_test_case_id")
+        if cid:
+            by_case[str(cid)].append(r)
+
+    scenario_rates: List[float] = []
+    for cid, lst in by_case.items():
+        alt = 0
+        tot = 0
+        for r in lst:
+            k = od_prof(r)
+            tot += 1
+            g = str(r.get("geometry_json") or "")
+            if g != modal.get(k, ""):
+                alt += 1
+        if tot:
+            scenario_rates.append(alt / tot)
+    scen_min = min(scenario_rates) if scenario_rates else None
+    scen_max = max(scenario_rates) if scenario_rates else None
+
+    bucket_t: Dict[Tuple[int, int, int, str, str, str], Dict[float, Dict[str, Any]]] = (
+        defaultdict(dict)
+    )
+    bucket_r: Dict[Tuple[float, int, int, str, str, str], Dict[int, Dict[str, Any]]] = (
+        defaultdict(dict)
+    )
+    bucket_w: Dict[Tuple[float, int, int, str, str, str], Dict[int, Dict[str, Any]]] = (
+        defaultdict(dict)
+    )
+
+    for r in raw_rows:
+        if not r.get("weather_test_case_id"):
+            continue
+        o, d, p = od_prof(r)
+        T = round(_heat_row_float(r, "weather_test_temperature_c"), 1)
+        cc = int(round(_heat_row_float(r, "weather_test_cloud_cover_pct")))
+        rf = _heat_row_rain_flag(r)
+        wf = _heat_row_wind_strong(r)
+        open_v = _heat_row_float(r, "route_open_sky_share")
+
+        kt = (rf, wf, cc, o, d, p)
+        if T in (0.0, 25.0) and math.isfinite(open_v):
+            dct = bucket_t[kt]
+            dct[T] = r
+
+        kr = (T, wf, cc, o, d, p)
+        if rf in (0, 1) and math.isfinite(open_v):
+            dcr = bucket_r[kr]
+            dcr[rf] = r
+
+        kw = (T, rf, cc, o, d, p)
+        if wf in (0, 1) and math.isfinite(open_v):
+            dcw = bucket_w[kw]
+            dcw[wf] = r
+
+    def _pair_open_lower(
+        d: Dict[Any, Dict[Any, Dict[str, Any]]], hi: Any, lo: Any
+    ) -> Optional[float]:
+        ok = 0
+        good = 0
+        for _bk, dct in d.items():
+            if hi not in dct or lo not in dct:
+                continue
+            rh, rl = dct[hi], dct[lo]
+            oh = _heat_row_float(rh, "route_open_sky_share")
+            ol = _heat_row_float(rl, "route_open_sky_share")
+            if not (math.isfinite(oh) and math.isfinite(ol)):
+                continue
+            ok += 1
+            if oh < ol - 1e-9:
+                good += 1
+        return (good / ok) if ok else None
+
+    temp_share = _pair_open_lower(bucket_t, 25.0, 0.0)
+    rain_share = _pair_open_lower(bucket_r, 1, 0)
+    wind_share = _pair_open_lower(bucket_w, 1, 0)
+
+    cov_ok = sum(
+        1
+        for r in raw_rows
+        if _heat_row_float(r, "route_covered_share") > 1e-6
+    )
+    covered_share = cov_ok / len(raw_rows) if raw_rows else None
+
+    row = {
+        "changed_pairs_count": changed,
+        "changed_pairs_share": round(changed_share, 6) if changed_share is not None else None,
+        "mean_unique_geometries": round(mean_unique, 6) if mean_unique is not None else None,
+        "scenario_alt_rate_min": round(scen_min, 6) if scen_min is not None else None,
+        "scenario_alt_rate_max": round(scen_max, 6) if scen_max is not None else None,
+        "temp25_vs_0_open_lower_share": round(temp_share, 6)
+        if temp_share is not None
+        else None,
+        "rain_vs_dry_open_lower_share": round(rain_share, 6)
+        if rain_share is not None
+        else None,
+        "wind_vs_calm_open_lower_share": round(wind_share, 6)
+        if wind_share is not None
+        else None,
+        "covered_nonzero_share": round(covered_share, 6)
+        if covered_share is not None
+        else None,
+    }
+    return [row]
+
+
 def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
     ru = {
         "experiment_id": "ID эксперимента",
@@ -854,6 +1041,9 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "snapshot_shortwave_radiation_wm2": "Снимок: КВ, Вт/м²",
         "weather_snapshot_source": "Источник погодного снимка (батч)",
         "synthetic_weather_time_iso": "Synthetic: ISO времени снимка",
+        "project_weather_stress_global_blend": "Проект: WEATHER_STRESS_GLOBAL_BLEND",
+        "experiment_weather_stress_global_blend_effective": "Эксперимент: blend (эффективно)",
+        "experiment_stress_blend_mode": "Режим blend (метка)",
     }
     return [(ru.get(str(k), str(k)), v) for k, v in rows]
 
@@ -979,6 +1169,7 @@ def write_xlsx(
     legacy_multisheet: bool = False,
     summary_by_weather_date: Optional[List[Dict[str, Any]]] = None,
     summary_by_weather_date_variant: Optional[List[Dict[str, Any]]] = None,
+    summary_heat_kpi: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     from openpyxl import Workbook
 
@@ -1091,14 +1282,20 @@ def write_xlsx(
     rr = 1
     s_wd = summary_by_weather_date or []
     s_wdv = summary_by_weather_date_variant or []
-    for title, block in (
-        ("Средние по дате погоды", s_wd),
-        ("Средние по дате погоды и варианту", s_wdv),
-        ("Средние по варианту", summary_variant),
-        ("Средние по профилю", summary_profile),
-        ("Средние по направлению", summary_direction),
-        ("Сводка по парам O–D", pair_cmp),
-    ):
+    blocks: List[Tuple[str, List[Dict[str, Any]]]] = []
+    if summary_heat_kpi:
+        blocks.append(("Heat-weather KPI (synthetic)", summary_heat_kpi))
+    blocks.extend(
+        [
+            ("Средние по дате погоды", s_wd),
+            ("Средние по дате погоды и варианту", s_wdv),
+            ("Средние по варианту", summary_variant),
+            ("Средние по профилю", summary_profile),
+            ("Средние по направлению", summary_direction),
+            ("Сводка по парам O–D", pair_cmp),
+        ]
+    )
+    for title, block in blocks:
         ws3.cell(row=rr, column=1, value=title)
         rr += 1
         if block and block[0]:

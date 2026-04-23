@@ -73,9 +73,9 @@ class WeatherWeightParams:
     wet_surface_penalty: float = 1.0
     normalized_signals: Dict[str, float] = field(default_factory=dict)
     # Пороги и k для ребра (копия из Settings на момент запроса).
-    heat_edge_k_open: float = 0.54
-    heat_edge_k_tree: float = 0.44
-    heat_edge_k_building: float = 0.34
+    heat_edge_k_open: float = 0.66
+    heat_edge_k_tree: float = 0.54
+    heat_edge_k_building: float = 0.50
     heat_edge_k_covered: float = 0.16
     heat_edge_k_wet: float = 0.28
     heat_edge_k_wind: float = 0.30
@@ -86,9 +86,9 @@ class WeatherWeightParams:
     heat_open_wet_synergy: float = 0.14
     heat_edge_factor_min: float = 0.65
     heat_edge_factor_max: float = 1.75
-    heat_edge_rain_open_mult: float = 0.34
-    heat_edge_rain_building_mult: float = 0.42
-    heat_edge_rain_wind_exp_mult: float = 0.16
+    heat_edge_rain_open_mult: float = 0.48
+    heat_edge_rain_building_mult: float = 0.56
+    heat_edge_rain_wind_exp_mult: float = 0.22
     # Нормированные сигналы и edge-stress (заполняются при enabled + settings).
     weather_stress_global_blend: float = 0.38
     stress_edge_rain_slip: float = 0.22
@@ -229,9 +229,9 @@ def _continuous_six_coefficients(
 
 def _edge_params_from_settings(s: Any) -> Dict[str, float]:
     return {
-        "heat_edge_k_open": float(getattr(s, "heat_edge_k_open", 0.54)),
-        "heat_edge_k_tree": float(getattr(s, "heat_edge_k_tree", 0.44)),
-        "heat_edge_k_building": float(getattr(s, "heat_edge_k_building", 0.34)),
+        "heat_edge_k_open": float(getattr(s, "heat_edge_k_open", 0.66)),
+        "heat_edge_k_tree": float(getattr(s, "heat_edge_k_tree", 0.54)),
+        "heat_edge_k_building": float(getattr(s, "heat_edge_k_building", 0.50)),
         "heat_edge_k_covered": float(getattr(s, "heat_edge_k_covered", 0.16)),
         "heat_edge_k_wet": float(getattr(s, "heat_edge_k_wet", 0.28)),
         "heat_edge_k_wind": float(getattr(s, "heat_edge_k_wind", 0.30)),
@@ -245,13 +245,13 @@ def _edge_params_from_settings(s: Any) -> Dict[str, float]:
         "heat_edge_factor_min": float(getattr(s, "heat_edge_factor_min", 0.65)),
         "heat_edge_factor_max": float(getattr(s, "heat_edge_factor_max", 1.75)),
         "heat_edge_rain_open_mult": float(
-            getattr(s, "heat_edge_rain_open_mult", 0.34)
+            getattr(s, "heat_edge_rain_open_mult", 0.48)
         ),
         "heat_edge_rain_building_mult": float(
-            getattr(s, "heat_edge_rain_building_mult", 0.42)
+            getattr(s, "heat_edge_rain_building_mult", 0.56)
         ),
         "heat_edge_rain_wind_exp_mult": float(
-            getattr(s, "heat_edge_rain_wind_exp_mult", 0.16)
+            getattr(s, "heat_edge_rain_wind_exp_mult", 0.22)
         ),
     }
 

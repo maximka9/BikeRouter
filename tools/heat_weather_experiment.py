@@ -3,6 +3,9 @@
 Запуск::
 
     python -m bike_router.tools.heat_weather_experiment --n-points 10
+
+По умолчанию для чистоты анализа heat снижается ``WEATHER_STRESS_GLOBAL_BLEND``
+до 0.12 на время прогона (не трогая .env). См. ``--stress-blend-from-settings``.
 """
 
 from __future__ import annotations
@@ -51,6 +54,9 @@ def run_heat_weather_experiment(
     output_path: Optional[str],
     limit: Optional[int],
     offset: int,
+    stress_blend_from_settings: bool,
+    weather_stress_global_blend: Optional[float],
+    stress_blend_analysis_default: bool,
 ) -> str:
     _ensure_pkg_path()
 
@@ -71,6 +77,7 @@ def run_heat_weather_experiment(
         _iter_directed_pairs,
         _point_id_fmt,
         _set_quiet_mode_for_batch,
+        build_heat_weather_kpi_rows,
         build_pair_comparison,
         build_summaries,
         heat_weather_output_xlsx_path,
@@ -103,6 +110,35 @@ def run_heat_weather_experiment(
     eng.warmup()
     if eng.graph is None or not eng.is_loaded:
         raise SystemExit("Warmup не загрузил граф.")
+
+    project_stress_blend = float(eng._app.settings.weather_stress_global_blend)
+    effective_stress_blend: Optional[float] = None
+    stress_blend_note = "project_settings"
+    if stress_blend_from_settings:
+        effective_stress_blend = project_stress_blend
+    elif weather_stress_global_blend is not None:
+        eng._app.settings.weather_stress_global_blend = float(
+            weather_stress_global_blend
+        )
+        effective_stress_blend = float(weather_stress_global_blend)
+        stress_blend_note = (
+            "default_analysis" if stress_blend_analysis_default else "cli_override"
+        )
+        _log.info(
+            "Heat experiment: WEATHER_STRESS_GLOBAL_BLEND %.4f -> %.4f (для прогона)",
+            project_stress_blend,
+            effective_stress_blend,
+        )
+    else:
+        stress_blend_note = "default_analysis"
+        effective_stress_blend = 0.12
+        eng._app.settings.weather_stress_global_blend = effective_stress_blend
+        _log.info(
+            "Heat experiment: WEATHER_STRESS_GLOBAL_BLEND %.4f -> %.4f "
+            "(дефолт анализа; отключить: --stress-blend-from-settings)",
+            project_stress_blend,
+            effective_stress_blend,
+        )
 
     points = sample_points_in_polygon(
         poly=poly,
@@ -261,6 +297,7 @@ def run_heat_weather_experiment(
 
     s_var, s_prof, s_dir = build_summaries(raw_rows)
     pair_cmp = build_pair_comparison(raw_rows)
+    heat_kpi = build_heat_weather_kpi_rows(raw_rows)
     out = output_path or heat_weather_output_xlsx_path()
     wkt_fp = routing_engine_cache_fingerprint()
     meta_rows: List[Tuple[str, Any]] = [
@@ -289,6 +326,9 @@ def run_heat_weather_experiment(
         ("pair_offset", offset),
         ("experiment_kind", "heat_weather_synthetic"),
         ("synthetic_weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO),
+        ("project_weather_stress_global_blend", project_stress_blend),
+        ("experiment_weather_stress_global_blend_effective", effective_stress_blend),
+        ("experiment_stress_blend_mode", stress_blend_note),
     ]
 
     vgz_path: Optional[str] = None
@@ -312,6 +352,7 @@ def run_heat_weather_experiment(
         legacy_multisheet=False,
         summary_by_weather_date=[],
         summary_by_weather_date_variant=[],
+        summary_heat_kpi=heat_kpi,
     )
     _log.info("Готово: %s", out)
     return out
@@ -346,6 +387,21 @@ def main() -> None:
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--log-every", type=int, default=DEFAULT_BATCH_LOG_EVERY)
+    parser.add_argument(
+        "--stress-blend-from-settings",
+        action="store_true",
+        help="Не менять WEATHER_STRESS_GLOBAL_BLEND (брать из .env / Settings).",
+    )
+    parser.add_argument(
+        "--weather-stress-global-blend",
+        type=float,
+        default=None,
+        metavar="X",
+        help=(
+            "Явное значение blend на время прогона. "
+            "Если не задано и без --stress-blend-from-settings — используется 0.12."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -353,6 +409,14 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
+    blend_cli: Optional[float] = args.weather_stress_global_blend
+    analysis_default = False
+    if args.stress_blend_from_settings:
+        blend_cli = None
+    elif blend_cli is None:
+        blend_cli = 0.12
+        analysis_default = True
+
     path = run_heat_weather_experiment(
         n_points=args.n_points,
         seed=args.seed,
@@ -364,6 +428,11 @@ def main() -> None:
         output_path=args.output,
         limit=args.limit,
         offset=int(args.offset),
+        stress_blend_from_settings=bool(args.stress_blend_from_settings),
+        weather_stress_global_blend=blend_cli
+        if not args.stress_blend_from_settings
+        else None,
+        stress_blend_analysis_default=analysis_default,
     )
     print(path)
 

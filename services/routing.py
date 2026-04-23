@@ -148,9 +148,9 @@ def continuous_heat_edge_weather_factor(
     w3 = float(getattr(weather, "heat_wind_exp_w3", 0.35))
     wind_exp = _clamp01(w1 * O + w2 * (1.0 - B) + w3 * (1.0 - C))
 
-    k1 = float(getattr(weather, "heat_edge_k_open", 0.54))
-    k2 = float(getattr(weather, "heat_edge_k_tree", 0.44))
-    k3 = float(getattr(weather, "heat_edge_k_building", 0.34))
+    k1 = float(getattr(weather, "heat_edge_k_open", 0.66))
+    k2 = float(getattr(weather, "heat_edge_k_tree", 0.54))
+    k3 = float(getattr(weather, "heat_edge_k_building", 0.50))
     k4 = float(getattr(weather, "heat_edge_k_covered", 0.16))
     k5 = float(getattr(weather, "heat_edge_k_wet", 0.28))
     k6 = float(getattr(weather, "heat_edge_k_wind", 0.30))
@@ -158,13 +158,13 @@ def continuous_heat_edge_weather_factor(
     sig = getattr(weather, "normalized_signals", None) or {}
     rn = _clamp01(float(sig.get("rain_norm", 0.0)))
     rain_open_amp = 1.0 + float(
-        getattr(weather, "heat_edge_rain_open_mult", 0.34)
+        getattr(weather, "heat_edge_rain_open_mult", 0.48)
     ) * rn
     rain_build_amp = 1.0 + float(
-        getattr(weather, "heat_edge_rain_building_mult", 0.42)
+        getattr(weather, "heat_edge_rain_building_mult", 0.56)
     ) * rn
     rain_wind_exp_amp = 1.0 + float(
-        getattr(weather, "heat_edge_rain_wind_exp_mult", 0.16)
+        getattr(weather, "heat_edge_rain_wind_exp_mult", 0.22)
     ) * rn
     k1_eff = k1 * rain_open_amp
     k3_eff = k3 * rain_build_amp

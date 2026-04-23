@@ -6,6 +6,7 @@ from datetime import date
 
 from bike_router.config import Settings
 from bike_router.services.seasonal import (
+    resolve_season_routing_context,
     routing_season_label,
     season_green_route_multiplier,
     snow_depth_phys_multiplier,
@@ -51,6 +52,21 @@ def test_snow_depth_tiers_increase() -> None:
 def test_snow_fresh_tiers_increase() -> None:
     s = Settings()
     assert snow_fresh_phys_multiplier(0.0, s) <= snow_fresh_phys_multiplier(2.0, s)
+
+
+def test_adaptive_season_warm_winter_without_snow() -> None:
+    s = Settings()
+    s.season_adaptive_mode = "adaptive_if_possible"
+    d = date(2000, 2, 10)
+    snap = snapshot_from_manual(
+        temperature_c=12.0,
+        snow_depth_m=0.0,
+        snowfall_cm_h=0.0,
+    )
+    ctx = resolve_season_routing_context(d, snap, s)
+    assert ctx.calendar_season == "winter"
+    assert ctx.effective_season == "early_spring"
+    assert ctx.source == "adaptive"
 
 
 def test_snapshot_from_manual_snow() -> None:

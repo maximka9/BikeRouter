@@ -85,6 +85,7 @@ def run_heat_weather_experiment(
         _point_id_fmt,
         _set_quiet_mode_for_batch,
         build_heat_weather_kpi_rows,
+        build_winter_kpi_rows,
         build_pair_comparison,
         build_summaries,
         heat_weather_output_xlsx_path,
@@ -326,6 +327,7 @@ def run_heat_weather_experiment(
     s_var, s_prof, s_dir = build_summaries(raw_rows)
     pair_cmp = build_pair_comparison(raw_rows)
     heat_kpi = build_heat_weather_kpi_rows(raw_rows)
+    winter_kpi = build_winter_kpi_rows(raw_rows) if wg == "winter" else None
     out = output_path or heat_weather_output_xlsx_path()
     wkt_fp = routing_engine_cache_fingerprint()
     meta_rows: List[Tuple[str, Any]] = [
@@ -382,6 +384,7 @@ def run_heat_weather_experiment(
         summary_by_weather_date=[],
         summary_by_weather_date_variant=[],
         summary_heat_kpi=heat_kpi,
+        summary_winter_kpi=winter_kpi,
     )
     _log.info("Готово: %s", out)
     return out

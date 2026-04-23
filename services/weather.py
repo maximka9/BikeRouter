@@ -15,8 +15,7 @@ import requests
 from .policy_data import load_weather_policy
 from .seasonal import (
     normalized_snow_signals,
-    routing_season_label,
-    season_green_route_multiplier,
+    resolve_season_routing_context,
     season_tree_heat_route_multiplier,
     snow_depth_phys_multiplier,
     snow_fresh_phys_multiplier,
@@ -155,6 +154,21 @@ class WeatherWeightParams:
     stress_wind_cross_shelter_amp: float = 0.40
     # Ослабление бонуса зданий, когда ветер «вдоль» коридора (мало экранирования фасадом).
     heat_wind_along_build_damp: float = 0.24
+    # Сезон (календарь vs адаптивный снимок) — дублируется для логов/Excel.
+    routing_season_calendar: str = ""
+    routing_season_effective: str = ""
+    routing_season_source: str = "calendar"
+    # Интерпретация WMO weather_code (маршрутизация + нормы в normalized_signals).
+    wc_snow_model_strength_amp: float = 0.22
+    wc_wet_slip_physical_amp: float = 0.08
+    wc_mixed_precip_stress_amp: float = 0.12
+    wc_wet_slip_surface_amp: float = 0.26
+    wc_mixed_surface_amp: float = 0.18
+    wc_wet_stairs_amp: float = 0.14
+    wc_mixed_snow_stress_amp: float = 0.16
+    winter_clearance_low_amp: float = 0.32
+    winter_clearance_low_amp_cyclist: float = 0.22
+    winter_clearance_high_mitigate: float = 0.22
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -200,6 +214,35 @@ def snapshot_from_manual(
     )
 
 
+def wmo_weather_code_profile(code: Optional[int]) -> Dict[str, float]:
+    """Нормированные признаки по коду WMO (Open-Meteo).
+
+    Не заменяют snowfall/snow_depth: уточняют тип осадков/ледяного тумана.
+    Ключи: wc_snow_event, wc_wet_slip, wc_mixed, wc_fog — в диапазоне [0..1].
+    """
+    z = {"wc_snow_event": 0.0, "wc_wet_slip": 0.0, "wc_mixed": 0.0, "wc_fog": 0.0}
+    if code is None:
+        return z
+    try:
+        c = int(round(float(code)))
+    except (TypeError, ValueError):
+        return z
+
+    if c in (71, 72, 73, 74, 75, 76, 77, 85, 86):
+        z["wc_snow_event"] = 1.0
+    if c in (45, 48):
+        z["wc_fog"] = 1.0
+    if c in (56, 57, 66, 67):
+        z["wc_wet_slip"] = 1.0
+    if c in (95, 96, 97, 98, 99):
+        z["wc_mixed"] = 1.0
+    elif c in (80, 81, 82):
+        z["wc_mixed"] = 0.22 + 0.28 * float(c - 80)
+    if c in (61, 62, 63, 64, 65) and float(z["wc_wet_slip"]) < 0.35:
+        z["wc_wet_slip"] = max(z["wc_wet_slip"], 0.25)
+    return z
+
+
 def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, float]:
     """Нормированные сигналы [0..1] и cold_like [0..1] для непрерывной тепловой модели."""
     T = float(snap.temperature_c)
@@ -226,7 +269,8 @@ def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, floa
     humidity_norm = _clamp(hum / 100.0, 0.0, 1.0)
     cold_like_norm = _clamp((tcref - T) / tc_rng, 0.0, 1.0)
     snd, snf = normalized_snow_signals(snap, s)
-    return {
+    wc = wmo_weather_code_profile(getattr(snap, "weather_code", None))
+    out = {
         "temp_norm": temp_norm,
         "rain_norm": rain_norm,
         "wind_norm": wind_norm,
@@ -237,6 +281,8 @@ def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, floa
         "snow_depth_norm": float(snd),
         "snow_fresh_norm": float(snf),
     }
+    out.update(wc)
+    return out
 
 
 def _continuous_six_coefficients(
@@ -368,6 +414,31 @@ def _stress_and_phys_wet_params_from_settings(s: Any) -> Dict[str, float]:
     }
 
 
+def _wc_routing_params_from_settings(s: Any) -> Dict[str, float]:
+    return {
+        "wc_snow_model_strength_amp": float(
+            getattr(s, "wc_snow_model_strength_amp", 0.22)
+        ),
+        "wc_wet_slip_physical_amp": float(
+            getattr(s, "wc_wet_slip_physical_amp", 0.08)
+        ),
+        "wc_mixed_precip_stress_amp": float(
+            getattr(s, "wc_mixed_precip_stress_amp", 0.12)
+        ),
+        "wc_wet_slip_surface_amp": float(getattr(s, "wc_wet_slip_surface_amp", 0.26)),
+        "wc_mixed_surface_amp": float(getattr(s, "wc_mixed_surface_amp", 0.18)),
+        "wc_wet_stairs_amp": float(getattr(s, "wc_wet_stairs_amp", 0.14)),
+        "wc_mixed_snow_stress_amp": float(getattr(s, "wc_mixed_snow_stress_amp", 0.16)),
+        "winter_clearance_low_amp": float(getattr(s, "winter_clearance_low_amp", 0.32)),
+        "winter_clearance_low_amp_cyclist": float(
+            getattr(s, "winter_clearance_low_amp_cyclist", 0.22)
+        ),
+        "winter_clearance_high_mitigate": float(
+            getattr(s, "winter_clearance_high_mitigate", 0.22)
+        ),
+    }
+
+
 def _wind_direction_params_from_settings(s: Any) -> Dict[str, float]:
     return {
         "heat_wind_along_open_amp": float(
@@ -436,6 +507,9 @@ def build_weather_weight_params(
     snow_stress_export = 1.0
     stress_before = float(mults.stress)
     phys_before = float(mults.physical)
+    routing_season_calendar = ""
+    routing_season_effective = ""
+    routing_season_source = "calendar"
 
     if settings is not None:
         if not wdir_ok:
@@ -448,18 +522,33 @@ def build_weather_weight_params(
         ref_d = parse_route_calendar_date(reference_iso) or datetime.now(
             timezone.utc
         ).date()
-        routing_season = routing_season_label(ref_d, settings)
-        season_green_rm = season_green_route_multiplier(ref_d, settings)
+        sctx = resolve_season_routing_context(ref_d, snap, settings)
+        routing_season = sctx.effective_season
+        routing_season_calendar = sctx.calendar_season
+        routing_season_effective = sctx.effective_season
+        routing_season_source = sctx.source
+        season_green_rm = float(sctx.season_green_route_mult)
         tree_heat_rm = season_tree_heat_route_multiplier(routing_season, settings)
         snow_strength = snow_route_model_strength(routing_season, snap, settings)
         snd = float(sig.get("snow_depth_norm", 0.0))
         snf = float(sig.get("snow_fresh_norm", 0.0))
+        wcs = float(sig.get("wc_snow_event", 0.0))
+        wcw = float(sig.get("wc_wet_slip", 0.0))
+        wcm = float(sig.get("wc_mixed", 0.0))
+        w_amp = float(getattr(settings, "wc_snow_model_strength_amp", 0.22))
+        snow_strength = min(1.0, snow_strength * (1.0 + w_amp * wcs))
         dpm = snow_depth_phys_multiplier(float(snap.snow_depth_m or 0.0), settings)
         fpm = snow_fresh_phys_multiplier(float(snap.snowfall_cm_h or 0.0), settings)
         comb = float(dpm * fpm)
         mults.physical *= 1.0 + snow_strength * (comb - 1.0)
         s_coupling = float(getattr(settings, "snow_stress_phys_coupling", 0.45))
         mults.stress *= 1.0 + snow_strength * min(0.28, (comb - 1.0) * s_coupling)
+        mults.physical *= 1.0 + snow_strength * float(
+            getattr(settings, "wc_wet_slip_physical_amp", 0.08)
+        ) * wcw
+        mults.stress *= 1.0 + snow_strength * float(
+            getattr(settings, "wc_mixed_precip_stress_amp", 0.12)
+        ) * max(wcm, 0.5 * wcw)
         snow_stress_add = float(
             getattr(settings, "snow_stress_global_add_winter", 0.035)
         ) * snow_strength + 0.05 * snow_strength * snd
@@ -492,8 +581,10 @@ def build_weather_weight_params(
         snow_stress_export = float(mults.stress / max(1e-9, stress_before))
 
     wind_dir_kw: Dict[str, float] = {}
+    wc_kw: Dict[str, float] = {}
     if settings is not None:
         wind_dir_kw = _wind_direction_params_from_settings(settings)
+        wc_kw = _wc_routing_params_from_settings(settings)
 
     base_kw: Dict[str, Any] = dict(
         enabled=True,
@@ -508,6 +599,9 @@ def build_weather_weight_params(
         heat_continuous=False,
         normalized_signals=sig,
         routing_season=routing_season,
+        routing_season_calendar=routing_season_calendar,
+        routing_season_effective=routing_season_effective,
+        routing_season_source=routing_season_source,
         season_green_route_mult=float(season_green_rm),
         season_tree_heat_route_mult=float(tree_heat_rm),
         reference_temperature_c=float(snap.temperature_c),
@@ -524,6 +618,7 @@ def build_weather_weight_params(
         wind_direction_deg=wdir_val,
         wind_direction_available=bool(wdir_ok),
         **wind_dir_kw,
+        **wc_kw,
         winter_heat_tree_scale=float(w_tree),
         winter_heat_open_scale=float(w_open),
         winter_heat_wind_scale=float(w_wind),

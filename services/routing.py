@@ -90,6 +90,36 @@ def _surface_wet_route_tier(surface_effective: Any) -> int:
     return 2
 
 
+def winter_clearance_priority_01(edge_data: dict) -> float:
+    """0..1: эвристика «вероятнее расчищается» (без внешних данных о уборке).
+
+    1 — пешеходные магистрали/жилые связи с хорошим покрытием; 0 — тропы, треки, лестницы.
+    """
+    hw = str(edge_data.get("highway") or "").strip().lower()
+    if hw == "steps":
+        return 0.06
+    if hw in ("path", "track", "bridleway"):
+        return 0.14
+    if hw in ("pedestrian", "living_street"):
+        return 0.88
+    if hw in ("primary", "primary_link", "secondary", "secondary_link"):
+        return 0.72
+    if hw in ("tertiary", "tertiary_link", "unclassified"):
+        return 0.58
+    if hw in ("residential", "service"):
+        return 0.62
+    if hw == "cycleway":
+        return 0.52
+    if hw == "footway":
+        tier = _surface_wet_route_tier(edge_data.get("surface_effective"))
+        base = 0.48 + 0.22 * float(2 - min(tier, 2))
+        ms = _parse_maxspeed_kmh(edge_data.get("maxspeed"))
+        if ms is not None and ms >= 45.0:
+            base = min(0.92, base + 0.18)
+        return max(0.22, min(0.92, base))
+    return 0.45
+
+
 def _edge_winter_harsh_surface_indicator(edge_data: dict) -> float:
     """0..1: лестницы и «тяжёлые» покрытия для зимней модели (объясняемые метрики)."""
     hw = str(edge_data.get("highway") or "").strip().lower()
@@ -118,13 +148,14 @@ def _edge_winter_harsh_surface_indicator(edge_data: dict) -> float:
     return 0.12
 
 
-def snow_surface_route_penalty(surface_effective: Any, weather: WeatherWeightParams) -> float:
-    """Снег × покрытие: плохие покрытия и неасфальт сильнее, чем асфальт."""
+def snow_surface_route_penalty(edge_data: dict, weather: WeatherWeightParams) -> float:
+    """Снег × покрытие × weather_code × приоритет зимней уборки (эвристика OSM)."""
     if not weather.enabled:
         return 1.0
     ss = float(getattr(weather, "snow_model_strength", 0.0))
     if ss <= 1e-9:
         return 1.0
+    surface_effective = edge_data.get("surface_effective")
     tier = _surface_wet_route_tier(surface_effective)
     t0 = float(getattr(weather, "snow_surface_tier0_amp", 0.012))
     t1 = float(getattr(weather, "snow_surface_tier1_amp", 0.055))
@@ -135,7 +166,26 @@ def snow_surface_route_penalty(surface_effective: Any, weather: WeatherWeightPar
     sn = max(snd, snf * 0.9)
     tier_w = 1.0 if tier == 0 else 1.65 if tier == 1 else 2.35
     extra = ss * sn * amp * 12.0 * tier_w
-    return max(1.0, min(1.42, 1.0 + extra))
+    clr = winter_clearance_priority_01(edge_data)
+    low_n = max(0.0, min(1.0, 1.0 - clr))
+    wcla = float(getattr(weather, "winter_clearance_low_amp", 0.32))
+    extra *= 1.0 + wcla * low_n * min(1.0, sn + 0.25 * ss)
+    mit = float(getattr(weather, "winter_clearance_high_mitigate", 0.22))
+    extra *= max(0.68, 1.0 - mit * clr * ss * min(1.0, sn + 0.15))
+    sig = getattr(weather, "normalized_signals", None) or {}
+    wcw = float(sig.get("wc_wet_slip", 0.0))
+    wcm = float(sig.get("wc_mixed", 0.0))
+    w_amp_w = float(getattr(weather, "wc_wet_slip_surface_amp", 0.26))
+    w_amp_m = float(getattr(weather, "wc_mixed_surface_amp", 0.18))
+    tier_bad = 0.38 + 0.32 * float(min(max(tier, 0), 2))
+    extra += (
+        ss
+        * sn
+        * (w_amp_w * wcw + w_amp_m * wcm * 1.28)
+        * tier_bad
+        * 0.52
+    )
+    return max(1.0, min(1.55, 1.0 + extra))
 
 
 def snow_stairs_phys_mult(weather: WeatherWeightParams, profile_key: str) -> float:
@@ -157,7 +207,13 @@ def snow_stairs_phys_mult(weather: WeatherWeightParams, profile_key: str) -> flo
     m = 1.0 + ss * sn * (base - 1.0)
     if snf > 0.08 and T <= 0.5:
         m *= 1.0 + ss * near_freeze * (frz - 1.0)
-    return max(1.0, min(1.55, m))
+    sig = getattr(weather, "normalized_signals", None) or {}
+    wcw = float(sig.get("wc_wet_slip", 0.0))
+    wcm = float(sig.get("wc_mixed", 0.0))
+    w_st = float(getattr(weather, "wc_wet_stairs_amp", 0.14))
+    w_mx = float(getattr(weather, "wc_mixed_surface_amp", 0.18))
+    m *= 1.0 + ss * sn * (w_st * wcw + 0.62 * w_mx * wcm)
+    return max(1.0, min(1.62, m))
 
 
 def wet_surface_route_penalty(surface_effective: Any, weather: WeatherWeightParams) -> float:
@@ -272,6 +328,12 @@ def weather_edge_stress_factor(
             + kopen * sn * ss * O * wind_comb
             + kstairs * sn * ss * stair_e
         )
+        wcm = float(sig.get("wc_mixed", 0.0))
+        wc_mix_amp = float(getattr(weather, "wc_mixed_snow_stress_amp", 0.16))
+        snow_bad += wc_mix_amp * wcm * sn * ss * (0.42 + 0.58 * surf_w)
+        wcf = float(sig.get("wc_fog", 0.0))
+        if wcf > 1e-9:
+            snow_bad += 0.09 * wcf * sn * ss * O
     raw = 1.0 + rs * (wet_bad + wind_bad + lts_bad - shelter + snow_bad)
     lo = float(getattr(weather, "stress_edge_factor_min", 0.82))
     hi = float(getattr(weather, "stress_edge_factor_max", 1.48))
@@ -393,7 +455,14 @@ def effective_edge_components(
         g_coupling *= max(0.25, float(wm.heat))
     surf_edge = wet_surface_route_penalty(
         edge_data.get("surface_effective"), weather
-    ) * snow_surface_route_penalty(edge_data.get("surface_effective"), weather)
+    ) * snow_surface_route_penalty(edge_data, weather)
+    ss = float(getattr(weather, "snow_model_strength", 0.0))
+    if ss > 1e-9 and profile_key == "cyclist":
+        clr = winter_clearance_priority_01(edge_data)
+        snd = float(getattr(weather, "snow_depth_norm", 0.0))
+        snf = float(getattr(weather, "snow_fresh_norm", 0.0))
+        cclr = float(getattr(weather, "winter_clearance_low_amp_cyclist", 0.22))
+        surf_edge *= 1.0 + cclr * ss * max(snd, snf) * max(0.0, 1.0 - clr)
     phys_eff = (
         phys
         * wm.physical
@@ -401,7 +470,6 @@ def effective_edge_components(
         * surf_edge
         * (1.0 + max(0.0, wm.green - 1.0) * g_edge * g_coupling)
     )
-    ss = float(getattr(weather, "snow_model_strength", 0.0))
     if ss > 1e-9 and profile_key == "cyclist":
         cboost = float(getattr(weather, "snow_phys_cyclist_mult_boost", 0.12))
         snd = float(getattr(weather, "snow_depth_norm", 0.0))

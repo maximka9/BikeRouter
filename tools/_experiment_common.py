@@ -317,8 +317,12 @@ def meta_append_batch_weather_snapshot(
     center_lat: float,
     center_lon: float,
     experiment_kind: str,
+    wp: Any = None,
 ) -> List[Tuple[str, Any]]:
-    """Поля снимка погоды для листа «Метаданные» (сырые величины)."""
+    """Поля снимка погоды для листа «Метаданные» (сырые величины).
+
+    Если передан ``wp`` (WeatherWeightParams после build), добавляются сезон и сила snow-модели.
+    """
     out = list(base)
     out.append(("experiment_kind", experiment_kind))
     out.append(("batch_weather_center_lat", center_lat))
@@ -351,7 +355,40 @@ def meta_append_batch_weather_snapshot(
             getattr(snap, "shortwave_radiation_wm2", None),
         )
     )
+    out.append(
+        ("snapshot_snowfall_cm_h", getattr(snap, "snowfall_cm_h", None)),
+    )
+    out.append(("snapshot_snow_depth_m", getattr(snap, "snow_depth_m", None)))
+    out.append(("snapshot_weather_code", getattr(snap, "weather_code", None)))
     out.append(("weather_snapshot_source", source))
+    if wp is not None and bool(getattr(wp, "enabled", False)):
+        out.append(
+            ("snapshot_routing_season", str(getattr(wp, "routing_season", "") or ""))
+        )
+        out.append(
+            (
+                "snapshot_routing_season_calendar",
+                str(getattr(wp, "routing_season_calendar", "") or ""),
+            )
+        )
+        out.append(
+            (
+                "snapshot_routing_season_source",
+                str(getattr(wp, "routing_season_source", "") or ""),
+            )
+        )
+        out.append(
+            (
+                "snapshot_season_green_mult",
+                float(getattr(wp, "season_green_route_mult", 1.0) or 1.0),
+            )
+        )
+        out.append(
+            (
+                "snapshot_snow_model_strength",
+                float(getattr(wp, "snow_model_strength", 0.0) or 0.0),
+            )
+        )
     return out
 
 
@@ -411,6 +448,8 @@ SUMMARY_NUM_KEYS = (
     "weather_snow_depth_m",
     "weather_weather_code",
     "weather_routing_season",
+    "weather_routing_season_calendar",
+    "weather_routing_season_source",
     "weather_season_green_mult",
     "weather_season_tree_heat_mult",
     "weather_snow_model_strength",
@@ -476,6 +515,8 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "weather_snow_depth_m": None,
         "weather_weather_code": None,
         "weather_routing_season": None,
+        "weather_routing_season_calendar": None,
+        "weather_routing_season_source": None,
         "weather_season_green_mult": None,
         "weather_season_tree_heat_mult": None,
         "weather_snow_model_strength": None,
@@ -535,6 +576,12 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         if getattr(s, "weather_code", None) is not None
         else None,
         "weather_routing_season": str(getattr(w, "routing_season", "") or ""),
+        "weather_routing_season_calendar": str(
+            getattr(w, "routing_season_calendar", "") or ""
+        ),
+        "weather_routing_season_source": str(
+            getattr(w, "routing_season_source", "") or ""
+        ),
         "weather_season_green_mult": float(
             getattr(w, "season_green_route_mult", 1.0) or 1.0
         ),
@@ -1004,8 +1051,9 @@ def build_summaries_by_weather_date_and_variant(
 def build_pair_comparison(
     raw_rows: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Сводка по (origin, dest, profile[, дата погоды]): min/max/avg length и time."""
+    """Сводка по (origin, dest, profile[, дата погоды[, synthetic case]]): min/max/avg."""
     has_wd = bool(raw_rows and str(raw_rows[0].get("weather_date") or "").strip())
+    has_tc = bool(raw_rows and str(raw_rows[0].get("weather_test_case_id") or "").strip())
     groups: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         base = (
@@ -1014,19 +1062,23 @@ def build_pair_comparison(
             str(r["profile"]),
             str(r["direction_key"]),
         )
-        key: Tuple[Any, ...] = (
-            base + (str(r.get("weather_date") or "").strip(),) if has_wd else base
-        )
+        el: List[Any] = list(base)
+        if has_wd:
+            el.append(str(r.get("weather_date") or "").strip())
+        if has_tc:
+            el.append(str(r.get("weather_test_case_id") or "").strip())
+        key = tuple(el)
         groups[key].append(r)
 
     out: List[Dict[str, Any]] = []
     for key in sorted(groups.keys()):
         rs = groups[key]
+        o, d, prof, dk = key[0], key[1], key[2], key[3]
+        ii = 4
+        wdate = str(key[ii]) if has_wd else ""
         if has_wd:
-            o, d, prof, dk, wdate = key
-        else:
-            o, d, prof, dk = key
-            wdate = ""
+            ii += 1
+        case_id = str(key[ii]) if has_tc else ""
         lengths = [float(x["length_m"]) for x in rs]
         times = [float(x["time_s"]) for x in rs]
         row: Dict[str, Any] = {
@@ -1044,6 +1096,8 @@ def build_pair_comparison(
         }
         if has_wd:
             row["weather_date"] = wdate
+        if has_tc:
+            row["weather_test_case_id"] = case_id
         out.append(row)
     return out
 
@@ -1234,6 +1288,99 @@ def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str
     return [row]
 
 
+def build_winter_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Сводные KPI по зимним synthetic-строкам (``weather_test_case_id``)."""
+    wr = [r for r in raw_rows if str(r.get("weather_test_case_id") or "").strip()]
+    if not wr:
+        return [
+            {
+                "winter_kpi_note": "нет строк с weather_test_case_id",
+                "winter_synthetic_routes": 0,
+            }
+        ]
+
+    def _avg(rows: List[Dict[str, Any]], key: str) -> Optional[float]:
+        xs: List[float] = []
+        for r in rows:
+            v = r.get(key)
+            if v is None or v == "":
+                continue
+            try:
+                xf = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(xf):
+                xs.append(xf)
+        return sum(xs) / len(xs) if xs else None
+
+    high_snow = [
+        r
+        for r in wr
+        if _heat_row_float(r, "weather_test_snow_depth_m") >= 0.05
+        or _heat_row_float(r, "weather_test_snowfall_cm_h") >= 0.35
+    ]
+    wind_snow = [
+        r
+        for r in wr
+        if _heat_row_float(r, "weather_test_wind_speed_ms") >= 8.0
+        and (
+            _heat_row_float(r, "weather_test_snowfall_cm_h") > 0.15
+            or _heat_row_float(r, "weather_test_snow_depth_m") >= 0.03
+        )
+    ]
+
+    def _cpkm(r: Dict[str, Any]) -> float:
+        return float(r.get("cost") or 0.0) / max(float(r.get("length_km") or 1e-9), 1e-9)
+
+    c_list = [_cpkm(r) for r in high_snow if str(r.get("profile")) == "cyclist"]
+    p_list = [_cpkm(r) for r in high_snow if str(r.get("profile")) == "pedestrian"]
+    c_avg = sum(c_list) / len(c_list) if c_list else None
+    p_avg = sum(p_list) / len(p_list) if p_list else None
+    ratio = (c_avg / p_avg) if (c_avg is not None and p_avg and p_avg > 1e-9) else None
+
+    april_weak = sum(
+        1
+        for r in wr
+        if "2000-04-05" in str(r.get("weather_test_time_iso") or "")
+        and float(r.get("weather_season_green_mult") or 1.0) < 0.35
+    )
+    april_strong = sum(
+        1
+        for r in wr
+        if "2000-04-25" in str(r.get("weather_test_time_iso") or "")
+        and float(r.get("weather_season_green_mult") or 0.0) > 0.85
+    )
+
+    return [
+        {
+            "winter_synthetic_routes": len(wr),
+            "mean_stairs_len_frac_high_snow": round(
+                _avg(high_snow, "route_stairs_length_fraction") or 0.0, 6
+            )
+            if high_snow
+            else None,
+            "mean_harsh_surface_share_high_snow": round(
+                _avg(high_snow, "route_winter_harsh_surface_share") or 0.0, 6
+            )
+            if high_snow
+            else None,
+            "mean_open_sky_share_wind_and_snow": round(
+                _avg(wind_snow, "route_open_sky_share") or 0.0, 6
+            )
+            if wind_snow
+            else None,
+            "mean_building_shade_share_all_winter_rows": round(
+                _avg(wr, "route_building_shade_share") or 0.0, 6
+            ),
+            "april_early_green_mult_weak_count": april_weak,
+            "april_late_green_mult_strong_count": april_strong,
+            "cyclist_vs_ped_cost_per_km_ratio_high_snow": round(ratio, 6)
+            if ratio is not None
+            else None,
+        }
+    ]
+
+
 def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
     ru = {
         "experiment_id": "ID эксперимента",
@@ -1277,6 +1424,14 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "snapshot_cloud_cover_pct": "Снимок: облачность, %",
         "snapshot_humidity_pct": "Снимок: влажность, %",
         "snapshot_shortwave_radiation_wm2": "Снимок: КВ, Вт/м²",
+        "snapshot_snowfall_cm_h": "Снимок: снегопад, см/ч",
+        "snapshot_snow_depth_m": "Снимок: глубина снега, м",
+        "snapshot_weather_code": "Снимок: код погоды WMO",
+        "snapshot_routing_season": "Снимок: эффективный сезон маршрутизации",
+        "snapshot_routing_season_calendar": "Снимок: календарный сезон",
+        "snapshot_routing_season_source": "Снимок: источник сезона (calendar/adaptive)",
+        "snapshot_season_green_mult": "Снимок: множитель зелёного бонуса",
+        "snapshot_snow_model_strength": "Снимок: сила зимней snow-модели",
         "weather_snapshot_source": "Источник погодного снимка (батч)",
         "synthetic_weather_time_iso": "Synthetic: ISO времени снимка",
         "project_weather_stress_global_blend": "Проект: WEATHER_STRESS_GLOBAL_BLEND",
@@ -1319,7 +1474,9 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "weather_snowfall_cm_h": "Снегопад, см/ч",
     "weather_snow_depth_m": "Глубина снега, м (модель)",
     "weather_weather_code": "Код погоды WMO",
-    "weather_routing_season": "Сезонный профиль маршрутизации",
+    "weather_routing_season": "Сезонный профиль маршрутизации (эффективный)",
+    "weather_routing_season_calendar": "Сезон по календарю",
+    "weather_routing_season_source": "Источник сезона (calendar/adaptive)",
     "weather_season_green_mult": "Сезон: множитель зелёного бонуса",
     "weather_season_tree_heat_mult": "Сезон: множитель тени деревьев (heat)",
     "weather_snow_model_strength": "Сила зимней snow-модели",
@@ -1437,6 +1594,7 @@ def write_xlsx(
     summary_by_weather_date: Optional[List[Dict[str, Any]]] = None,
     summary_by_weather_date_variant: Optional[List[Dict[str, Any]]] = None,
     summary_heat_kpi: Optional[List[Dict[str, Any]]] = None,
+    summary_winter_kpi: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     from openpyxl import Workbook
 
@@ -1552,6 +1710,8 @@ def write_xlsx(
     blocks: List[Tuple[str, List[Dict[str, Any]]]] = []
     if summary_heat_kpi:
         blocks.append(("Heat-weather KPI (synthetic)", summary_heat_kpi))
+    if summary_winter_kpi:
+        blocks.append(("Winter KPI (synthetic)", summary_winter_kpi))
     blocks.extend(
         [
             ("Средние по дате погоды", s_wd),

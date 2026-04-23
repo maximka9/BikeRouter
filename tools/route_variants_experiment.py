@@ -3,9 +3,10 @@
 Запуск (из корня репозитория NIR)::
 
     python -m bike_router.tools.route_variants_experiment --n-points 10
+    python -m bike_router.tools.route_variants_experiment --weather winter --n-points 6
 
-Погода: один раз в центре ``PRECACHE_AREA_POLYGON_WKT``; далее для всех O–D
-передаётся ``fixed-snapshot`` с теми же полями (без повторных запросов к API).
+По умолчанию погода: один снимок Open-Meteo в центре полигона; режим ``--weather winter`` —
+96 зимних synthetic-кейсов (``weather_winter_synthetic_grid``), все 6 вариантов маршрута.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ def run_variants_experiment(
     output_path: Optional[str],
     limit: Optional[int],
     offset: int,
+    weather_mode: str = "live",
 ) -> str:
     _ensure_pkg_path()
 
@@ -76,11 +78,15 @@ def run_variants_experiment(
         _set_quiet_mode_for_batch,
         build_pair_comparison,
         build_summaries,
+        build_winter_kpi_rows,
+        centroid_lat_lon_for_weather,
+        kwargs_fixed_snapshot_from_case,
         meta_append_batch_weather_snapshot,
         resolve_live_weather_once_for_polygon,
         route_to_raw_row,
         sample_points_in_polygon,
         variants_output_xlsx_path,
+        weather_winter_synthetic_grid,
         write_route_vertices_csv_gzip,
         write_xlsx,
     )
@@ -117,33 +123,56 @@ def run_variants_experiment(
     )
     n_pairs = n_points * (n_points - 1)
     profile_tuple = _batch_profiles_from_arg(profiles_mode)
+    wm = (weather_mode or "live").strip().lower()
+    winter_mode = wm in ("winter_synthetic", "winter-synthetic", "winter")
 
-    w_snap, wsrc, _wp, dep_iso, lat_c, lon_c = resolve_live_weather_once_for_polygon(
-        poly, settings=settings
-    )
-    _log.info(
-        "Погода (один снимок): источник=%s dep=%s center_lat=%.6f center_lon=%.6f",
-        wsrc,
-        dep_iso,
-        lat_c,
-        lon_c,
+    from bike_router.services.weather import (
+        build_weather_weight_params,
+        snapshot_from_manual,
     )
 
-    fixed_kw: Dict[str, Any] = {
-        "weather_mode": "fixed-snapshot",
-        "use_live_weather": False,
-        "weather_time": dep_iso,
-        "temperature_c": float(w_snap.temperature_c),
-        "precipitation_mm": float(w_snap.precipitation_mm),
-        "wind_speed_ms": float(w_snap.wind_speed_ms),
-        "cloud_cover_pct": float(w_snap.cloud_cover_pct),
-        "humidity_pct": float(w_snap.humidity_pct),
-        "wind_gusts_ms": w_snap.wind_gusts_ms,
-        "shortwave_radiation_wm2": w_snap.shortwave_radiation_wm2,
-    }
-    wd_live = getattr(w_snap, "wind_direction_deg", None)
-    if wd_live is not None:
-        fixed_kw["wind_direction_deg"] = float(wd_live)
+    grid: Optional[List[Any]] = None
+    wp_meta: Any = None
+    if winter_mode:
+        grid = weather_winter_synthetic_grid()
+        lat_c, lon_c = centroid_lat_lon_for_weather(poly)
+        c0 = grid[0]
+        w_snap = snapshot_from_manual(
+            temperature_c=c0.temperature_c,
+            precipitation_mm=c0.precipitation_mm,
+            wind_speed_ms=c0.wind_speed_ms,
+            wind_gusts_ms=c0.wind_gusts_ms,
+            cloud_cover_pct=c0.cloud_cover_pct,
+            humidity_pct=c0.humidity_pct,
+            shortwave_radiation_wm2=c0.shortwave_radiation_wm2,
+            snowfall_cm_h=float(c0.snowfall_cm_h),
+            snow_depth_m=float(c0.snow_depth_m),
+            weather_code=c0.weather_code,
+        )
+        dep_iso = str(c0.weather_time_iso)
+        wsrc = "synthetic_winter_grid"
+        wp_meta = build_weather_weight_params(
+            w_snap,
+            enabled=True,
+            settings=settings,
+            reference_iso=dep_iso,
+        )
+        _log.info(
+            "Зимняя synthetic-сетка: %d кейсов, meta-снимок по первому (%s)",
+            len(grid),
+            c0.case_id,
+        )
+    else:
+        w_snap, wsrc, wp_meta, dep_iso, lat_c, lon_c = resolve_live_weather_once_for_polygon(
+            poly, settings=settings
+        )
+        _log.info(
+            "Погода (один снимок): источник=%s dep=%s center_lat=%.6f center_lon=%.6f",
+            wsrc,
+            dep_iso,
+            lat_c,
+            lon_c,
+        )
 
     route_tasks: List[Tuple[int, int, str]] = [
         (i, j, prof)
@@ -152,7 +181,13 @@ def run_variants_experiment(
     ]
     route_tasks = _apply_limit_offset(route_tasks, limit=limit, offset=offset)
 
-    expected_routes = len(route_tasks) * len(EXPECTED_VARIANTS)
+    if winter_mode and grid is not None:
+        expected_routes = len(route_tasks) * len(EXPECTED_VARIANTS) * len(grid)
+        pbar_total = len(route_tasks) * len(grid)
+    else:
+        expected_routes = len(route_tasks) * len(EXPECTED_VARIANTS)
+        pbar_total = len(route_tasks)
+
     raw_rows: List[Dict[str, Any]] = []
     vertices: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
@@ -163,19 +198,27 @@ def run_variants_experiment(
 
     _set_quiet_mode_for_batch(verbose)
     pbar = tqdm(
-        total=len(route_tasks),
-        desc="Варианты×пары",
-        unit="пара",
+        total=pbar_total,
+        desc="Варианты×пары×зима" if winter_mode else "Варианты×пары",
+        unit="задача" if winter_mode else "пара",
         leave=True,
         mininterval=2.0 if not verbose else 0.3,
     )
 
-    for i, j, prof in route_tasks:
+    def _process_od_variants(
+        *,
+        i: int,
+        j: int,
+        prof: str,
+        departure_time: str,
+        weather_kwargs: Dict[str, Any],
+        test_meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        nonlocal n_ok, n_fail, n_skip, route_id_counter
         o_pt = points[i]
         d_pt = points[j]
         start = (o_pt.lat, o_pt.lon)
         end = (d_pt.lat, d_pt.lon)
-        pbar.set_postfix(od=_direction_key(i, j), p=prof, ok=n_ok, refresh=False)
         try:
             alt = eng.compute_alternatives(
                 start=start,
@@ -183,14 +226,14 @@ def run_variants_experiment(
                 profile_key=prof,
                 green_enabled=True,
                 corridor_expand_schedule_meters=EXPERIMENT_CORRIDOR_EXPAND_M,
-                departure_time=dep_iso,
-                **fixed_kw,
+                departure_time=departure_time,
+                **weather_kwargs,
             )
             by_mode = {r.mode: r for r in alt.routes}
         except RouteNotFoundError:
             n_skip += 1
             pbar.update(1)
-            continue
+            return
         except (BikeRouterError, Exception) as e:
             code = getattr(e, "code", type(e).__name__)
             for mode in EXPECTED_VARIANTS:
@@ -206,7 +249,7 @@ def run_variants_experiment(
                 )
             n_fail += 1
             pbar.update(1)
-            continue
+            return
 
         for mode in EXPECTED_VARIANTS:
             if mode not in by_mode:
@@ -239,6 +282,7 @@ def run_variants_experiment(
                 r=r,
                 baseline_full=by_mode.get("full"),
                 weather_date="",
+                test_weather_meta=test_meta,
             )
             raw_rows.append(row)
             n_ok += 1
@@ -258,11 +302,81 @@ def run_variants_experiment(
             _log.info(
                 "Промежуточно %d/%d: ok=%d fail=%d skip=%d elapsed=%.0f с",
                 pbar.n,
-                len(route_tasks),
+                pbar_total,
                 n_ok,
                 n_fail,
                 n_skip,
                 elapsed,
+            )
+
+    if winter_mode and grid is not None:
+        for syn_case in grid:
+            wkw = kwargs_fixed_snapshot_from_case(syn_case)
+            dep_case = str(wkw.get("weather_time") or "")
+            test_meta = {
+                "weather_test_case_id": syn_case.case_id,
+                "weather_test_temperature_c": syn_case.temperature_c,
+                "weather_test_precipitation_mm": syn_case.precipitation_mm,
+                "weather_test_wind_speed_ms": syn_case.wind_speed_ms,
+                "weather_test_wind_gusts_ms": syn_case.wind_gusts_ms,
+                "weather_test_cloud_cover_pct": syn_case.cloud_cover_pct,
+                "weather_test_humidity_pct": syn_case.humidity_pct,
+                "weather_test_shortwave_radiation_wm2": syn_case.shortwave_radiation_wm2,
+                "weather_test_wind_direction_deg": getattr(
+                    syn_case, "wind_direction_deg", None
+                ),
+                "weather_test_snowfall_cm_h": float(
+                    getattr(syn_case, "snowfall_cm_h", 0.0) or 0.0
+                ),
+                "weather_test_snow_depth_m": float(
+                    getattr(syn_case, "snow_depth_m", 0.0) or 0.0
+                ),
+                "weather_test_weather_code": getattr(syn_case, "weather_code", None),
+                "weather_test_time_iso": getattr(
+                    syn_case, "weather_time_iso", dep_case
+                ),
+            }
+            for i, j, prof in route_tasks:
+                pbar.set_postfix(
+                    case=syn_case.case_id,
+                    od=_direction_key(i, j),
+                    p=prof,
+                    ok=n_ok,
+                    refresh=False,
+                )
+                _process_od_variants(
+                    i=i,
+                    j=j,
+                    prof=prof,
+                    departure_time=dep_case,
+                    weather_kwargs=wkw,
+                    test_meta=test_meta,
+                )
+    else:
+        fixed_kw: Dict[str, Any] = {
+            "weather_mode": "fixed-snapshot",
+            "use_live_weather": False,
+            "weather_time": dep_iso,
+            "temperature_c": float(w_snap.temperature_c),
+            "precipitation_mm": float(w_snap.precipitation_mm),
+            "wind_speed_ms": float(w_snap.wind_speed_ms),
+            "cloud_cover_pct": float(w_snap.cloud_cover_pct),
+            "humidity_pct": float(w_snap.humidity_pct),
+            "wind_gusts_ms": w_snap.wind_gusts_ms,
+            "shortwave_radiation_wm2": w_snap.shortwave_radiation_wm2,
+        }
+        wd_live = getattr(w_snap, "wind_direction_deg", None)
+        if wd_live is not None:
+            fixed_kw["wind_direction_deg"] = float(wd_live)
+        for i, j, prof in route_tasks:
+            pbar.set_postfix(od=_direction_key(i, j), p=prof, ok=n_ok, refresh=False)
+            _process_od_variants(
+                i=i,
+                j=j,
+                prof=prof,
+                departure_time=dep_iso,
+                weather_kwargs=fixed_kw,
+                test_meta=None,
             )
     pbar.close()
 
@@ -295,6 +409,11 @@ def run_variants_experiment(
         ("pair_limit", limit if limit is not None else ""),
         ("pair_offset", offset),
     ]
+    if winter_mode:
+        meta_rows = [
+            ("experiment_weather_grid", "winter_synthetic_96"),
+            ("synthetic_test_cases", len(grid or [])),
+        ] + meta_rows
     meta_rows = meta_append_batch_weather_snapshot(
         meta_rows,
         snap=w_snap,
@@ -302,7 +421,10 @@ def run_variants_experiment(
         departure_iso=dep_iso,
         center_lat=lat_c,
         center_lon=lon_c,
-        experiment_kind="route_variants",
+        experiment_kind="route_variants_winter"
+        if winter_mode
+        else "route_variants",
+        wp=wp_meta,
     )
 
     vgz_path: Optional[str] = None
@@ -326,6 +448,7 @@ def run_variants_experiment(
         legacy_multisheet=False,
         summary_by_weather_date=[],
         summary_by_weather_date_variant=[],
+        summary_winter_kpi=build_winter_kpi_rows(raw_rows) if winter_mode else None,
     )
     _log.info("Готово: %s", out)
     return out
@@ -361,6 +484,12 @@ def main() -> None:
         choices=("both", "cyclist", "pedestrian"),
         default="both",
     )
+    parser.add_argument(
+        "--weather",
+        choices=("live", "winter"),
+        default="live",
+        help="live — один снимок Open-Meteo; winter — synthetic 96×6 вариантов.",
+    )
     parser.add_argument("--output", type=str, default=None, help="Путь к .xlsx")
     parser.add_argument(
         "--limit",
@@ -394,6 +523,7 @@ def main() -> None:
         output_path=args.output,
         limit=args.limit,
         offset=int(args.offset),
+        weather_mode="winter" if args.weather == "winter" else "live",
     )
     print(path)
 

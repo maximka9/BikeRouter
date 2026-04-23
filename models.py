@@ -364,7 +364,15 @@ class WeatherRouteContext(BaseModel):
     )
     routing_season: str = Field(
         default="",
-        description="winter | early_spring | spring_ramp | green_season | late_autumn",
+        description="Эффективный сезон: winter | early_spring | spring_ramp | green_season | late_autumn",
+    )
+    routing_season_calendar: str = Field(
+        default="",
+        description="Сезон по календарю (до adaptive-коррекции)",
+    )
+    routing_season_source: str = Field(
+        default="",
+        description="Источник эффективного сезона: calendar | adaptive",
     )
     season_green_route_mult: float = Field(
         default=1.0,

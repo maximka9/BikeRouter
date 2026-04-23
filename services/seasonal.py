@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Optional, Tuple
 
@@ -14,6 +15,8 @@ __all__ = (
     "season_green_route_multiplier",
     "season_tree_heat_route_multiplier",
     "snow_route_model_strength",
+    "SeasonRoutingContext",
+    "resolve_season_routing_context",
 )
 
 
@@ -49,6 +52,81 @@ def routing_season_label(d: date, s: Any) -> str:
     if m == 10 and dd >= 16:
         return "late_autumn"
     return "winter"
+
+
+@dataclass(frozen=True)
+class SeasonRoutingContext:
+    """Календарный и эффективный сезон для весов (зелень, снег, тень)."""
+
+    calendar_season: str
+    effective_season: str
+    source: str  # "calendar" | "adaptive"
+    season_green_route_mult: float
+
+
+def _snap_snow_depth_m(snap: Any) -> float:
+    return max(0.0, float(getattr(snap, "snow_depth_m", 0.0) or 0.0))
+
+
+def _snap_snowfall_cm_h(snap: Any) -> float:
+    return max(0.0, float(getattr(snap, "snowfall_cm_h", 0.0) or 0.0))
+
+
+def _green_mult_for_season_label(season: str, d: date, s: Any) -> float:
+    """Множитель зелёного бонуса для явной метки сезона (без плавного ramp апреля)."""
+    lab = (season or "green_season").strip().lower()
+    if lab == "spring_ramp":
+        return float(getattr(s, "season_green_ramp_start_mult", 0.18))
+    return float(
+        {
+            "winter": getattr(s, "season_green_mult_winter", 0.08),
+            "early_spring": getattr(s, "season_green_mult_early_spring", 0.18),
+            "green_season": getattr(s, "season_green_mult_green", 1.0),
+            "late_autumn": getattr(s, "season_green_mult_late_autumn", 0.42),
+        }.get(lab, season_green_route_multiplier(d, s))
+    )
+
+
+def resolve_season_routing_context(
+    d: date, snap: Any, s: Any
+) -> SeasonRoutingContext:
+    """Календарь + опционально погодная коррекция (без истории температур — только снимок)."""
+    cal = routing_season_label(d, s)
+    mode = str(getattr(s, "season_adaptive_mode", "calendar_only") or "calendar_only").strip().lower()
+    eff = cal
+    src = "calendar"
+    green_mult = season_green_route_multiplier(d, s)
+
+    if mode != "adaptive_if_possible":
+        return SeasonRoutingContext(cal, eff, src, green_mult)
+
+    T = float(getattr(snap, "temperature_c", 0.0) or 0.0)
+    sd = _snap_snow_depth_m(snap)
+    sf = _snap_snowfall_cm_h(snap)
+
+    warm_w = float(getattr(s, "season_adaptive_warm_anomaly_temp_c", 9.0))
+    sd_w = float(getattr(s, "season_adaptive_winter_snow_depth_max_m", 0.018))
+    sf_w = float(getattr(s, "season_adaptive_winter_fresh_max_cm_h", 0.35))
+
+    if cal in ("winter", "late_autumn") and T >= warm_w and sd <= sd_w and sf <= sf_w:
+        eff = "early_spring"
+        src = "adaptive"
+
+    snow_on_green_d = float(getattr(s, "season_adaptive_snow_depth_on_green_m", 0.04))
+    snow_on_green_f = float(getattr(s, "season_adaptive_fresh_on_green_cm_h", 0.45))
+    cold_green = float(getattr(s, "season_adaptive_cold_on_green_c", 1.5))
+    if cal == "green_season" and (sd >= snow_on_green_d or sf >= snow_on_green_f or T <= cold_green):
+        eff = "late_autumn"
+        src = "adaptive"
+
+    warm_early = float(getattr(s, "season_adaptive_early_april_warm_c", 11.0))
+    if cal == "early_spring" and T >= warm_early and sd <= 0.02 and sf <= 0.2:
+        eff = "spring_ramp"
+        src = "adaptive"
+
+    if eff != cal:
+        green_mult = _green_mult_for_season_label(eff, d, s)
+    return SeasonRoutingContext(cal, eff, src, float(green_mult))
 
 
 def season_green_route_multiplier(d: date, s: Any) -> float:
@@ -89,14 +167,6 @@ def season_tree_heat_route_multiplier(season: str, s: Any) -> float:
             "late_autumn": getattr(s, "season_tree_heat_mult_late_autumn", 0.45),
         }.get(key, 1.0)
     )
-
-
-def _snap_snow_depth_m(snap: Any) -> float:
-    return max(0.0, float(getattr(snap, "snow_depth_m", 0.0) or 0.0))
-
-
-def _snap_snowfall_cm_h(snap: Any) -> float:
-    return max(0.0, float(getattr(snap, "snowfall_cm_h", 0.0) or 0.0))
 
 
 def snow_route_model_strength(season: str, snap: Any, s: Any) -> float:

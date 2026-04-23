@@ -663,6 +663,44 @@ class Settings:
     snow_phys_cyclist_mult_boost: float = _env(
         "SNOW_PHYS_CYCLIST_MULT_BOOST", 0.12, float
     )
+    winter_clearance_high_mitigate: float = _env(
+        "WINTER_CLEARANCE_HIGH_MITIGATE", 0.22, float
+    )
+    # Сезон: calendar_only | adaptive_if_possible (см. services.seasonal.resolve_season_routing_context).
+    season_adaptive_mode: str = _env("SEASON_ADAPTIVE_MODE", "calendar_only", str)
+    season_adaptive_warm_anomaly_temp_c: float = _env(
+        "SEASON_ADAPTIVE_WARM_ANOMALY_TEMP_C", 9.0, float
+    )
+    season_adaptive_winter_snow_depth_max_m: float = _env(
+        "SEASON_ADAPTIVE_WINTER_SNOW_DEPTH_MAX_M", 0.018, float
+    )
+    season_adaptive_winter_fresh_max_cm_h: float = _env(
+        "SEASON_ADAPTIVE_WINTER_FRESH_MAX_CM_H", 0.35, float
+    )
+    season_adaptive_snow_depth_on_green_m: float = _env(
+        "SEASON_ADAPTIVE_SNOW_DEPTH_ON_GREEN_M", 0.04, float
+    )
+    season_adaptive_fresh_on_green_cm_h: float = _env(
+        "SEASON_ADAPTIVE_FRESH_ON_GREEN_CM_H", 0.45, float
+    )
+    season_adaptive_cold_on_green_c: float = _env(
+        "SEASON_ADAPTIVE_COLD_ON_GREEN_C", 1.5, float
+    )
+    season_adaptive_early_april_warm_c: float = _env(
+        "SEASON_ADAPTIVE_EARLY_APRIL_WARM_C", 11.0, float
+    )
+    # WMO weather_code — маршрутизация (см. services.weather.wmo_weather_code_profile).
+    wc_snow_model_strength_amp: float = _env("WC_SNOW_MODEL_STRENGTH_AMP", 0.22, float)
+    wc_wet_slip_physical_amp: float = _env("WC_WET_SLIP_PHYSICAL_AMP", 0.08, float)
+    wc_mixed_precip_stress_amp: float = _env("WC_MIXED_PRECIP_STRESS_AMP", 0.12, float)
+    wc_wet_slip_surface_amp: float = _env("WC_WET_SLIP_SURFACE_AMP", 0.26, float)
+    wc_mixed_surface_amp: float = _env("WC_MIXED_SURFACE_AMP", 0.18, float)
+    wc_wet_stairs_amp: float = _env("WC_WET_STAIRS_AMP", 0.14, float)
+    wc_mixed_snow_stress_amp: float = _env("WC_MIXED_SNOW_STRESS_AMP", 0.16, float)
+    winter_clearance_low_amp: float = _env("WINTER_CLEARANCE_LOW_AMP", 0.32, float)
+    winter_clearance_low_amp_cyclist: float = _env(
+        "WINTER_CLEARANCE_LOW_AMP_CYCLIST", 0.22, float
+    )
 
     # --- Кэш ---
     cache_satellite: bool = _env_bool("CACHE_SATELLITE", True)
@@ -964,6 +1002,17 @@ def routing_engine_cache_fingerprint() -> str:
         "season_green_ramp_end_day": _env("SEASON_GREEN_RAMP_END_DAY", 20.0, float),
         "snow_depth_mult_tier3": _env("SNOW_DEPTH_MULT_TIER3", 1.28, float),
         "snow_fresh_mult_tier3": _env("SNOW_FRESH_MULT_TIER3", 1.22, float),
+        "season_adaptive_mode": _env("SEASON_ADAPTIVE_MODE", "calendar_only", str),
+        "wc_snow_model_strength_amp": _env("WC_SNOW_MODEL_STRENGTH_AMP", 0.22, float),
+        "wc_wet_slip_surface_amp": _env("WC_WET_SLIP_SURFACE_AMP", 0.26, float),
+        "wc_mixed_surface_amp": _env("WC_MIXED_SURFACE_AMP", 0.18, float),
+        "winter_clearance_low_amp": _env("WINTER_CLEARANCE_LOW_AMP", 0.32, float),
+        "winter_clearance_low_amp_cyclist": _env(
+            "WINTER_CLEARANCE_LOW_AMP_CYCLIST", 0.22, float
+        ),
+        "winter_clearance_high_mitigate": _env(
+            "WINTER_CLEARANCE_HIGH_MITIGATE", 0.22, float
+        ),
         "heat_stress_model_version": HEAT_STRESS_MODEL_VERSION,
         "osm_highway_filter": OSM_HIGHWAY_FILTER,
         "preference_profiles": pref_profiles,

@@ -227,6 +227,10 @@ def _build_weather_route_context(
         heat_continuous=hc,
         heat_microclimate=hm,
         routing_season=str(getattr(wp, "routing_season", "") or ""),
+        routing_season_calendar=str(
+            getattr(wp, "routing_season_calendar", "") or ""
+        ),
+        routing_season_source=str(getattr(wp, "routing_season_source", "") or ""),
         season_green_route_mult=float(getattr(wp, "season_green_route_mult", 1.0)),
         season_tree_heat_route_mult=float(
             getattr(wp, "season_tree_heat_route_mult", 1.0)

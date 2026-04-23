@@ -2,35 +2,29 @@
 
 Выход: ``bike_router/experiment_outputs/heat_weather_experiment_YYYYMMDD_HHMMSS.xlsx`` (UTC в имени).
 
-Сетка ``--grid`` (см. ``_experiment_common``):
+Сетка ``--grid``:
 
-**summer** (36 кейсов) — декартово произведение:
+**summer** (144 кейса) — единственная «летняя» сетка: базовые **36** комбинаций
+(температура × дождь × сила ветра × облачность/КВ, см. ``weather_windows_test_grid``),
+для **каждой** четыре направления ветра «откуда дует» **0°, 90°, 180°, 270°** (как Open-Meteo).
+Итого 36×4 = **144**; direction-aware ветер **всегда** включён.
 
-  - температура: 0, 12.5, 25 °C (3);
-  - дождь: выкл / вкл с осадками 1.5 мм·ч⁻¹ (2);
-  - ветер: слабый (2/3 м·с⁻¹) или сильный (9/14 м·с⁻¹) (2);
-  - облачность + КВ: три уровня (0%+750, 50%+400, 100%+80 Вт·м⁻²) (3).
+**winter** (216 кейсов) — зимняя сетка **54** комбинации
+(температура × снегопад × глубина × пара скорость/порыв), см. ``weather_winter_synthetic_grid``,
+каждая × **4 направления** → 54×4 = **216**.
 
-  Итого 3×2×2×3 = **36** сценариев. Направление ветра в кейсе не задано (direction-aware выключен).
+**all** (360 кейсов) — подряд **summer** затем **winter** в одном прогоне и одном Excel
+(метка сетки в meta: ``all``).
 
-**summer_wind** (144 кейса) — те же **36** базовых сценариев, для каждого четыре направления ветра
-«откуда дует» в градусах: **0°, 90°, 180°, 270°** (метеоконвенция как у Open-Meteo). Итого 36×4 = **144**.
+Устаревшее имя ``summer_wind`` воспринимается как ``summer`` (то же самое 144).
 
-**winter** (96 кейсов) — зимняя сетка:
-
-  - температура: −15, −5, 0, 2 °C (4);
-  - свежий снег см·ч⁻¹: 0 / 0.45 / 3.2 с метками F0,F1,F2 (3);
-  - глубина снега на земле: 0, 0.03, 0.10, 0.22 м (4);
-  - ветер: слабый (2/3) или сильный (11/15) м·с⁻¹ (2).
-
-  Итого 4×3×4×2 = **96**. Календарная дата снимка для сезона — зимняя (см. ``WINTER_SYNTH_WEATHER_ISO`` в общем модуле).
-
-``WEATHER_STRESS_GLOBAL_BLEND`` не подменяется: используются значения из .env / Settings.
+``WEATHER_STRESS_GLOBAL_BLEND`` не подменяется (Settings / .env).
 
 Запуск::
 
     python -m bike_router.tools.heat_weather_experiment
     python -m bike_router.tools.heat_weather_experiment --grid winter --verbose
+    python -m bike_router.tools.heat_weather_experiment --grid all
 """
 
 from __future__ import annotations
@@ -75,7 +69,7 @@ def run_heat_weather_experiment(
         DEFAULT_ROUTE_BATCH_SEED,
         EXPERIMENT_CORRIDOR_EXPAND_M,
         SYNTHETIC_TEST_WEATHER_ISO,
-        weather_winter_synthetic_grid,
+        weather_winter_synthetic_grid_with_wind_dirs,
         _batch_profiles_from_arg,
         _direction_key,
         _iter_directed_pairs,
@@ -89,7 +83,6 @@ def run_heat_weather_experiment(
         kwargs_fixed_snapshot_from_case,
         route_to_raw_row,
         sample_points_in_polygon,
-        weather_windows_test_grid,
         weather_summer_test_grid_with_wind_dirs,
         write_route_vertices_csv_gzip,
         write_xlsx,
@@ -134,16 +127,21 @@ def run_heat_weather_experiment(
     n_pairs = n_points * (n_points - 1)
     profile_tuple = _batch_profiles_from_arg(profiles_mode)
     wg = (weather_grid or "summer").strip().lower()
-    if wg == "winter":
-        grid = weather_winter_synthetic_grid()
-        grid_name = "96 зимних погод"
-    elif wg in ("summer_wind", "summer-wind"):
-        grid = weather_summer_test_grid_with_wind_dirs()
-        grid_name = "144 погод (36×4 направления)"
+    if wg in ("summer_wind", "summer-wind"):
+        wg = "summer"
+        _log.info("grid summer_wind совпадает с summer (лето всегда с направлением ветра)")
+    summer_g = weather_summer_test_grid_with_wind_dirs()
+    winter_g = weather_winter_synthetic_grid_with_wind_dirs()
+    if wg == "all":
+        grid = summer_g + winter_g
+        grid_name = "лето+зима (144+216=360)"
+    elif wg == "winter":
+        grid = winter_g
+        grid_name = "216 зимних (54×4 направления)"
     else:
-        grid = weather_windows_test_grid()
-        grid_name = "36 погод"
-    assert len(grid) in (36, 96, 144)
+        grid = summer_g
+        grid_name = "144 летних (36×4 направления)"
+    assert len(grid) in (144, 216, 360)
 
     route_tasks: List[Tuple[int, int, str]] = [
         (i, j, prof)
@@ -300,7 +298,17 @@ def run_heat_weather_experiment(
     s_var, s_prof, s_dir = build_summaries(raw_rows)
     pair_cmp = build_pair_comparison(raw_rows)
     heat_kpi = build_heat_weather_kpi_rows(raw_rows)
-    winter_kpi = build_winter_kpi_rows(raw_rows) if wg == "winter" else None
+    if wg == "winter":
+        winter_kpi = build_winter_kpi_rows(raw_rows)
+    elif wg == "all":
+        wrows = [
+            r
+            for r in raw_rows
+            if str(r.get("weather_test_case_id") or "").startswith("winter_")
+        ]
+        winter_kpi = build_winter_kpi_rows(wrows) if wrows else None
+    else:
+        winter_kpi = None
     out = experiment_output_xlsx_path(script_stem="heat_weather_experiment")
     wkt_fp = routing_engine_cache_fingerprint()
     meta_rows: List[Tuple[str, Any]] = [
@@ -363,9 +371,10 @@ def main() -> None:
     from bike_router.tools._experiment_common import DEFAULT_BATCH_LOG_EVERY
 
     grid_help = (
-        "summer: 3 темп × 2 дождя × 2 ветра × 3 облачности = 36 (без направления ветра). "
-        "summer_wind: те же 36 × 4 направления (0/90/180/270°) = 144. "
-        "winter: 4 темп × 3 снегопада × 4 глубины × 2 ветра = 96."
+        "summer: 36 базовых летних × 4 направления ветра = 144 (ветер всегда с направлением). "
+        "winter: 54 зимних × 4 направления = 216. "
+        "all: summer затем winter в одном файле = 360. "
+        "summer_wind — то же, что summer (устаревший алиас)."
     )
     parser = argparse.ArgumentParser(
         description="Heat на synthetic-сетке; см. модульный docstring.",
@@ -374,7 +383,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--grid",
-        choices=("summer", "summer_wind", "winter"),
+        choices=("summer", "summer_wind", "winter", "all"),
         default="summer",
         metavar="NAME",
     )

@@ -181,14 +181,14 @@ EARLY_SPRING_SYNTH_WEATHER_ISO = "2000-04-05T12:00:00+00:00"
 
 
 def weather_winter_synthetic_grid() -> List[SyntheticWeatherCase]:
-    """4×3×4×2 = 96: температура × снегопад × глубина × ветер (контролируемые зимние кейсы)."""
-    temps = (-15.0, -5.0, 0.0, 2.0)
+    """3×3×3×2 = 54: температура × снегопад × глубина снега на земле × ветер (зимние synthetic-кейсы)."""
+    temps = (-20.0, -10.0, 0.0)
     fresh_levels = (
         (0.0, "F0"),
         (0.45, "F1"),
         (3.2, "F2"),
     )
-    depths_m = (0.0, 0.03, 0.10, 0.22)
+    depths_m = (0.0, 0.10, 0.22)
     winds = ((2.0, 3.0, "W0"), (11.0, 15.0, "W1"))
     out: List[SyntheticWeatherCase] = []
     for T in temps:
@@ -215,7 +215,35 @@ def weather_winter_synthetic_grid() -> List[SyntheticWeatherCase]:
                             weather_code=73 if sf > 1.0 else (71 if sf > 0.1 else None),
                         )
                     )
-    assert len(out) == 96
+    assert len(out) == 54
+    return out
+
+
+def weather_winter_synthetic_grid_with_wind_dirs() -> List[SyntheticWeatherCase]:
+    """54 зимних synthetic × 4 направления ветра (0/90/180/270°, «откуда дует») = 216 кейсов."""
+    base = weather_winter_synthetic_grid()
+    dirs = (0.0, 90.0, 180.0, 270.0)
+    out: List[SyntheticWeatherCase] = []
+    for c in base:
+        for d in dirs:
+            out.append(
+                SyntheticWeatherCase(
+                    case_id=f"{c.case_id}_WD{int(d)}",
+                    temperature_c=c.temperature_c,
+                    precipitation_mm=c.precipitation_mm,
+                    wind_speed_ms=c.wind_speed_ms,
+                    wind_gusts_ms=c.wind_gusts_ms,
+                    cloud_cover_pct=c.cloud_cover_pct,
+                    humidity_pct=c.humidity_pct,
+                    shortwave_radiation_wm2=c.shortwave_radiation_wm2,
+                    weather_time_iso=c.weather_time_iso,
+                    snowfall_cm_h=c.snowfall_cm_h,
+                    snow_depth_m=c.snow_depth_m,
+                    weather_code=c.weather_code,
+                    wind_direction_deg=float(d),
+                )
+            )
+    assert len(out) == 216
     return out
 
 
@@ -1508,7 +1536,7 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "elapsed_seconds": "Время работы, с",
         "weather_schedule": "Сценарий погоды (none / now / past / test)",
         "synthetic_test_cases": "Число синтетических сценариев (test)",
-        "experiment_weather_grid": "Сетка synthetic (summer / winter)",
+        "experiment_weather_grid": "Сетка synthetic (summer / winter / all)",
         "weather_mode_engine": "Режим погоды (движок)",
         "weather_time_utc_snapshot": "Снимок времени UTC (режим now)",
         "past_days": "Дней архива (режим past)",

@@ -1,10 +1,6 @@
-"""Импорт и сетка synthetic; обёртка route_batch_experiment."""
+"""Импорт и сетка synthetic; модуль route_batch_experiment."""
 
 from __future__ import annotations
-
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
@@ -24,17 +20,28 @@ def test_weather_summer_wind_grid_len_144() -> None:
     assert all(getattr(c, "wind_direction_deg", None) is not None for c in g)
 
 
-def test_route_batch_experiment_wrapper_exits_2() -> None:
-    root = Path(__file__).resolve().parents[2]
-    script = root / "bike_router" / "tools" / "route_batch_experiment.py"
-    r = subprocess.run(
-        [sys.executable, str(script)],
-        capture_output=True,
-        text=True,
-        check=False,
+def test_weather_winter_wind_grid_len_216() -> None:
+    from bike_router.tools._experiment_common import weather_winter_synthetic_grid_with_wind_dirs
+
+    g = weather_winter_synthetic_grid_with_wind_dirs()
+    assert len(g) == 216
+    assert all(getattr(c, "wind_direction_deg", None) is not None for c in g)
+
+
+def test_combined_summer_winter_grid_len_360() -> None:
+    from bike_router.tools._experiment_common import (
+        weather_summer_test_grid_with_wind_dirs,
+        weather_winter_synthetic_grid_with_wind_dirs,
     )
-    assert r.returncode == 2
-    assert "route_variants_experiment" in (r.stderr or "")
+
+    g = weather_summer_test_grid_with_wind_dirs() + weather_winter_synthetic_grid_with_wind_dirs()
+    assert len(g) == 360
+
+
+def test_route_batch_experiment_module_has_main() -> None:
+    from bike_router.tools import route_batch_experiment as m
+
+    assert callable(getattr(m, "main", None))
 
 
 def test_resolve_live_weather_once_single_call(monkeypatch: pytest.MonkeyPatch) -> None:

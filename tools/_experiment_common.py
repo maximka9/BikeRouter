@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 import uuid
@@ -1367,6 +1368,356 @@ def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str
     return [row]
 
 
+def _heat_od_prof(r: Dict[str, Any]) -> Tuple[str, str, str]:
+    return (
+        str(r.get("origin_point_id") or ""),
+        str(r.get("destination_point_id") or ""),
+        str(r.get("profile") or ""),
+    )
+
+
+def _weather_case_wind_stem(case_id: str) -> str:
+    """Базовый id сценария без суффикса ``_WD{deg}`` (лето/зима с направлением ветра)."""
+    s = str(case_id)
+    m = re.search(r"_WD\d+$", s)
+    return s[: m.start()] if m else s
+
+
+def _col_finite_floats(rows: List[Dict[str, Any]], key: str) -> List[float]:
+    out: List[float] = []
+    for r in rows:
+        x = _heat_row_float(r, key)
+        if math.isfinite(x):
+            out.append(x)
+    return out
+
+
+def build_heat_weather_kpi_extras_dict(raw_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Поля для merge в первую строку Heat-weather KPI: зелёный критерий, ветер, покрытие, surface."""
+    ex: Dict[str, Any] = {}
+    if not raw_rows:
+        return ex
+
+    gr = _col_finite_floats(raw_rows, "route_mean_green_route_factor")
+    if gr:
+        ex["green_route_factor_min"] = round(min(gr), 6)
+        ex["green_route_factor_max"] = round(max(gr), 6)
+        ex["green_route_factor_mean"] = round(sum(gr) / len(gr), 6)
+        mu = sum(gr) / len(gr)
+        ex["green_route_factor_std"] = round(
+            math.sqrt(sum((x - mu) ** 2 for x in gr) / len(gr)), 6
+        ) if len(gr) > 1 else 0.0
+    else:
+        ex["green_route_factor_min"] = None
+        ex["green_route_factor_max"] = None
+        ex["green_route_factor_mean"] = None
+        ex["green_route_factor_std"] = None
+
+    ex["green_route_factor_heat_note_ru"] = (
+        "При включённой непрерывной тепло-модели (heat_continuous) тень деревьев и "
+        "микроклимат в основном входят в ef heat (open/tree/build), а столбец "
+        "route_mean_green_route_factor — это только дискретный бонус политики "
+        "max(wm.green−1,0)×trees_pct×green_coupling на ребре; при wm.green≤1 или "
+        "низкой доле деревьев на пути он остаётся ≈1.0 без ошибки расчёта."
+    )
+
+    by_stem_od: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        cid = r.get("weather_test_case_id")
+        if not cid:
+            continue
+        stem = _weather_case_wind_stem(str(cid))
+        if stem == str(cid):
+            continue
+        by_stem_od[(stem, *_heat_od_prof(r))].append(r)
+
+    wind_geom_groups = 0
+    for _k, lst in by_stem_od.items():
+        if len(lst) < 2:
+            continue
+        geoms = {str(x.get("geometry_json") or "") for x in lst}
+        if len(geoms) > 1:
+            wind_geom_groups += 1
+    ex["wind_dir_only_geometry_change_groups"] = int(wind_geom_groups)
+
+    orient_ranges: List[float] = []
+    orient_notable_pairs = 0
+    n_pairs_measured = 0
+    by_od: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        if not r.get("weather_test_case_id"):
+            continue
+        by_od[_heat_od_prof(r)].append(r)
+    for _od, lst in by_od.items():
+        wof = _col_finite_floats(lst, "route_mean_wind_orientation_factor")
+        if len(wof) < 2:
+            continue
+        n_pairs_measured += 1
+        rng = max(wof) - min(wof)
+        orient_ranges.append(rng)
+        if rng >= 0.02:
+            orient_notable_pairs += 1
+    ex["mean_wind_orientation_factor_range_per_od_pair"] = (
+        round(sum(orient_ranges) / len(orient_ranges), 6) if orient_ranges else None
+    )
+    ex["share_od_pairs_wind_orientation_range_ge_0p02"] = (
+        round(orient_notable_pairs / n_pairs_measured, 6) if n_pairs_measured else None
+    )
+
+    stairs_spreads: List[float] = []
+    harsh_spreads: List[float] = []
+    shade_spreads: List[float] = []
+    for _od, lst in by_od.items():
+        if len(lst) < 2:
+            continue
+        for key, bucket in (
+            ("route_stairs_length_fraction", stairs_spreads),
+            ("route_winter_harsh_surface_share", harsh_spreads),
+            ("route_building_shade_share", shade_spreads),
+        ):
+            vs = _col_finite_floats(lst, key)
+            if len(vs) >= 2:
+                bucket.append(max(vs) - min(vs))
+    ex["coverage_max_stairs_fraction_spread_any_od_pair"] = (
+        round(max(stairs_spreads), 6) if stairs_spreads else None
+    )
+    ex["coverage_max_winter_harsh_surface_spread_any_od_pair"] = (
+        round(max(harsh_spreads), 6) if harsh_spreads else None
+    )
+    ex["coverage_max_building_shade_spread_any_od_pair"] = (
+        round(max(shade_spreads), 6) if shade_spreads else None
+    )
+    ex["coverage_any_row_covered_share_positive"] = int(
+        any(_heat_row_float(r, "route_covered_share") > 1e-5 for r in raw_rows)
+    )
+    ex["coverage_any_pair_stairs_spread_ge_0p002"] = int(
+        bool(stairs_spreads and max(stairs_spreads) >= 0.002)
+    )
+    ex["coverage_any_pair_harsh_spread_ge_0p02"] = int(
+        bool(harsh_spreads and max(harsh_spreads) >= 0.02)
+    )
+    ex["coverage_any_pair_building_shade_spread_ge_0p02"] = int(
+        bool(shade_spreads and max(shade_spreads) >= 0.02)
+    )
+
+    surf = _col_finite_floats(raw_rows, "route_mean_surface_weather_factor")
+    wet = _col_finite_floats(raw_rows, "route_bad_wet_surface_share")
+    if surf:
+        ex["surface_weather_factor_min"] = round(min(surf), 6)
+        ex["surface_weather_factor_max"] = round(max(surf), 6)
+        ex["surface_weather_factor_mean"] = round(sum(surf) / len(surf), 6)
+    else:
+        ex["surface_weather_factor_min"] = None
+        ex["surface_weather_factor_max"] = None
+        ex["surface_weather_factor_mean"] = None
+    if wet:
+        ex["bad_wet_surface_share_min"] = round(min(wet), 6)
+        ex["bad_wet_surface_share_max"] = round(max(wet), 6)
+        ex["bad_wet_surface_share_mean"] = round(sum(wet) / len(wet), 6)
+    else:
+        ex["bad_wet_surface_share_min"] = None
+        ex["bad_wet_surface_share_max"] = None
+        ex["bad_wet_surface_share_mean"] = None
+
+    parts: List[str] = []
+    if ex.get("coverage_any_row_covered_share_positive"):
+        parts.append("есть ненулевой covered_share")
+    if ex.get("coverage_any_pair_stairs_spread_ge_0p002"):
+        parts.append("есть разброс доли лестниц по парам")
+    if ex.get("coverage_any_pair_harsh_spread_ge_0p02"):
+        parts.append("есть разброс winter_harsh_surface по парам")
+    if ex.get("coverage_any_pair_building_shade_spread_ge_0p02"):
+        parts.append("есть разброс building_shade по парам")
+    ex["validation_coverage_summary_ru"] = (
+        "; ".join(parts) if parts else "слабое покрытие: мало вариации stairs/harsh/shade/covered"
+    )
+
+    return ex
+
+
+def build_heat_qa_warning_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Автоматические QA-предупреждения по константности и «невидимому» reroute."""
+    warns: List[Dict[str, Any]] = []
+    if not raw_rows:
+        warns.append({"severity": "info", "code": "empty", "message": "нет строк маршрутов"})
+        return warns
+
+    gr = _col_finite_floats(raw_rows, "route_mean_green_route_factor")
+    if gr and max(gr) - min(gr) < 1e-4:
+        warns.append(
+            {
+                "severity": "info",
+                "code": "green_route_factor_constant",
+                "message": "route_mean_green_route_factor почти не меняется по строкам; "
+                "для heat см. green_route_factor_heat_note_ru в KPI (не баг сезонного множителя).",
+            }
+        )
+
+    cov = _col_finite_floats(raw_rows, "route_covered_share")
+    if cov and max(cov) < 1e-6:
+        warns.append(
+            {
+                "severity": "warning",
+                "code": "covered_share_all_zero",
+                "message": "route_covered_share везде ~0 — выборка не валидирует навесы/covered.",
+            }
+        )
+
+    bs = _col_finite_floats(raw_rows, "route_building_shade_share")
+    if len(bs) > 3 and max(bs) - min(bs) < 0.008:
+        warns.append(
+            {
+                "severity": "info",
+                "code": "building_shade_low_spread",
+                "message": "Низкий разброс route_building_shade_share по всему батчу.",
+            }
+        )
+
+    sf = _col_finite_floats(raw_rows, "route_stairs_length_fraction")
+    if len(sf) > 3 and max(sf) - min(sf) < 0.001:
+        warns.append(
+            {
+                "severity": "info",
+                "code": "stairs_fraction_low_spread",
+                "message": "Доля лестниц почти не варьируется — мало чувствительности к лестницам.",
+            }
+        )
+
+    wh = _col_finite_floats(raw_rows, "route_winter_harsh_surface_share")
+    if len(wh) > 5 and max(wh) - min(wh) < 0.015:
+        warns.append(
+            {
+                "severity": "info",
+                "code": "winter_harsh_low_spread",
+                "message": "Низкий разброс route_winter_harsh_surface_share (или мало зимних строк).",
+            }
+        )
+
+    by_od: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        if r.get("weather_test_case_id"):
+            by_od[_heat_od_prof(r)].append(r)
+    invisible_reroute_pairs = 0
+    multi_geom_pairs = 0
+    for lst in by_od.values():
+        if len(lst) < 2:
+            continue
+        geoms = {str(x.get("geometry_json") or "") for x in lst}
+        if len(geoms) <= 1:
+            continue
+        multi_geom_pairs += 1
+        metric_keys = (
+            "route_stairs_length_fraction",
+            "route_winter_harsh_surface_share",
+            "route_open_sky_share",
+            "route_building_shade_share",
+            "route_mean_stress_weather_factor",
+        )
+        max_spread = 0.0
+        for mk in metric_keys:
+            vs = _col_finite_floats(lst, mk)
+            if len(vs) >= 2:
+                max_spread = max(max_spread, max(vs) - min(vs))
+        if max_spread < 0.02:
+            invisible_reroute_pairs += 1
+    if invisible_reroute_pairs:
+        warns.append(
+            {
+                "severity": "warning",
+                "code": "reroute_low_visible_metric_delta",
+                "message": (
+                    f"У {invisible_reroute_pairs} O-D-профилей с >1 геометрией макс. разброс "
+                    "stairs/harsh/open/building/stress < 0.02 — reroute плохо читается по этим полям."
+                ),
+            }
+        )
+    if multi_geom_pairs == 0:
+        warns.append(
+            {
+                "severity": "info",
+                "code": "no_geometry_switch",
+                "message": "Ни одна O-D-пара не меняет geometry_json между сценариями.",
+            }
+        )
+
+    if not warns:
+        warns.append({"severity": "ok", "code": "none", "message": "Явных QA-флагов нет."})
+    return warns
+
+
+def build_winter_reroute_explain_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """По зимним строкам: для пар с >1 геометрией — диапазоны метрик и сильнейший относительный сигнал."""
+    wrows = [
+        r
+        for r in raw_rows
+        if str(r.get("weather_test_case_id") or "").startswith("winter_")
+    ]
+    if not wrows:
+        return [
+            {
+                "note": "нет зимних synthetic-строк (weather_test_case_id не с префикса winter_)",
+            }
+        ]
+
+    by_pair: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in wrows:
+        by_pair[_heat_od_prof(r)].append(r)
+
+    metrics = (
+        ("stairs_fraction", "route_stairs_length_fraction"),
+        ("winter_harsh_surface", "route_winter_harsh_surface_share"),
+        ("open_sky", "route_open_sky_share"),
+        ("building_shade", "route_building_shade_share"),
+        ("stress_weather", "route_mean_stress_weather_factor"),
+    )
+    out: List[Dict[str, Any]] = []
+    for key, lst in by_pair.items():
+        geoms = {str(x.get("geometry_json") or "") for x in lst if x.get("geometry_json")}
+        if len(geoms) < 2:
+            continue
+        row: Dict[str, Any] = {
+            "origin_point_id": key[0],
+            "destination_point_id": key[1],
+            "profile": key[2],
+            "winter_distinct_geometries": len(geoms),
+        }
+        best_label = ""
+        best_rel = -1.0
+        for label, mk in metrics:
+            vs = _col_finite_floats(lst, mk)
+            if len(vs) < 2:
+                rng = 0.0
+                mabs = 0.0
+            else:
+                rng = max(vs) - min(vs)
+                mabs = sum(abs(v) for v in vs) / len(vs)
+            row[f"range_{label}"] = round(rng, 6)
+            rel = rng / max(0.05, mabs) if mabs > 1e-9 else rng
+            if rel > best_rel:
+                best_rel = rel
+                best_label = label
+        row["strongest_relative_range_metric"] = best_label or "n/a"
+        out.append(row)
+
+    if not out:
+        return [
+            {
+                "note": "есть зимние строки, но ни одна O-D-пара не дала >1 геометрии",
+            }
+        ]
+    return out
+
+
+def build_heat_experiment_extra_sheet_blocks(
+    raw_rows: List[Dict[str, Any]],
+) -> List[Tuple[str, List[Dict[str, Any]]]]:
+    """Доп. блоки для листа «Сводка» (только heat-эксперимент)."""
+    return [
+        ("QA — предупреждения", build_heat_qa_warning_rows(raw_rows)),
+        ("Зима: объяснение reroute (диапазоны метрик)", build_winter_reroute_explain_rows(raw_rows)),
+    ]
+
+
 def build_winter_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Сводные KPI по зимним synthetic-строкам (``weather_test_case_id``)."""
     wr = [r for r in raw_rows if str(r.get("weather_test_case_id") or "").strip()]
@@ -1544,6 +1895,7 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "batch_weather_tz": "Часовой пояс IANA (режим past)",
         "vertices_file": "Файл вершин (отдельно)",
         "experiment_kind": "Тип эксперимента",
+        "heat_continuous_enable": "Непрерывная heat-модель на ребре (HEAT_CONTINUOUS_ENABLE)",
         "batch_weather_center_lat": "Центр запроса погоды: широта",
         "batch_weather_center_lon": "Центр запроса погоды: долгота",
         "batch_weather_departure_iso": "ISO времени для погоды (батч)",
@@ -1743,6 +2095,7 @@ def write_xlsx(
     summary_by_weather_date_variant: Optional[List[Dict[str, Any]]] = None,
     summary_heat_kpi: Optional[List[Dict[str, Any]]] = None,
     summary_winter_kpi: Optional[List[Dict[str, Any]]] = None,
+    summary_extra_blocks: Optional[Sequence[Tuple[str, List[Dict[str, Any]]]]] = None,
 ) -> None:
     from openpyxl import Workbook
 
@@ -1860,6 +2213,10 @@ def write_xlsx(
         blocks.append(("Heat-weather KPI (synthetic)", summary_heat_kpi))
     if summary_winter_kpi:
         blocks.append(("Winter KPI (synthetic)", summary_winter_kpi))
+    if summary_extra_blocks:
+        for title, blk in summary_extra_blocks:
+            if blk:
+                blocks.append((title, list(blk)))
     blocks.extend(
         [
             ("Средние по дате погоды", s_wd),

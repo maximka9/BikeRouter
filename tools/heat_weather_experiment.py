@@ -20,6 +20,9 @@
 
 ``WEATHER_STRESS_GLOBAL_BLEND`` не подменяется (Settings / .env).
 
+В листе «Сводка» дополнительно: расширенный блок KPI (зелёный критерий, ветер, surface,
+валидационное покрытие), «QA — предупреждения», «Зима: объяснение reroute».
+
 Запуск::
 
     python -m bike_router.tools.heat_weather_experiment
@@ -75,6 +78,8 @@ def run_heat_weather_experiment(
         _iter_directed_pairs,
         _point_id_fmt,
         _set_quiet_mode_for_batch,
+        build_heat_experiment_extra_sheet_blocks,
+        build_heat_weather_kpi_extras_dict,
         build_heat_weather_kpi_rows,
         build_winter_kpi_rows,
         build_pair_comparison,
@@ -298,6 +303,8 @@ def run_heat_weather_experiment(
     s_var, s_prof, s_dir = build_summaries(raw_rows)
     pair_cmp = build_pair_comparison(raw_rows)
     heat_kpi = build_heat_weather_kpi_rows(raw_rows)
+    if heat_kpi:
+        heat_kpi[0].update(build_heat_weather_kpi_extras_dict(raw_rows))
     if wg == "winter":
         winter_kpi = build_winter_kpi_rows(raw_rows)
     elif wg == "all":
@@ -337,6 +344,7 @@ def run_heat_weather_experiment(
         ("experiment_kind", "heat_weather_synthetic"),
         ("synthetic_weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO),
         ("weather_stress_global_blend", stress_blend_used),
+        ("heat_continuous_enable", bool(settings.heat_continuous_enable)),
     ]
 
     vgz_path: Optional[str] = None
@@ -362,6 +370,7 @@ def run_heat_weather_experiment(
         summary_by_weather_date_variant=[],
         summary_heat_kpi=heat_kpi,
         summary_winter_kpi=winter_kpi,
+        summary_extra_blocks=build_heat_experiment_extra_sheet_blocks(raw_rows),
     )
     _log.info("Готово: %s", out)
     return out

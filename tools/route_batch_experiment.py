@@ -1,17 +1,17 @@
-"""Последовательный запуск двух пакетных экспериментов с параметрами по умолчанию.
+"""Комбинированный батч: 6 вариантов маршрута и synthetic-сетка погоды (как heat_weather).
 
-1. ``route_variants_experiment`` — шесть вариантов маршрута, текущая погода Open-Meteo.
-2. ``heat_weather_experiment`` — heat на synthetic-сетке (по умолчанию ``--heat-grid all``).
+Один Excel: направленные пары A->B и B->A, ``compute_alternatives`` один раз на
+(пара, профиль, погодный кейс). Параллель: ``min(6, CPU-1)`` процессов, чанк погоды 25,
+``pool.imap`` chunksize 1.
 
-Число маршрутов heat ≈ ``n*(n-1)/2 * n_profiles * n_weather`` (пары неориентированные;
-``n_weather``: summer 90, winter 135, all 225). Параллель: в ``heat_weather_experiment``
-``--max-workers 0``. См. ``--help``.
+Число строк маршрутов примерно ``n*(n-1) * n_profiles * n_weather * 6`` при направленных парах
+(по умолчанию). Сетки: summer=90, winter=135, all=225.
 
-Запуск (из корня репозитория, где доступен пакет ``bike_router``)::
+Запуск::
 
     python -m bike_router.tools.route_batch_experiment
-    python -m bike_router.tools.route_batch_experiment --n-points 2
-    python -m bike_router.tools.route_batch_experiment --n-points 10 --heat-grid summer
+    python -m bike_router.tools.route_batch_experiment --n-points 10 --weather-grid summer
+    python -m bike_router.tools.route_batch_experiment --weather-grid summer
 """
 
 from __future__ import annotations
@@ -28,18 +28,67 @@ def _ensure_pkg_path() -> None:
         sys.path.insert(0, root)
 
 
+def run_combined_route_batch_experiment(
+    *,
+    n_points: int,
+    profiles_mode: str,
+    weather_grid: str,
+    verbose: bool,
+    log_every: int,
+    directed_pairs: bool,
+) -> str:
+    _ensure_pkg_path()
+    from bike_router.tools._experiment_common import (
+        mp_resolve_pool_workers,
+        weather_summer_heat_grid,
+        weather_winter_heat_grid,
+    )
+    from bike_router.tools._run_variants_weather_batch import run_variants_over_weather_cases
+
+    wg = (weather_grid or "all").strip().lower()
+    if wg in ("summer_wind", "summer-wind"):
+        wg = "summer"
+    summer_g = weather_summer_heat_grid()
+    winter_g = weather_winter_heat_grid()
+    if wg == "all":
+        grid = summer_g + winter_g
+    elif wg == "winter":
+        grid = winter_g
+    else:
+        grid = summer_g
+    assert len(grid) in (90, 135, 225)
+
+    mw = mp_resolve_pool_workers(0)
+    return run_variants_over_weather_cases(
+        script_stem="route_batch_experiment",
+        n_points=n_points,
+        profiles_mode=profiles_mode,
+        synthetic_weather_grid=grid,
+        fixed_weather_kw=None,
+        live_weather_bundle=None,
+        weather_grid_label=wg,
+        verbose=verbose,
+        log_every=log_every,
+        max_workers=mw,
+        chunk_size=1,
+        mp_weather_chunk_size=25,
+        directed_pairs=directed_pairs,
+        write_vertices=False,
+    )
+
+
 def main() -> None:
     _ensure_pkg_path()
     from bike_router.tools._experiment_common import DEFAULT_BATCH_LOG_EVERY
-    from bike_router.tools.heat_weather_experiment import run_heat_weather_experiment
-    from bike_router.tools.route_variants_experiment import run_variants_experiment
 
     parser = argparse.ArgumentParser(
-        description="Подряд route_variants_experiment и heat_weather_experiment.",
+        description=(
+            "Один Excel: 6 вариантов, synthetic-сетка погоды, направленные O-D, профили."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Сетки heat: summer=90, winter=135, all=225. Шагов ≈ n*(n-1)/2 * profiles * сетка "
-            "(неориентированные пары; directed: удвоить). Параллель в heat: --max-workers."
+            "Сетки: summer=90, winter=135, all=225. По умолчанию пары направленные n*(n-1). "
+            "Вершины в csv.gz не пишутся. Параллель: min(6, CPU-1) процессов, чанк погоды 25."
         ),
     )
     parser.add_argument("--n-points", type=int, default=10, metavar="N")
@@ -49,46 +98,43 @@ def main() -> None:
         default="both",
     )
     parser.add_argument(
-        "--heat-grid",
+        "--weather-grid",
         choices=("summer", "winter", "all"),
         default="all",
         metavar="NAME",
-        help="Сетка synthetic для второго шага (summer быстрее all примерно в 2.5 раза).",
+        dest="weather_grid",
+        help="Synthetic-сетка (как в heat_weather_experiment).",
+    )
+    parser.add_argument(
+        "--undirected-pairs",
+        action="store_true",
+        help="Только пары i<j; по умолчанию направленные A->B и B->A.",
     )
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--log-every", type=int, default=DEFAULT_BATCH_LOG_EVERY)
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=DEFAULT_BATCH_LOG_EVERY,
+        metavar="N",
+    )
     args = parser.parse_args()
     n = max(2, int(args.n_points))
+    directed = not bool(args.undirected_pairs)
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
-    log = logging.getLogger("route_batch_experiment")
-
-    log.info("=== route_variants_experiment (n_points=%d, profiles=%s) ===", n, args.profiles)
-    p1 = run_variants_experiment(
+    path = run_combined_route_batch_experiment(
         n_points=n,
         profiles_mode=str(args.profiles),
+        weather_grid=str(args.weather_grid),
         verbose=bool(args.verbose),
         log_every=max(0, int(args.log_every)),
+        directed_pairs=directed,
     )
-    print(p1, flush=True)
-
-    log.info(
-        "=== heat_weather_experiment (grid=%s, n_points=%d) ===",
-        args.heat_grid,
-        n,
-    )
-    p2 = run_heat_weather_experiment(
-        n_points=n,
-        profiles_mode=str(args.profiles),
-        verbose=bool(args.verbose),
-        log_every=max(0, int(args.log_every)),
-        weather_grid=str(args.heat_grid),
-    )
-    print(p2, flush=True)
+    print(path, flush=True)
 
 
 if __name__ == "__main__":

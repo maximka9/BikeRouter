@@ -1,6 +1,7 @@
 """Общие функции пакетных экспериментов маршрутов (Excel, точки, сводки).
 
-Используется ``route_variants_experiment``, ``heat_weather_experiment`` и ``route_batch_experiment``.
+Используется ``route_variants_experiment``, ``heat_weather_experiment``, ``route_batch_experiment``
+и ``run_variants_over_weather_cases`` (см. ``_run_variants_weather_batch``).
 Выходные .xlsx пишутся в ``bike_router/experiment_outputs/`` (см. ``experiment_output_xlsx_path``).
 """
 
@@ -1258,6 +1259,206 @@ def build_pair_comparison(
     return out
 
 
+def mp_resolve_pool_workers(max_workers: int) -> int:
+    """Число процессов пула: 0 → auto ``min(6, CPU−1)``, иначе ``max(1, N)``."""
+    from multiprocessing import cpu_count
+
+    c = int(cpu_count() or 4)
+    if int(max_workers) <= 0:
+        return max(1, min(6, c - 1))
+    return max(1, int(max_workers))
+
+
+def mp_split_weather_grid_chunks(grid: List[Any], wchunk: int) -> List[List[Any]]:
+    w = max(1, int(wchunk))
+    return [grid[k : k + w] for k in range(0, len(grid), w)]
+
+
+def build_summaries_by_weather_case_id(
+    raw_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Средние по ``weather_test_case_id`` (все варианты и профили вместе)."""
+    by_c: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        cid = r.get("weather_test_case_id")
+        if not cid:
+            continue
+        by_c[str(cid)].append(r)
+    return [
+        _make_summary_row({"weather_test_case_id": k}, rs)
+        for k, rs in sorted(by_c.items())
+    ]
+
+
+def build_summaries_by_weather_case_and_variant(
+    raw_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Средние по (synthetic-кейс, вариант маршрута)."""
+    g: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        cid = r.get("weather_test_case_id")
+        if not cid:
+            continue
+        vk = str(r.get("variant_key") or "")
+        g[(str(cid), vk)].append(r)
+    return [
+        _make_summary_row({"weather_test_case_id": a, "variant_key": b}, rs)
+        for (a, b), rs in sorted(g.items())
+    ]
+
+
+def _mean_finite(xs: List[float]) -> Optional[float]:
+    vals = [x for x in xs if isinstance(x, (int, float)) and math.isfinite(float(x))]
+    if not vals:
+        return None
+    return float(sum(vals)) / len(vals)
+
+
+def build_heat_weather_influence_rows(
+    raw_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """По каждому synthetic-кейсу: средние по heat и средние дельты heat−full по совпадающим O–D×профиль."""
+    by_case: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        cid = r.get("weather_test_case_id")
+        if not cid:
+            continue
+        by_case[str(cid)].append(r)
+
+    out: List[Dict[str, Any]] = []
+    for cid in sorted(by_case.keys()):
+        rows = by_case[cid]
+        trip_modes: Dict[Tuple[str, str, str], Dict[str, Dict[str, Any]]] = (
+            defaultdict(dict)
+        )
+        for r in rows:
+            o = str(r.get("origin_point_id") or "")
+            d = str(r.get("destination_point_id") or "")
+            p = str(r.get("profile") or "")
+            v = str(r.get("variant_key") or "")
+            trip_modes[(o, d, p)][v] = r
+
+        heat_rows = [r for r in rows if str(r.get("variant_key")) == "heat"]
+        mean_len_h = _mean_finite([float(r["length_m"]) for r in heat_rows])
+        mean_time_h = _mean_finite([float(r["time_s"]) for r in heat_rows])
+        mean_climb_h = _mean_finite([float(r["climb_m"]) for r in heat_rows])
+        mean_green_h = _mean_finite([float(r["green_percent"]) for r in heat_rows])
+        mean_trees_h = _mean_finite([float(r["avg_trees_pct"]) for r in heat_rows])
+        mean_stress_h = _mean_finite(
+            [float(r["stress_cost_total"]) for r in heat_rows]
+        )
+
+        dlen: List[float] = []
+        dtime: List[float] = []
+        dgreen: List[float] = []
+        dtrees: List[float] = []
+        dstress: List[float] = []
+        for _k, modes in trip_modes.items():
+            h = modes.get("heat")
+            f = modes.get("full")
+            if not h or not f:
+                continue
+            dlen.append(float(h["length_m"]) - float(f["length_m"]))
+            dtime.append(float(h["time_s"]) - float(f["time_s"]))
+            dgreen.append(float(h["green_percent"]) - float(f["green_percent"]))
+            dtrees.append(float(h["avg_trees_pct"]) - float(f["avg_trees_pct"]))
+            dstress.append(float(h["stress_cost_total"]) - float(f["stress_cost_total"]))
+
+        sample = heat_rows[0] if heat_rows else rows[0]
+        row: Dict[str, Any] = {
+            "weather_test_case_id": cid,
+            "weather_test_temperature_c": sample.get("weather_test_temperature_c"),
+            "weather_test_precipitation_mm": sample.get("weather_test_precipitation_mm"),
+            "weather_test_wind_speed_ms": sample.get("weather_test_wind_speed_ms"),
+            "weather_test_cloud_cover_pct": sample.get("weather_test_cloud_cover_pct"),
+            "mean_length_heat_m": round(mean_len_h, 4) if mean_len_h is not None else None,
+            "mean_time_heat_s": round(mean_time_h, 4) if mean_time_h is not None else None,
+            "mean_climb_heat_m": round(mean_climb_h, 4) if mean_climb_h is not None else None,
+            "mean_green_heat_pct": round(mean_green_h, 4) if mean_green_h is not None else None,
+            "mean_trees_heat_pct": round(mean_trees_h, 4) if mean_trees_h is not None else None,
+            "mean_stress_cost_heat": round(mean_stress_h, 4) if mean_stress_h is not None else None,
+            "mean_delta_length_heat_minus_full_m": round(_mean_finite(dlen), 4)
+            if dlen
+            else None,
+            "mean_delta_time_heat_minus_full_s": round(_mean_finite(dtime), 4)
+            if dtime
+            else None,
+            "mean_delta_green_heat_minus_full_pct": round(_mean_finite(dgreen), 4)
+            if dgreen
+            else None,
+            "mean_delta_trees_heat_minus_full_pct": round(_mean_finite(dtrees), 4)
+            if dtrees
+            else None,
+            "mean_delta_stress_heat_minus_full": round(_mean_finite(dstress), 4)
+            if dstress
+            else None,
+            "paired_od_profile_count": len(dlen),
+        }
+        out.append(row)
+    return out
+
+
+def build_heat_vs_green_by_weather_rows(
+    raw_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """По synthetic-кейсу: средние дельты heat−green (длина, время, стресс, зелень)."""
+    by_case: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in raw_rows:
+        cid = r.get("weather_test_case_id")
+        if not cid:
+            continue
+        by_case[str(cid)].append(r)
+
+    out: List[Dict[str, Any]] = []
+    for cid in sorted(by_case.keys()):
+        rows = by_case[cid]
+        trip_modes: Dict[Tuple[str, str, str], Dict[str, Dict[str, Any]]] = (
+            defaultdict(dict)
+        )
+        for r in rows:
+            o = str(r.get("origin_point_id") or "")
+            d = str(r.get("destination_point_id") or "")
+            p = str(r.get("profile") or "")
+            v = str(r.get("variant_key") or "")
+            trip_modes[(o, d, p)][v] = r
+
+        dlen: List[float] = []
+        dtime: List[float] = []
+        dgreen: List[float] = []
+        dstress: List[float] = []
+        for _k, modes in trip_modes.items():
+            h = modes.get("heat")
+            g = modes.get("green")
+            if not h or not g:
+                continue
+            dlen.append(float(h["length_m"]) - float(g["length_m"]))
+            dtime.append(float(h["time_s"]) - float(g["time_s"]))
+            dgreen.append(float(h["green_percent"]) - float(g["green_percent"]))
+            dstress.append(float(h["stress_cost_total"]) - float(g["stress_cost_total"]))
+
+        sample = next((r for r in rows if str(r.get("variant_key")) == "heat"), rows[0])
+        out.append(
+            {
+                "weather_test_case_id": cid,
+                "weather_test_temperature_c": sample.get("weather_test_temperature_c"),
+                "mean_delta_length_heat_minus_green_m": round(_mean_finite(dlen), 4)
+                if dlen
+                else None,
+                "mean_delta_time_heat_minus_green_s": round(_mean_finite(dtime), 4)
+                if dtime
+                else None,
+                "mean_delta_green_heat_minus_green_pct": round(_mean_finite(dgreen), 4)
+                if dgreen
+                else None,
+                "mean_delta_stress_heat_minus_green": round(_mean_finite(dstress), 4)
+                if dstress
+                else None,
+                "paired_od_profile_count": len(dlen),
+            }
+        )
+    return out
+
+
 def _heat_row_float(r: Dict[str, Any], key: str) -> float:
     v = r.get(key)
     if v is None or v == "":
@@ -1948,10 +2149,18 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "seed": "Seed",
         "n_points": "Число точек",
         "n_directed_pairs": "Направленных пар O–D",
+        "n_od_pairs": "Число пар O–D в батче (направленных или неориентированных)",
         "heat_route_tasks": "Число задач heat (пара×профиль)",
         "heat_directed_pairs": "Heat: directed-пары A→B и B→A",
         "heat_max_workers": "Heat: число процессов пула (1=последовательно)",
         "heat_mp_weather_chunk": "Heat MP: synthetic-кейсов в одной задаче пула",
+        "batch_max_workers": "Батч: процессов пула (1=последовательно)",
+        "batch_chunk_size": "Батч: chunksize для pool.imap",
+        "batch_mp_weather_chunk": "Батч: synthetic-кейсов на задачу пула",
+        "batch_mp_mode": "Батч: режим ускорения (parallel / sequential)",
+        "batch_directed_pairs": "Батч: направленные пары A→B и B→A",
+        "n_weather_cases": "Число synthetic-кейсов погоды",
+        "expected_variant_rows": "Ожидалось строк маршрутов (кейсы×пары×профили×6)",
         "batch_profiles": "Профили (батч)",
         "n_profiles": "Профилей",
         "n_variants": "Вариантов маршрута",
@@ -2325,12 +2534,21 @@ def write_xlsx(
     ws4 = wb.create_sheet(title="Ошибки")
     _write_sheet_table(
         ws4,
-        ["Отправление", "Назначение", "Профиль", "Вариант", "Код", "Сообщение"],
+        [
+            "Отправление",
+            "Назначение",
+            "Профиль",
+            "Погодный кейс",
+            "Вариант",
+            "Код",
+            "Сообщение",
+        ],
         [
             {
                 "Отправление": f.get("origin_point_id"),
                 "Назначение": f.get("destination_point_id"),
                 "Профиль": f.get("profile"),
+                "Погодный кейс": f.get("weather_test_case_id"),
                 "Вариант": f.get("variant"),
                 "Код": f.get("error_code"),
                 "Сообщение": f.get("error_message"),
@@ -2342,3 +2560,11 @@ def write_xlsx(
     wb.save(path)
     _log.info("Excel записан (компактный RU): %s", path)
 
+
+def run_variants_over_weather_cases(*args: Any, **kwargs: Any) -> str:
+    """Обёртка: ``bike_router.tools._run_variants_weather_batch.run_variants_over_weather_cases``."""
+    from bike_router.tools._run_variants_weather_batch import (
+        run_variants_over_weather_cases as _run_impl,
+    )
+
+    return _run_impl(*args, **kwargs)

@@ -70,7 +70,7 @@ def run_heat_weather_experiment(
     _ensure_pkg_path()
 
     import gc
-    from multiprocessing import Pool, cpu_count
+    from multiprocessing import Pool
 
     from bike_router.config import ROUTING_ALGO_VERSION, Settings, routing_engine_cache_fingerprint
     from bike_router.engine import RouteEngine
@@ -83,6 +83,8 @@ def run_heat_weather_experiment(
         DEFAULT_ROUTE_BATCH_SEED,
         EXPERIMENT_CORRIDOR_EXPAND_M,
         SYNTHETIC_TEST_WEATHER_ISO,
+        mp_resolve_pool_workers,
+        mp_split_weather_grid_chunks,
         weather_summer_heat_grid,
         weather_winter_heat_grid,
         _batch_profiles_from_arg,
@@ -175,25 +177,18 @@ def run_heat_weather_experiment(
     _set_quiet_mode_for_batch(verbose)
     total_steps = len(route_tasks) * len(grid)
 
-    def _mw_resolve(mw: int) -> int:
-        c = int(cpu_count() or 4)
-        if mw <= 0:
-            return max(1, min(6, c - 1))
-        return max(1, int(mw))
-
-    mw = _mw_resolve(int(max_workers))
+    mw = mp_resolve_pool_workers(int(max_workers))
     ch = max(1, int(chunk_size))
     wchunk = max(1, int(mp_weather_chunk_size))
 
-    def _grid_chunks(g: List[Any], size: int) -> List[List[Any]]:
-        return [g[k : k + size] for k in range(0, len(g), size)]
-
     if mw > 1:
-        from bike_router.tools._heat_mp_worker import init_worker as _heat_mp_init
-        from bike_router.tools._heat_mp_worker import run_pair_profile_task as _heat_mp_task
+        from bike_router.tools._batch_experiment_mp import init_worker as _heat_mp_init
+        from bike_router.tools._batch_experiment_mp import (
+            run_heat_weather_chunk_task as _heat_mp_task,
+        )
 
         pls = [(float(p.lat), float(p.lon)) for p in points]
-        gchunks = _grid_chunks(grid, wchunk)
+        gchunks = mp_split_weather_grid_chunks(grid, wchunk)
         task_list = [
             (experiment_id, seed, i, j, prof, list(chunk))
             for i, j, prof in route_tasks

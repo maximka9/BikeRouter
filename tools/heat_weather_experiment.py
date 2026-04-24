@@ -4,19 +4,20 @@
 
 Сетка ``--grid``:
 
-**summer** (144 кейса) — единственная «летняя» сетка: базовые **36** комбинаций
-(температура × дождь × сила ветра × облачность/КВ, см. ``weather_windows_test_grid``),
-для **каждой** четыре направления ветра «откуда дует» **0°, 90°, 180°, 270°** (как Open-Meteo).
-Итого 36×4 = **144**; direction-aware ветер **всегда** включён.
+**summer** (**90** кейсов): те же оси 3×2×2×3, но направления ветра только при **сильном** ветре
+(4 угла); при слабом — одно направление **0°** → 18+72 = 90.
 
-**winter** (216 кейсов) — зимняя сетка **54** комбинации
-(температура × снегопад × глубина × пара скорость/порыв), см. ``weather_winter_synthetic_grid``,
-каждая × **4 направления** → 54×4 = **216**.
+**winter** (**135** кейсов): 54 базовых по снегу/температуре; слабый ветер (W0) — одно направление,
+сильный (W1) — четыре → 27+108 = 135.
 
-**all** (360 кейсов) — подряд **summer** затем **winter** в одном прогоне и одном Excel
-(метка сетки в meta: ``all``).
+**all** — **225** = 90 + 90 в одном Excel.
 
-Устаревшее имя ``summer_wind`` воспринимается как ``summer`` (то же самое 144).
+Пары O–D по умолчанию **неориентированные** (только ``i<j``) — вдвое меньше маршрутов, чем A→B и B→A;
+флаг ``--directed-pairs`` включает полный directed-режим.
+
+Вершины маршрутов в ``.csv.gz`` **не** пишутся (ускорение и объём).
+
+Устаревшее ``summer_wind`` = ``summer``.
 
 ``WEATHER_STRESS_GLOBAL_BLEND`` не подменяется (Settings / .env).
 
@@ -58,8 +59,14 @@ def run_heat_weather_experiment(
     verbose: bool,
     log_every: int,
     weather_grid: str = "summer",
+    directed_pairs: bool = False,
+    max_workers: int = 1,
+    chunk_size: int = 1,
 ) -> str:
     _ensure_pkg_path()
+
+    import gc
+    from multiprocessing import Pool, cpu_count
 
     from bike_router.config import ROUTING_ALGO_VERSION, Settings, routing_engine_cache_fingerprint
     from bike_router.engine import RouteEngine
@@ -72,10 +79,12 @@ def run_heat_weather_experiment(
         DEFAULT_ROUTE_BATCH_SEED,
         EXPERIMENT_CORRIDOR_EXPAND_M,
         SYNTHETIC_TEST_WEATHER_ISO,
-        weather_winter_synthetic_grid_with_wind_dirs,
+        weather_summer_heat_grid,
+        weather_winter_heat_grid,
         _batch_profiles_from_arg,
         _direction_key,
         _iter_directed_pairs,
+        _iter_undirected_pairs,
         _point_id_fmt,
         _set_quiet_mode_for_batch,
         build_heat_experiment_extra_sheet_blocks,
@@ -88,8 +97,6 @@ def run_heat_weather_experiment(
         kwargs_fixed_snapshot_from_case,
         route_to_raw_row,
         sample_points_in_polygon,
-        weather_summer_test_grid_with_wind_dirs,
-        write_route_vertices_csv_gzip,
         write_xlsx,
     )
 
@@ -129,176 +136,216 @@ def run_heat_weather_experiment(
         min_spacing_m=min_spacing_m,
         max_attempts=max_sample_attempts,
     )
-    n_pairs = n_points * (n_points - 1)
     profile_tuple = _batch_profiles_from_arg(profiles_mode)
     wg = (weather_grid or "summer").strip().lower()
     if wg in ("summer_wind", "summer-wind"):
         wg = "summer"
-        _log.info("grid summer_wind совпадает с summer (лето всегда с направлением ветра)")
-    summer_g = weather_summer_test_grid_with_wind_dirs()
-    winter_g = weather_winter_synthetic_grid_with_wind_dirs()
+        _log.info("summer_wind → summer (сетка heat 90)")
+    summer_g = weather_summer_heat_grid()
+    winter_g = weather_winter_heat_grid()
     if wg == "all":
         grid = summer_g + winter_g
-        grid_name = "лето+зима (144+216=360)"
+        grid_name = "лето+зима (90+135=225)"
     elif wg == "winter":
         grid = winter_g
-        grid_name = "216 зимних (54×4 направления)"
+        grid_name = "135 зимних (calm 1×WD + strong 4×WD)"
     else:
         grid = summer_g
-        grid_name = "144 летних (36×4 направления)"
-    assert len(grid) in (144, 216, 360)
+        grid_name = "90 летних (calm 1×WD + strong 4×WD)"
+    assert len(grid) in (90, 135, 225)
 
+    pair_iter = _iter_directed_pairs(n_points) if directed_pairs else _iter_undirected_pairs(n_points)
     route_tasks: List[Tuple[int, int, str]] = [
-        (i, j, prof)
-        for i, j in _iter_directed_pairs(n_points)
-        for prof in profile_tuple
+        (i, j, prof) for i, j in pair_iter for prof in profile_tuple
     ]
+    n_od_tracks = len(route_tasks)
 
     expected_routes = len(route_tasks) * len(grid)
     raw_rows: List[Dict[str, Any]] = []
     vertices: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
-    route_id_counter = 1
     n_ok = 0
     n_fail = 0
     n_skip = 0
 
     _set_quiet_mode_for_batch(verbose)
     total_steps = len(route_tasks) * len(grid)
-    pbar = tqdm(
-        total=total_steps,
-        desc=f"Heat×{grid_name}",
-        unit="запрос",
-        leave=True,
-        mininterval=2.0 if not verbose else 0.3,
-    )
 
-    for syn_case in grid:
-        wkw = kwargs_fixed_snapshot_from_case(syn_case)
+    def _mw_resolve(mw: int) -> int:
+        c = int(cpu_count() or 4)
+        if mw <= 0:
+            return max(1, min(6, c - 1))
+        return max(1, int(mw))
+
+    mw = _mw_resolve(int(max_workers))
+    ch = max(1, int(chunk_size))
+
+    if mw > 1:
+        from bike_router.tools._heat_mp_worker import init_worker as _heat_mp_init
+        from bike_router.tools._heat_mp_worker import run_pair_profile_task as _heat_mp_task
+
+        pls = [(float(p.lat), float(p.lon)) for p in points]
+        task_list = [(experiment_id, seed, i, j, prof) for i, j, prof in route_tasks]
+        del eng
+        gc.collect()
+        _log.info("heat parallel: workers=%d tasks=%d chunk=%d", mw, len(task_list), ch)
+        with Pool(
+            processes=mw,
+            initializer=_heat_mp_init,
+            initargs=(grid, pls, tuple(EXPERIMENT_CORRIDOR_EXPAND_M)),
+        ) as pool:
+            results = list(
+                tqdm(
+                    pool.imap(_heat_mp_task, task_list, chunksize=ch),
+                    total=len(task_list),
+                    desc=f"Heat×{grid_name} (пары)",
+                    unit="пара",
+                    leave=True,
+                    mininterval=2.0 if not verbose else 0.3,
+                )
+            )
+        for part in results:
+            rs, fl, ok, fi, sk = part
+            raw_rows.extend(rs)
+            failures.extend(fl)
+            n_ok += int(ok)
+            n_fail += int(fi)
+            n_skip += int(sk)
+        raw_rows.sort(
+            key=lambda r: (
+                str(r.get("weather_test_case_id") or ""),
+                str(r.get("origin_point_id") or ""),
+                str(r.get("destination_point_id") or ""),
+                str(r.get("profile") or ""),
+            )
+        )
+        for idx, row in enumerate(raw_rows, start=1):
+            row["route_id"] = idx
+    else:
+        pbar = tqdm(
+            total=total_steps,
+            desc=f"Heat×{grid_name}",
+            unit="запрос",
+            leave=True,
+            mininterval=2.0 if not verbose else 0.3,
+        )
+        route_id_counter = 1
         for i, j, prof in route_tasks:
             o_pt = points[i]
             d_pt = points[j]
             start = (o_pt.lat, o_pt.lon)
             end = (d_pt.lat, d_pt.lon)
-            pbar.set_postfix(
-                case=syn_case.case_id,
-                od=_direction_key(i, j),
-                p=prof,
-                ok=n_ok,
-                refresh=False,
-            )
-            test_meta = {
-                "weather_test_case_id": syn_case.case_id,
-                "weather_test_temperature_c": syn_case.temperature_c,
-                "weather_test_precipitation_mm": syn_case.precipitation_mm,
-                "weather_test_wind_speed_ms": syn_case.wind_speed_ms,
-                "weather_test_wind_gusts_ms": syn_case.wind_gusts_ms,
-                "weather_test_cloud_cover_pct": syn_case.cloud_cover_pct,
-                "weather_test_humidity_pct": syn_case.humidity_pct,
-                "weather_test_shortwave_radiation_wm2": syn_case.shortwave_radiation_wm2,
-                "weather_test_wind_direction_deg": getattr(
-                    syn_case, "wind_direction_deg", None
-                ),
-                "weather_test_snowfall_cm_h": float(
-                    getattr(syn_case, "snowfall_cm_h", 0.0) or 0.0
-                ),
-                "weather_test_snow_depth_m": float(
-                    getattr(syn_case, "snow_depth_m", 0.0) or 0.0
-                ),
-                "weather_test_weather_code": getattr(syn_case, "weather_code", None),
-                "weather_test_time_iso": getattr(
-                    syn_case, "weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO
-                ),
-            }
-            try:
-                alt = eng.compute_heat_alternative(
-                    start=start,
-                    end=end,
-                    profile_key=prof,
-                    green_enabled=True,
-                    corridor_expand_schedule_meters=EXPERIMENT_CORRIDOR_EXPAND_M,
-                    departure_time=str(wkw.get("weather_time") or ""),
-                    **wkw,
+            for syn_case in grid:
+                wkw = kwargs_fixed_snapshot_from_case(syn_case)
+                pbar.set_postfix(
+                    case=syn_case.case_id,
+                    od=_direction_key(i, j),
+                    p=prof,
+                    ok=n_ok,
+                    refresh=False,
                 )
-            except RouteNotFoundError:
-                n_skip += 1
-                pbar.update(1)
-                continue
-            except (BikeRouterError, Exception) as e:
-                code = getattr(e, "code", type(e).__name__)
-                failures.append(
-                    {
-                        "origin_point_id": _point_id_fmt(i),
-                        "destination_point_id": _point_id_fmt(j),
-                        "profile": prof,
-                        "variant": "heat",
-                        "error_code": str(code),
-                        "error_message": str(e),
-                    }
-                )
-                n_fail += 1
-                pbar.update(1)
-                continue
-
-            if not alt.routes:
-                failures.append(
-                    {
-                        "origin_point_id": _point_id_fmt(i),
-                        "destination_point_id": _point_id_fmt(j),
-                        "profile": prof,
-                        "variant": "heat",
-                        "error_code": "EMPTY",
-                        "error_message": "Нет маршрутов в ответе",
-                    }
-                )
-                n_fail += 1
-                pbar.update(1)
-                continue
-
-            r = alt.routes[0]
-            rid = route_id_counter
-            route_id_counter += 1
-            row = route_to_raw_row(
-                experiment_id=experiment_id,
-                seed=seed,
-                route_id=rid,
-                profile=prof,
-                origin_id=i,
-                dest_id=j,
-                o_lat=o_pt.lat,
-                o_lon=o_pt.lon,
-                d_lat=d_pt.lat,
-                d_lon=d_pt.lon,
-                r=r,
-                baseline_full=None,
-                weather_date="",
-                test_weather_meta=test_meta,
-            )
-            raw_rows.append(row)
-            n_ok += 1
-            for vi, pt in enumerate(r.geometry or []):
-                if len(pt) >= 2:
-                    vertices.append(
+                test_meta = {
+                    "weather_test_case_id": syn_case.case_id,
+                    "weather_test_temperature_c": syn_case.temperature_c,
+                    "weather_test_precipitation_mm": syn_case.precipitation_mm,
+                    "weather_test_wind_speed_ms": syn_case.wind_speed_ms,
+                    "weather_test_wind_gusts_ms": syn_case.wind_gusts_ms,
+                    "weather_test_cloud_cover_pct": syn_case.cloud_cover_pct,
+                    "weather_test_humidity_pct": syn_case.humidity_pct,
+                    "weather_test_shortwave_radiation_wm2": syn_case.shortwave_radiation_wm2,
+                    "weather_test_wind_direction_deg": getattr(
+                        syn_case, "wind_direction_deg", None
+                    ),
+                    "weather_test_snowfall_cm_h": float(
+                        getattr(syn_case, "snowfall_cm_h", 0.0) or 0.0
+                    ),
+                    "weather_test_snow_depth_m": float(
+                        getattr(syn_case, "snow_depth_m", 0.0) or 0.0
+                    ),
+                    "weather_test_weather_code": getattr(syn_case, "weather_code", None),
+                    "weather_test_time_iso": getattr(
+                        syn_case, "weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO
+                    ),
+                }
+                try:
+                    alt = eng.compute_heat_alternative(
+                        start=start,
+                        end=end,
+                        profile_key=prof,
+                        green_enabled=True,
+                        corridor_expand_schedule_meters=EXPERIMENT_CORRIDOR_EXPAND_M,
+                        departure_time=str(wkw.get("weather_time") or ""),
+                        **wkw,
+                    )
+                except RouteNotFoundError:
+                    n_skip += 1
+                    pbar.update(1)
+                    continue
+                except (BikeRouterError, Exception) as e:
+                    code = getattr(e, "code", type(e).__name__)
+                    failures.append(
                         {
-                            "route_id": rid,
-                            "vertex_index": vi,
-                            "lat": float(pt[0]),
-                            "lon": float(pt[1]),
+                            "origin_point_id": _point_id_fmt(i),
+                            "destination_point_id": _point_id_fmt(j),
+                            "profile": prof,
+                            "variant": "heat",
+                            "error_code": str(code),
+                            "error_message": str(e),
                         }
                     )
-            pbar.update(1)
-            if log_every > 0 and pbar.n > 0 and pbar.n % log_every == 0:
-                elapsed = time.perf_counter() - t_start
-                _log.info(
-                    "Промежуточно %d/%d: ok=%d fail=%d skip=%d elapsed=%.0f с",
-                    pbar.n,
-                    total_steps,
-                    n_ok,
-                    n_fail,
-                    n_skip,
-                    elapsed,
+                    n_fail += 1
+                    pbar.update(1)
+                    continue
+
+                if not alt.routes:
+                    failures.append(
+                        {
+                            "origin_point_id": _point_id_fmt(i),
+                            "destination_point_id": _point_id_fmt(j),
+                            "profile": prof,
+                            "variant": "heat",
+                            "error_code": "EMPTY",
+                            "error_message": "Нет маршрутов в ответе",
+                        }
+                    )
+                    n_fail += 1
+                    pbar.update(1)
+                    continue
+
+                r = alt.routes[0]
+                rid = route_id_counter
+                route_id_counter += 1
+                row = route_to_raw_row(
+                    experiment_id=experiment_id,
+                    seed=seed,
+                    route_id=rid,
+                    profile=prof,
+                    origin_id=i,
+                    dest_id=j,
+                    o_lat=o_pt.lat,
+                    o_lon=o_pt.lon,
+                    d_lat=d_pt.lat,
+                    d_lon=d_pt.lon,
+                    r=r,
+                    baseline_full=None,
+                    weather_date="",
+                    test_weather_meta=test_meta,
                 )
-    pbar.close()
+                raw_rows.append(row)
+                n_ok += 1
+                pbar.update(1)
+                if log_every > 0 and pbar.n > 0 and pbar.n % log_every == 0:
+                    elapsed = time.perf_counter() - t_start
+                    _log.info(
+                        "Промежуточно %d/%d: ok=%d fail=%d skip=%d elapsed=%.0f с",
+                        pbar.n,
+                        total_steps,
+                        n_ok,
+                        n_fail,
+                        n_skip,
+                        elapsed,
+                    )
+        pbar.close()
 
     s_var, s_prof, s_dir = build_summaries(raw_rows)
     pair_cmp = build_pair_comparison(raw_rows)
@@ -323,7 +370,9 @@ def run_heat_weather_experiment(
         ("started_at_utc", datetime.now(timezone.utc).isoformat()),
         ("seed", seed),
         ("n_points", n_points),
-        ("n_directed_pairs", n_pairs),
+        ("heat_route_tasks", n_od_tracks),
+        ("heat_directed_pairs", bool(directed_pairs)),
+        ("heat_max_workers", mw),
         ("batch_profiles", ",".join(profile_tuple)),
         ("n_profiles", len(profile_tuple)),
         ("experiment_weather_grid", wg),
@@ -346,13 +395,6 @@ def run_heat_weather_experiment(
         ("weather_stress_global_blend", stress_blend_used),
         ("heat_continuous_enable", bool(settings.heat_continuous_enable)),
     ]
-
-    vgz_path: Optional[str] = None
-    if vertices:
-        stem = out[:-5] if out.lower().endswith(".xlsx") else out
-        vgz_path = f"{stem}_route_vertices.csv.gz"
-        write_route_vertices_csv_gzip(vgz_path, vertices)
-        meta_rows = meta_rows + [("vertices_file", vgz_path)]
 
     write_xlsx(
         out,
@@ -380,10 +422,10 @@ def main() -> None:
     from bike_router.tools._experiment_common import DEFAULT_BATCH_LOG_EVERY
 
     grid_help = (
-        "summer: 36 базовых летних × 4 направления ветра = 144 (ветер всегда с направлением). "
-        "winter: 54 зимних × 4 направления = 216. "
-        "all: summer затем winter в одном файле = 360. "
-        "summer_wind — то же, что summer (устаревший алиас)."
+        "summer: 90 synthetic (слабый ветер — 1 направление, сильный — 4). "
+        "winter: 135. all: 225. "
+        "По умолчанию пары O–D неориентированные (i<j); --directed-pairs — A→B и B→A. "
+        "--max-workers 0=auto (spawn pool); 1=последовательно. Вершины в csv.gz не пишутся."
     )
     parser = argparse.ArgumentParser(
         description="Heat на synthetic-сетке; см. модульный docstring.",
@@ -404,6 +446,25 @@ def main() -> None:
     )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--log-every", type=int, default=DEFAULT_BATCH_LOG_EVERY)
+    parser.add_argument(
+        "--directed-pairs",
+        action="store_true",
+        help="Считать и A→B, и B→A (вдвое больше маршрутов).",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Параллель: 1=выкл, 0=авто (min(6, CPU−1)).",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=1,
+        metavar="N",
+        help="chunksize для pool.imap по задачам (пара×профиль).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -417,6 +478,9 @@ def main() -> None:
         verbose=bool(args.verbose),
         log_every=max(0, int(args.log_every)),
         weather_grid=str(args.grid),
+        directed_pairs=bool(args.directed_pairs),
+        max_workers=int(args.max_workers),
+        chunk_size=max(1, int(args.chunk_size)),
     )
     print(path)
 

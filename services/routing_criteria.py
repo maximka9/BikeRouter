@@ -146,6 +146,8 @@ def continuous_heat_edge_factor_and_split(
     w2 = float(getattr(weather, "heat_wind_exp_w2", 0.35))
     w3 = float(getattr(weather, "heat_wind_exp_w3", 0.35))
     wind_exp_base = _clamp01(w1 * O + w2 * (1.0 - B) + w3 * (1.0 - C))
+    sig = getattr(weather, "normalized_signals", None) or {}
+    wcomb_sig = max(float(sig.get("wind_norm", 0.0)), float(sig.get("gust_norm", 0.0)) * 0.85)
     pack = _wind_dir_edge_pack(edge_data, weather)
     b_build = 1.0
     wind_exp = wind_exp_base
@@ -153,26 +155,49 @@ def continuous_heat_edge_factor_and_split(
     if pack is not None:
         along01, cross01, _delta, wind_act, _wcs = pack
         ha = float(getattr(weather, "heat_wind_along_open_amp", 0.28))
+        wind_dir_amp = 1.0 + 1.08 * min(1.45, max(0.0, wcomb_sig - 0.06) * 2.05)
+        ha *= wind_dir_amp
         wind_exp = _clamp01(wind_exp_base * (1.0 + ha * along01 * wind_act * O))
-        hc = float(getattr(weather, "heat_wind_cross_build_amp", 0.35))
+        hc = float(getattr(weather, "heat_wind_cross_build_amp", 0.35)) * wind_dir_amp
         hd = float(getattr(weather, "heat_wind_along_build_damp", 0.24))
         b_build = 1.0 + hc * cross01 * wind_act - hd * along01 * wind_act
         b_build = max(0.45, min(1.55, b_build))
         w_mul = float(getattr(weather, "season_wind_orientation_route_mult", 1.0) or 1.0)
-        wind_orient_f = max(0.92, min(1.12, 1.0 + (wind_exp / max(wind_exp_base, 1e-6) - 1.0) * w_mul))
+        wboost = 1.0 + 0.48 * min(1.0, max(0.0, wcomb_sig - 0.06) * 1.9)
+        wind_orient_f = max(
+            0.86,
+            min(
+                1.22,
+                1.0 + (wind_exp / max(wind_exp_base, 1e-6) - 1.0) * w_mul * wboost,
+            ),
+        )
     k1 = float(getattr(weather, "heat_edge_k_open", 0.66))
     k2 = float(getattr(weather, "heat_edge_k_tree", 0.54))
     k3 = float(getattr(weather, "heat_edge_k_building", 0.50))
     k4 = float(getattr(weather, "heat_edge_k_covered", 0.16))
     k5 = float(getattr(weather, "heat_edge_k_wet", 0.28))
     k6 = float(getattr(weather, "heat_edge_k_wind", 0.30))
-    sig = getattr(weather, "normalized_signals", None) or {}
+    tn = float(sig.get("temp_norm", 0.0))
     rn = _clamp01(float(sig.get("rain_norm", 0.0)))
-    rain_open_amp = 1.0 + float(getattr(weather, "heat_edge_rain_open_mult", 0.48)) * rn
-    rain_build_amp = 1.0 + float(getattr(weather, "heat_edge_rain_building_mult", 0.56)) * rn
-    rain_wind_exp_amp = 1.0 + float(getattr(weather, "heat_edge_rain_wind_exp_mult", 0.22)) * rn
-    k1_eff = k1 * rain_open_amp
-    k3_eff = k3 * rain_build_amp
+    cn = float(sig.get("cloud_norm", 0.0))
+    hn = float(sig.get("humidity_norm", 0.0))
+    # Жара + ясное небо + почти без дождя — усилить open/tree/building на выборе маршрута.
+    hot_clear_dry = min(
+        1.0,
+        max(0.0, tn - 0.38)
+        * max(0.0, 1.0 - cn - 0.08)
+        * max(0.0, 0.48 - rn)
+        * 2.85,
+    )
+    rain_route = min(
+        1.0,
+        max(0.0, rn * 1.18 + 0.28 * hn * rn),
+    )
+    rain_open_amp = 1.0 + float(getattr(weather, "heat_edge_rain_open_mult", 0.72)) * rn
+    rain_build_amp = 1.0 + float(getattr(weather, "heat_edge_rain_building_mult", 0.78)) * rn
+    rain_wind_exp_amp = 1.0 + float(getattr(weather, "heat_edge_rain_wind_exp_mult", 0.32)) * rn
+    k1_eff = k1 * rain_open_amp * (1.0 + 0.58 * hot_clear_dry) * (1.0 + 0.42 * rain_route)
+    k3_eff = k3 * rain_build_amp * (1.0 + 0.24 * hot_clear_dry) * (1.0 + 0.38 * rain_route)
     k6_eff = k6 * rain_wind_exp_amp
     osp = float(getattr(weather, "open_sky_penalty", 1.0))
     tsb = float(getattr(weather, "tree_shade_bonus", 1.0))
@@ -193,10 +218,11 @@ def continuous_heat_edge_factor_and_split(
     wc_open = float(getattr(weather, "wc_winter_open_sky_penalty_amp", 0.05))
     wc_shelter = float(getattr(weather, "wc_winter_building_shelter_bonus_amp", 0.06))
     pos_open = rs * k1_eff * osp * O * wo * (1.0 + wc_open * (wcw + 0.65 * wcm) * O)
-    neg_tree = -rs * k2 * tsb * V * wt
+    tree_hot = 1.0 + 0.46 * hot_clear_dry
+    neg_tree = -rs * k2 * tree_hot * tsb * V * wt
     neg_build = -rs * k3_eff * bsb * B * b_build * (1.0 - wc_shelter * wcm * B)
     neg_cover = -rs * k4 * cbn * C * winter_cover_boost
-    pos_wet = rs * k5 * wsp * wet_eff
+    pos_wet = rs * k5 * (1.0 + 0.36 * rain_route) * wsp * wet_eff
     pos_wind = rs * k6_eff * wop * wind_exp * wwind
     pos_syn = rs * syn * O * wet_eff * wind_exp * max(1.0, (wo + wwind) * 0.5)
     raw = 1.0 + pos_open + neg_tree + neg_build + neg_cover + pos_wet + pos_wind + pos_syn
@@ -267,6 +293,19 @@ def compute_edge_route_criteria(
 
     slope_f = slope_route_weather_factor(edge_data, weather)
     stairs_f = stairs_route_weather_factor(edge_data, weather, profile_key)
+    if getattr(weather, "heat_continuous", False):
+        sig_s = getattr(weather, "normalized_signals", None) or {}
+        ss0 = float(getattr(weather, "snow_model_strength", 0.0))
+        tnx = float(sig_s.get("temp_norm", 0.0))
+        rnx = float(sig_s.get("rain_norm", 0.0))
+        cnx = float(sig_s.get("cloud_norm", 0.0))
+        hot_dry = (
+            max(0.0, tnx - 0.42)
+            * max(0.0, 1.0 - cnx - 0.12)
+            * max(0.0, 0.38 - rnx)
+        )
+        if ss0 < 0.05 and hot_dry > 0.015:
+            stairs_f *= 1.0 + min(0.2, 0.55 * hot_dry)
     base_f = float(wm.physical) * float(wm.surface)
     if ss > 1e-9 and profile_key == "cyclist":
         cboost = float(getattr(weather, "snow_phys_cyclist_mult_boost", 0.12))
@@ -329,11 +368,12 @@ def compute_edge_route_criteria(
             w_mul = float(getattr(weather, "season_wind_orientation_route_mult", 1.0) or 1.0)
             if p2 is not None:
                 along01, _c2, _d2, wind_act, _wcs2 = p2
+                w_slope = 0.055 + 0.05 * min(1.0, max(0.0, wcomb - 0.06) * 2.4)
                 wind_of = max(
-                    0.93,
+                    0.86,
                     min(
-                        1.10,
-                        1.0 + 0.055 * along01 * wind_act * w_mul * min(1.0, wcomb * 1.2),
+                        1.18,
+                        1.0 + w_slope * along01 * wind_act * w_mul * min(1.0, wcomb * 1.2),
                     ),
                 )
 

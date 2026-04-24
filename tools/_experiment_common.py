@@ -148,7 +148,7 @@ def weather_windows_test_grid() -> List[SyntheticWeatherCase]:
 
 
 def weather_summer_test_grid_with_wind_dirs() -> List[SyntheticWeatherCase]:
-    """36 летних сценариев × 4 направления ветра (0/90/180/270°) = 144 кейса."""
+    """36 летних × 4 направления = 144 (полный обход углов; для батча см. ``weather_summer_heat_grid``)."""
     base = weather_windows_test_grid()
     dirs = (0.0, 90.0, 180.0, 270.0)
     out: List[SyntheticWeatherCase] = []
@@ -172,6 +172,43 @@ def weather_summer_test_grid_with_wind_dirs() -> List[SyntheticWeatherCase]:
                 )
             )
     assert len(out) == 144
+    return out
+
+
+def weather_summer_heat_grid() -> List[SyntheticWeatherCase]:
+    """90 летних synthetic: слабый ветер — одно направление (0°), сильный — 4 (0/90/180/270°).
+
+    3×2×3 базовых по темп/дождь/облачность × (9 calm + 18 strong wind rows) = 90.
+    """
+    temps = (0.0, 12.5, 25.0)
+    rains = ((False, 0.0), (True, 1.5))
+    winds = ((False, 2.0, 3.0), (True, 9.0, 14.0))
+    clouds = ((0.0, 750.0), (50.0, 400.0), (100.0, 80.0))
+    out: List[SyntheticWeatherCase] = []
+    for T in temps:
+        for rain_on, precip in rains:
+            for wind_flag, w_ms, g_ms in winds:
+                wind_dirs = (0.0,) if not wind_flag else (0.0, 90.0, 180.0, 270.0)
+                for c_pct, sw in clouds:
+                    hum = 85.0 if rain_on else 55.0
+                    tid = int(round(T * 10))
+                    cid0 = f"test_T{tid}_R{int(rain_on)}_W{int(wind_flag)}_C{int(c_pct)}"
+                    for d in wind_dirs:
+                        out.append(
+                            SyntheticWeatherCase(
+                                case_id=f"{cid0}_WD{int(d)}",
+                                temperature_c=T,
+                                precipitation_mm=precip,
+                                wind_speed_ms=w_ms,
+                                wind_gusts_ms=g_ms,
+                                cloud_cover_pct=c_pct,
+                                humidity_pct=hum,
+                                shortwave_radiation_wm2=sw,
+                                weather_time_iso=SYNTHETIC_TEST_WEATHER_ISO,
+                                wind_direction_deg=float(d),
+                            )
+                        )
+    assert len(out) == 90
     return out
 
 
@@ -221,7 +258,7 @@ def weather_winter_synthetic_grid() -> List[SyntheticWeatherCase]:
 
 
 def weather_winter_synthetic_grid_with_wind_dirs() -> List[SyntheticWeatherCase]:
-    """54 зимних synthetic × 4 направления ветра (0/90/180/270°, «откуда дует») = 216 кейсов."""
+    """54 зимних × 4 направления = 216 (полный обход; для батча см. ``weather_winter_heat_grid``)."""
     base = weather_winter_synthetic_grid()
     dirs = (0.0, 90.0, 180.0, 270.0)
     out: List[SyntheticWeatherCase] = []
@@ -245,6 +282,38 @@ def weather_winter_synthetic_grid_with_wind_dirs() -> List[SyntheticWeatherCase]
                 )
             )
     assert len(out) == 216
+    return out
+
+
+def weather_winter_heat_grid() -> List[SyntheticWeatherCase]:
+    """135 зимних synthetic: W0 (слабый ветер) — одно направление; W1 — четыре.
+
+    27 пространственных комбинаций × (1 + 4) направлений по силе ветра = 135.
+    """
+    base = weather_winter_synthetic_grid()
+    out: List[SyntheticWeatherCase] = []
+    for c in base:
+        strong = float(c.wind_speed_ms) >= 9.0
+        wind_dirs = (0.0, 90.0, 180.0, 270.0) if strong else (0.0,)
+        for d in wind_dirs:
+            out.append(
+                SyntheticWeatherCase(
+                    case_id=f"{c.case_id}_WD{int(d)}",
+                    temperature_c=c.temperature_c,
+                    precipitation_mm=c.precipitation_mm,
+                    wind_speed_ms=c.wind_speed_ms,
+                    wind_gusts_ms=c.wind_gusts_ms,
+                    cloud_cover_pct=c.cloud_cover_pct,
+                    humidity_pct=c.humidity_pct,
+                    shortwave_radiation_wm2=c.shortwave_radiation_wm2,
+                    weather_time_iso=c.weather_time_iso,
+                    snowfall_cm_h=c.snowfall_cm_h,
+                    snow_depth_m=c.snow_depth_m,
+                    weather_code=c.weather_code,
+                    wind_direction_deg=float(d),
+                )
+            )
+    assert len(out) == 135
     return out
 
 
@@ -733,6 +802,13 @@ def _iter_directed_pairs(n: int) -> Iterator[Tuple[int, int]]:
         for j in range(n):
             if i == j:
                 continue
+            yield i, j
+
+
+def _iter_undirected_pairs(n: int) -> Iterator[Tuple[int, int]]:
+    """Пары i<j — один раз на неориентированную пару точек (для heat synthetic)."""
+    for i in range(n):
+        for j in range(i + 1, n):
             yield i, j
 
 
@@ -1872,6 +1948,9 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "seed": "Seed",
         "n_points": "Число точек",
         "n_directed_pairs": "Направленных пар O–D",
+        "heat_route_tasks": "Число задач heat (пара×профиль)",
+        "heat_directed_pairs": "Heat: directed-пары A→B и B→A",
+        "heat_max_workers": "Heat: число процессов пула (1=последовательно)",
         "batch_profiles": "Профили (батч)",
         "n_profiles": "Профилей",
         "n_variants": "Вариантов маршрута",

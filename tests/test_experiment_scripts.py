@@ -12,30 +12,40 @@ def test_weather_windows_test_grid_len_36() -> None:
     assert len(g) == 36
 
 
-def test_weather_summer_wind_grid_len_144() -> None:
-    from bike_router.tools._experiment_common import weather_summer_test_grid_with_wind_dirs
+def test_weather_summer_heat_grid_len_90() -> None:
+    from bike_router.tools._experiment_common import weather_summer_heat_grid
 
-    g = weather_summer_test_grid_with_wind_dirs()
-    assert len(g) == 144
+    g = weather_summer_heat_grid()
+    assert len(g) == 90
     assert all(getattr(c, "wind_direction_deg", None) is not None for c in g)
 
 
-def test_weather_winter_wind_grid_len_216() -> None:
-    from bike_router.tools._experiment_common import weather_winter_synthetic_grid_with_wind_dirs
+def test_weather_winter_heat_grid_len_135() -> None:
+    from bike_router.tools._experiment_common import weather_winter_heat_grid
 
-    g = weather_winter_synthetic_grid_with_wind_dirs()
-    assert len(g) == 216
+    g = weather_winter_heat_grid()
+    assert len(g) == 135
     assert all(getattr(c, "wind_direction_deg", None) is not None for c in g)
 
 
-def test_combined_summer_winter_grid_len_360() -> None:
+def test_combined_summer_winter_heat_grid_len_225() -> None:
+    from bike_router.tools._experiment_common import (
+        weather_summer_heat_grid,
+        weather_winter_heat_grid,
+    )
+
+    g = weather_summer_heat_grid() + weather_winter_heat_grid()
+    assert len(g) == 225
+
+
+def test_legacy_full_wind_grids_still_exist() -> None:
     from bike_router.tools._experiment_common import (
         weather_summer_test_grid_with_wind_dirs,
         weather_winter_synthetic_grid_with_wind_dirs,
     )
 
-    g = weather_summer_test_grid_with_wind_dirs() + weather_winter_synthetic_grid_with_wind_dirs()
-    assert len(g) == 360
+    assert len(weather_summer_test_grid_with_wind_dirs()) == 144
+    assert len(weather_winter_synthetic_grid_with_wind_dirs()) == 216
 
 
 def test_route_batch_experiment_module_has_main() -> None:

@@ -76,7 +76,7 @@ _DEFAULT_BATCH_WEATHER_TZ = "Europe/Samara"
 
 # Фиксированные параметры батча (CLI урезан).
 DEFAULT_ROUTE_BATCH_SEED = 42
-DEFAULT_MIN_SPACING_M = 100.0
+DEFAULT_MIN_SPACING_M = 300.0
 DEFAULT_MAX_SAMPLE_ATTEMPTS = 50_000
 
 # Все Excel-выходы пакетных экспериментов — в этой папке (от корня пакета bike_router).

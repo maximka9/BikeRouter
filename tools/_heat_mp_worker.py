@@ -1,6 +1,7 @@
 """Spawn-safe воркер для параллельного heat_weather_experiment (Windows).
 
-Один процесс: один RouteEngine, внутри задачи — все synthetic-кейсы для пары (i,j) и профиля.
+Один процесс: один RouteEngine. Одна задача пула — одна O-D-пара × профиль × **чанк**
+synthetic-кейсов (чтобы прогресс-бар обновлялся чаще, чем раз в полную сетку).
 """
 
 from __future__ import annotations
@@ -8,19 +9,16 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Tuple
 
-_GRID: List[Any] = []
 _POINTS: List[Tuple[float, float]] = ()
 _CORRIDOR: Tuple[float, ...] = (10.0, 100.0)
 _ENGINE: Any = None
 
 
 def init_worker(
-    grid: List[Any],
     points: List[Tuple[float, float]],
     corridor: Tuple[float, ...],
 ) -> None:
-    global _GRID, _POINTS, _CORRIDOR, _ENGINE
-    _GRID = list(grid)
+    global _POINTS, _CORRIDOR, _ENGINE
     _POINTS = tuple(points)
     _CORRIDOR = tuple(corridor)
     for name in (
@@ -38,10 +36,10 @@ def init_worker(
 
 
 def run_pair_profile_task(
-    packed: Tuple[str, int, int, str, int],
+    packed: Tuple[str, int, int, str, int, List[Any]],
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int]:
-    """experiment_id, seed, i, j, prof → rows (route_id=0), failures, ok, fail, skip."""
-    experiment_id, seed, i, j, prof = packed
+    """experiment_id, seed, i, j, prof, grid_chunk → rows (route_id=0), failures, ok, fail, skip."""
+    experiment_id, seed, i, j, prof, grid_chunk = packed
     from bike_router.exceptions import BikeRouterError, RouteNotFoundError
     from bike_router.tools._experiment_common import (
         SYNTHETIC_TEST_WEATHER_ISO,
@@ -62,7 +60,7 @@ def run_pair_profile_task(
     n_ok = n_fail = n_skip = 0
     corr = _CORRIDOR
 
-    for syn_case in _GRID:
+    for syn_case in grid_chunk:
         wkw = kwargs_fixed_snapshot_from_case(syn_case)
         test_meta = {
             "weather_test_case_id": syn_case.case_id,

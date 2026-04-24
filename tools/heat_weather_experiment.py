@@ -10,12 +10,15 @@
 **winter** (**135** кейсов): 54 базовых по снегу/температуре; слабый ветер (W0) — одно направление,
 сильный (W1) — четыре → 27+108 = 135.
 
-**all** — **225** = 90 + 90 в одном Excel.
+**all** — **225** = 90 + 135 в одном Excel.
 
 Пары O–D по умолчанию **неориентированные** (только ``i<j``) — вдвое меньше маршрутов, чем A→B и B→A;
 флаг ``--directed-pairs`` включает полный directed-режим.
 
 Вершины маршрутов в ``.csv.gz`` **не** пишутся (ускорение и объём).
+
+При ``--max-workers`` > 1 прогресс идёт по **чанкам погоды** (см. ``--mp-weather-chunk``), иначе
+долгое «молчание» на первой паре (сотни маршрутов подряд в одном воркере).
 
 Устаревшее ``summer_wind`` = ``summer``.
 
@@ -62,6 +65,7 @@ def run_heat_weather_experiment(
     directed_pairs: bool = False,
     max_workers: int = 1,
     chunk_size: int = 1,
+    mp_weather_chunk_size: int = 25,
 ) -> str:
     _ensure_pkg_path()
 
@@ -179,29 +183,46 @@ def run_heat_weather_experiment(
 
     mw = _mw_resolve(int(max_workers))
     ch = max(1, int(chunk_size))
+    wchunk = max(1, int(mp_weather_chunk_size))
+
+    def _grid_chunks(g: List[Any], size: int) -> List[List[Any]]:
+        return [g[k : k + size] for k in range(0, len(g), size)]
 
     if mw > 1:
         from bike_router.tools._heat_mp_worker import init_worker as _heat_mp_init
         from bike_router.tools._heat_mp_worker import run_pair_profile_task as _heat_mp_task
 
         pls = [(float(p.lat), float(p.lon)) for p in points]
-        task_list = [(experiment_id, seed, i, j, prof) for i, j, prof in route_tasks]
+        gchunks = _grid_chunks(grid, wchunk)
+        task_list = [
+            (experiment_id, seed, i, j, prof, list(chunk))
+            for i, j, prof in route_tasks
+            for chunk in gchunks
+        ]
         del eng
         gc.collect()
-        _log.info("heat parallel: workers=%d tasks=%d chunk=%d", mw, len(task_list), ch)
+        _log.info(
+            "heat parallel: workers=%d pool_chunksize=%d weather_chunk=%d "
+            "→ %d задач (~%d маршрутов/задачу, прогресс по задачам)",
+            mw,
+            ch,
+            wchunk,
+            len(task_list),
+            wchunk,
+        )
         with Pool(
             processes=mw,
             initializer=_heat_mp_init,
-            initargs=(grid, pls, tuple(EXPERIMENT_CORRIDOR_EXPAND_M)),
+            initargs=(pls, tuple(EXPERIMENT_CORRIDOR_EXPAND_M)),
         ) as pool:
             results = list(
                 tqdm(
                     pool.imap(_heat_mp_task, task_list, chunksize=ch),
                     total=len(task_list),
-                    desc=f"Heat×{grid_name} (пары)",
-                    unit="пара",
+                    desc=f"Heat×{grid_name} (чанки по погоде)",
+                    unit="чанк",
                     leave=True,
-                    mininterval=2.0 if not verbose else 0.3,
+                    mininterval=0.5 if not verbose else 0.15,
                 )
             )
         for part in results:
@@ -373,6 +394,7 @@ def run_heat_weather_experiment(
         ("heat_route_tasks", n_od_tracks),
         ("heat_directed_pairs", bool(directed_pairs)),
         ("heat_max_workers", mw),
+        ("heat_mp_weather_chunk", wchunk if mw > 1 else None),
         ("batch_profiles", ",".join(profile_tuple)),
         ("n_profiles", len(profile_tuple)),
         ("experiment_weather_grid", wg),
@@ -425,7 +447,8 @@ def main() -> None:
         "summer: 90 synthetic (слабый ветер — 1 направление, сильный — 4). "
         "winter: 135. all: 225. "
         "По умолчанию пары O–D неориентированные (i<j); --directed-pairs — A→B и B→A. "
-        "--max-workers 0=auto (spawn pool); 1=последовательно. Вершины в csv.gz не пишутся."
+        "--max-workers 0=auto; --mp-weather-chunk — размер чанка погоды на задачу пула. "
+        "Вершины в csv.gz не пишутся."
     )
     parser = argparse.ArgumentParser(
         description="Heat на synthetic-сетке; см. модульный docstring.",
@@ -463,7 +486,14 @@ def main() -> None:
         type=int,
         default=1,
         metavar="N",
-        help="chunksize для pool.imap по задачам (пара×профиль).",
+        help="chunksize для pool.imap между процессами.",
+    )
+    parser.add_argument(
+        "--mp-weather-chunk",
+        type=int,
+        default=25,
+        metavar="N",
+        help="Сколько synthetic-кейсов в одной задаче пула (меньше — чаще обновляется tqdm).",
     )
     args = parser.parse_args()
 
@@ -481,6 +511,7 @@ def main() -> None:
         directed_pairs=bool(args.directed_pairs),
         max_workers=int(args.max_workers),
         chunk_size=max(1, int(args.chunk_size)),
+        mp_weather_chunk_size=max(1, int(args.mp_weather_chunk)),
     )
     print(path)
 

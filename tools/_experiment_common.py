@@ -1951,6 +1951,7 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
         "heat_route_tasks": "Число задач heat (пара×профиль)",
         "heat_directed_pairs": "Heat: directed-пары A→B и B→A",
         "heat_max_workers": "Heat: число процессов пула (1=последовательно)",
+        "heat_mp_weather_chunk": "Heat MP: synthetic-кейсов в одной задаче пула",
         "batch_profiles": "Профили (батч)",
         "n_profiles": "Профилей",
         "n_variants": "Вариантов маршрута",

@@ -109,6 +109,8 @@ class SyntheticWeatherCase:
     cloud_cover_pct: float
     humidity_pct: float
     shortwave_radiation_wm2: float
+    # Ощущаемая температура °C (Open-Meteo); None — как температура воздуха.
+    apparent_temperature_c: Optional[float] = None
     # ISO для сезонного профиля (зима / апрель / лето); по умолчанию — летний synthetic.
     weather_time_iso: str = SYNTHETIC_TEST_WEATHER_ISO
     snowfall_cm_h: float = 0.0
@@ -177,9 +179,10 @@ def weather_summer_test_grid_with_wind_dirs() -> List[SyntheticWeatherCase]:
 
 
 def weather_summer_heat_grid() -> List[SyntheticWeatherCase]:
-    """90 летних synthetic: слабый ветер — одно направление (0°), сильный — 4 (0/90/180/270°).
+    """95 летних synthetic: базовая сетка 90 + 5 кейсов apparent temperature.
 
-    3×2×3 базовых по темп/дождь/облачность × (9 calm + 18 strong wind rows) = 90.
+    3×2×3 базовых по темп/дождь/облачность × (9 calm + 18 strong wind rows) = 90;
+    плюс отдельная группа T vs AT для чувствительности heat-модели к ощущаемой температуре.
     """
     temps = (0.0, 12.5, 25.0)
     rains = ((False, 0.0), (True, 1.5))
@@ -209,7 +212,68 @@ def weather_summer_heat_grid() -> List[SyntheticWeatherCase]:
                                 wind_direction_deg=float(d),
                             )
                         )
-    assert len(out) == 90
+    # Apparent temperature (фиксированное «жаркое солнце» + варианты AT при T=25 и холод).
+    _app_base = dict(
+        precipitation_mm=0.0,
+        wind_speed_ms=2.0,
+        wind_gusts_ms=3.0,
+        cloud_cover_pct=0.0,
+        shortwave_radiation_wm2=750.0,
+        wind_direction_deg=0.0,
+        weather_time_iso=SYNTHETIC_TEST_WEATHER_ISO,
+    )
+    out.extend(
+        [
+            SyntheticWeatherCase(
+                case_id="app_T25_AT25_neutral_hot",
+                temperature_c=25.0,
+                humidity_pct=55.0,
+                apparent_temperature_c=25.0,
+                **_app_base,
+            ),
+            SyntheticWeatherCase(
+                case_id="app_T25_AT32_humid_hot",
+                temperature_c=25.0,
+                humidity_pct=72.0,
+                apparent_temperature_c=32.0,
+                **_app_base,
+            ),
+            SyntheticWeatherCase(
+                case_id="app_T25_AT38_extreme_hot",
+                temperature_c=25.0,
+                humidity_pct=78.0,
+                apparent_temperature_c=38.0,
+                **_app_base,
+            ),
+            SyntheticWeatherCase(
+                case_id="app_T125_AT5_cold_wind",
+                temperature_c=12.5,
+                humidity_pct=58.0,
+                apparent_temperature_c=5.0,
+                wind_speed_ms=9.0,
+                wind_gusts_ms=14.0,
+                cloud_cover_pct=50.0,
+                shortwave_radiation_wm2=400.0,
+                wind_direction_deg=0.0,
+                weather_time_iso=SYNTHETIC_TEST_WEATHER_ISO,
+                precipitation_mm=0.0,
+            ),
+            SyntheticWeatherCase(
+                case_id="app_T0_ATm8_frost_like",
+                temperature_c=0.0,
+                humidity_pct=65.0,
+                apparent_temperature_c=-8.0,
+                wind_speed_ms=5.0,
+                wind_gusts_ms=8.0,
+                cloud_cover_pct=70.0,
+                shortwave_radiation_wm2=180.0,
+                wind_direction_deg=0.0,
+                weather_time_iso=SYNTHETIC_TEST_WEATHER_ISO,
+                precipitation_mm=0.0,
+            ),
+        ]
+    )
+    assert len(out) == 95
     return out
 
 
@@ -357,6 +421,7 @@ def kwargs_fixed_snapshot_from_case(
         "use_live_weather": False,
         "weather_time": wt,
         "temperature_c": case.temperature_c,
+        "apparent_temperature_c": getattr(case, "apparent_temperature_c", None),
         "precipitation_mm": case.precipitation_mm,
         "wind_speed_ms": case.wind_speed_ms,
         "cloud_cover_pct": case.cloud_cover_pct,
@@ -540,6 +605,8 @@ SUMMARY_NUM_KEYS = (
     "stress_cost_total",
     "weather_temperature_c",
     "weather_apparent_temperature_c",
+    "weather_effective_heat_temperature_c",
+    "weather_apparent_minus_air_c",
     "weather_precipitation_mm",
     "weather_precipitation_probability",
     "weather_wind_speed_ms",
@@ -581,6 +648,10 @@ SUMMARY_NUM_KEYS = (
     "heat_norm_cold_like",
     "heat_norm_snow_depth",
     "heat_norm_snow_fresh",
+    "heat_norm_radiation",
+    "heat_norm_apparent_heat",
+    "heat_norm_apparent_cold",
+    "heat_norm_apparent_minus_air",
     "route_open_sky_share",
     "route_building_shade_share",
     "route_covered_share",
@@ -598,6 +669,7 @@ SUMMARY_NUM_KEYS = (
     "route_stairs_length_fraction",
     "route_winter_open_stress_proxy",
     "weather_test_temperature_c",
+    "weather_test_apparent_temperature_c",
     "weather_test_precipitation_mm",
     "weather_test_wind_speed_ms",
     "weather_test_wind_gusts_ms",
@@ -613,6 +685,8 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
     empty: Dict[str, Any] = {
         "weather_temperature_c": None,
         "weather_apparent_temperature_c": None,
+        "weather_effective_heat_temperature_c": None,
+        "weather_apparent_minus_air_c": None,
         "weather_precipitation_mm": None,
         "weather_precipitation_probability": None,
         "weather_wind_speed_ms": None,
@@ -654,6 +728,10 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "heat_norm_cold_like": None,
         "heat_norm_snow_depth": None,
         "heat_norm_snow_fresh": None,
+        "heat_norm_radiation": None,
+        "heat_norm_apparent_heat": None,
+        "heat_norm_apparent_cold": None,
+        "heat_norm_apparent_minus_air": None,
     }
     w = getattr(r, "weather", None)
     if not w or not bool(getattr(w, "enabled", False)):
@@ -671,9 +749,16 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         except (TypeError, ValueError):
             return None
 
+    T_air = _f("temperature_c")
+    Ta = _f("apparent_temperature_c")
+    Teff = Ta if Ta is not None else T_air
     out = {
-        "weather_temperature_c": _f("temperature_c"),
-        "weather_apparent_temperature_c": _f("apparent_temperature_c"),
+        "weather_temperature_c": T_air,
+        "weather_apparent_temperature_c": Ta,
+        "weather_effective_heat_temperature_c": Teff,
+        "weather_apparent_minus_air_c": (Ta - T_air)
+        if Ta is not None and T_air is not None
+        else None,
         "weather_precipitation_mm": _f("precipitation_mm"),
         "weather_precipitation_probability": _f("precipitation_probability"),
         "weather_wind_speed_ms": _f("wind_speed_ms"),
@@ -760,6 +845,10 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
             "norm_cold_like_norm": "heat_norm_cold_like",
             "norm_snow_depth_norm": "heat_norm_snow_depth",
             "norm_snow_fresh_norm": "heat_norm_snow_fresh",
+            "norm_radiation_norm": "heat_norm_radiation",
+            "norm_apparent_heat_norm": "heat_norm_apparent_heat",
+            "norm_apparent_cold_norm": "heat_norm_apparent_cold",
+            "norm_apparent_minus_air_norm": "heat_norm_apparent_minus_air",
         }
         for sk, dk in mapping.items():
             if sk in hm:
@@ -767,6 +856,18 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
                     out[dk] = float(hm[sk])
                 except (TypeError, ValueError):
                     pass
+        if "effective_heat_temperature_c" in hm:
+            try:
+                out["weather_effective_heat_temperature_c"] = float(
+                    hm["effective_heat_temperature_c"]
+                )
+            except (TypeError, ValueError):
+                pass
+        if "apparent_minus_air_c" in hm:
+            try:
+                out["weather_apparent_minus_air_c"] = float(hm["apparent_minus_air_c"])
+            except (TypeError, ValueError):
+                pass
     return out
 
 
@@ -1081,6 +1182,7 @@ def route_to_raw_row(
         ),
         "weather_test_case_id": None,
         "weather_test_temperature_c": None,
+        "weather_test_apparent_temperature_c": None,
         "weather_test_precipitation_mm": None,
         "weather_test_wind_speed_ms": None,
         "weather_test_wind_gusts_ms": None,
@@ -2236,6 +2338,8 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "weather_source": "Источник погоды",
     "weather_temperature_c": "Температура, °C",
     "weather_apparent_temperature_c": "Ощущается, °C",
+    "weather_effective_heat_temperature_c": "Эффективная температура для heat, °C",
+    "weather_apparent_minus_air_c": "Ощущаемая минус воздух, °C",
     "weather_precipitation_mm": "Осадки, мм/ч",
     "weather_precipitation_probability": "Вероятность осадков, %",
     "weather_wind_speed_ms": "Ветер, м/с",
@@ -2277,6 +2381,10 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "heat_norm_cold_like": "Heat: норм. прохлада",
     "heat_norm_snow_depth": "Heat: норм. глубина снега",
     "heat_norm_snow_fresh": "Heat: норм. снегопад",
+    "heat_norm_radiation": "Heat: норм. КВ (0..1 от 750 Вт/м²)",
+    "heat_norm_apparent_heat": "Heat: норм. жар (ощущаемая)",
+    "heat_norm_apparent_cold": "Heat: норм. холод (ощущаемая)",
+    "heat_norm_apparent_minus_air": "Heat: норм. (AT−T)/15",
     "route_open_sky_share": "Маршрут: доля открытого неба",
     "route_building_shade_share": "Маршрут: тень зданий",
     "route_covered_share": "Маршрут: укрытия",
@@ -2304,6 +2412,7 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "route_winter_open_stress_proxy": "Маршрут: открытость × сила зимней модели",
     "weather_test_case_id": "Test: ID сценария",
     "weather_test_temperature_c": "Test: температура, °C",
+    "weather_test_apparent_temperature_c": "Test: ощущается, °C",
     "weather_test_precipitation_mm": "Test: осадки, мм/ч",
     "weather_test_wind_speed_ms": "Test: ветер, м/с",
     "weather_test_wind_gusts_ms": "Test: порывы, м/с",

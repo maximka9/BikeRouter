@@ -38,7 +38,8 @@
     },
     "heat": {
       "base": 1.0,
-      "per_temp_above_22": 0.028,
+      "per_temp_above_22": 0.042,
+      "per_degree_cold": 0.011,
       "cloud_reduction_per_pct": 0.0026,
       "rain_reduction_light": 0.92,
       "rain_reduction_heavy": 0.82
@@ -51,9 +52,9 @@
     },
     "stress": {
       "base": 1.0,
-      "rain": 1.12,
-      "wind_strong": 1.1,
-      "low_visibility_cloud": 1.05
+      "rain": 1.06,
+      "wind_strong": 1.05,
+      "low_visibility_cloud": 1.04
     },
     "surface": {
       "base": 1.0,

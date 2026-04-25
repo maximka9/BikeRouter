@@ -15,8 +15,8 @@
     }
   },
   "air_temperature": {
-    "reference_c": 22.0,
-    "per_degree_above": 0.045,
-    "max_mult": 1.55
+    "reference_c": 21.0,
+    "per_degree_above": 0.068,
+    "max_mult": 1.72
   }
 }

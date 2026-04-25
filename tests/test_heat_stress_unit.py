@@ -28,10 +28,20 @@ def test_time_slot_morning_noon_evening_night():
 
 
 def test_routing_preference_profiles_exist():
-    for k in ("balanced", "safe", "cool", "sport"):
+    for k in (
+        "balanced",
+        "safe",
+        "cool",
+        "sport",
+        "thermal_physical_base",
+        "stress_physical_base",
+        "heat_stress_physical_base",
+    ):
         p = routing_preference_profile(k)
         assert p.key == k
         assert p.alpha > 0
+    hs = routing_preference_profile("heat_stress_physical_base")
+    assert hs.beta > hs.gamma
 
 
 def test_lts_cycleway_lower_than_primary():

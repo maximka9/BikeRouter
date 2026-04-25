@@ -4,13 +4,13 @@
 
 Сетка ``--grid``:
 
-**summer** (**90** кейсов): те же оси 3×2×2×3, но направления ветра только при **сильном** ветре
-(4 угла); при слабом — одно направление **0°** → 18+72 = 90.
+**summer** (**95** кейсов): базовая сетка 90 (3×2×2×3, ветер как раньше) + **5** кейсов
+apparent temperature (T vs AT).
 
 **winter** (**135** кейсов): 54 базовых по снегу/температуре; слабый ветер (W0) — одно направление,
 сильный (W1) — четыре → 27+108 = 135.
 
-**all** — **225** = 90 + 135 в одном Excel.
+**all** — **230** = 95 + 135 в одном Excel.
 
 Пары O–D по умолчанию **неориентированные** (только ``i<j``) — вдвое меньше маршрутов, чем A→B и B→A;
 флаг ``--directed-pairs`` включает полный directed-режим.
@@ -146,19 +146,19 @@ def run_heat_weather_experiment(
     wg = (weather_grid or "summer").strip().lower()
     if wg in ("summer_wind", "summer-wind"):
         wg = "summer"
-        _log.info("summer_wind → summer (сетка heat 90)")
+        _log.info("summer_wind → summer (сетка heat 95)")
     summer_g = weather_summer_heat_grid()
     winter_g = weather_winter_heat_grid()
     if wg == "all":
         grid = summer_g + winter_g
-        grid_name = "лето+зима (90+135=225)"
+        grid_name = "лето+зима (95+135=230)"
     elif wg == "winter":
         grid = winter_g
         grid_name = "135 зимних (calm 1×WD + strong 4×WD)"
     else:
         grid = summer_g
-        grid_name = "90 летних (calm 1×WD + strong 4×WD)"
-    assert len(grid) in (90, 135, 225)
+        grid_name = "95 летних (90 базовых + 5 apparent)"
+    assert len(grid) in (95, 135, 230)
 
     pair_iter = _iter_directed_pairs(n_points) if directed_pairs else _iter_undirected_pairs(n_points)
     route_tasks: List[Tuple[int, int, str]] = [
@@ -263,6 +263,9 @@ def run_heat_weather_experiment(
                 test_meta = {
                     "weather_test_case_id": syn_case.case_id,
                     "weather_test_temperature_c": syn_case.temperature_c,
+                    "weather_test_apparent_temperature_c": getattr(
+                        syn_case, "apparent_temperature_c", None
+                    ),
                     "weather_test_precipitation_mm": syn_case.precipitation_mm,
                     "weather_test_wind_speed_ms": syn_case.wind_speed_ms,
                     "weather_test_wind_gusts_ms": syn_case.wind_gusts_ms,
@@ -439,8 +442,8 @@ def main() -> None:
     from bike_router.tools._experiment_common import DEFAULT_BATCH_LOG_EVERY
 
     grid_help = (
-        "summer: 90 synthetic (слабый ветер — 1 направление, сильный — 4). "
-        "winter: 135. all: 225. "
+        "summer: 95 synthetic (90 базовых + 5 apparent). "
+        "winter: 135. all: 230. "
         "По умолчанию пары O–D неориентированные (i<j); --directed-pairs — A→B и B→A. "
         "--max-workers 0=auto; --mp-weather-chunk — размер чанка погоды на задачу пула. "
         "Вершины в csv.gz не пишутся."

@@ -106,6 +106,10 @@ class AlternativesRequest(BaseModel):
         description="ISO 8601 — время для почасовой погоды (иначе departure_time)",
     )
     temperature_c: Optional[float] = Field(default=None, description="Ручая погода °C")
+    apparent_temperature_c: Optional[float] = Field(
+        default=None,
+        description="Ощущаемая температура °C (manual/fixed-snapshot); для heat как Teff",
+    )
     precipitation_mm: Optional[float] = Field(default=None, description="Осадки мм/ч (ручной режим)")
     wind_speed_ms: Optional[float] = Field(default=None, description="Ветер м/с")
     wind_direction_deg: Optional[float] = Field(
@@ -154,6 +158,7 @@ class AlternativesStartRequest(BaseModel):
     use_live_weather: bool = False
     weather_time: Optional[str] = None
     temperature_c: Optional[float] = None
+    apparent_temperature_c: Optional[float] = None
     precipitation_mm: Optional[float] = None
     wind_speed_ms: Optional[float] = None
     cloud_cover_pct: Optional[float] = None

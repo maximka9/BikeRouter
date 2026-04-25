@@ -265,8 +265,8 @@ ROUTING_PREFERENCE_PROFILES: Dict[str, RoutingPreferenceProfile] = {
         key="thermal_physical_base",
         label="Тепло на физической базе",
         alpha=1.0,
-        beta=0.36,
-        gamma=0.2,
+        beta=0.44,
+        gamma=0.14,
         delta=0.72,
     ),
     # Стресс-маршрут на той же физической базе, что и full (не чистый stress_cost).
@@ -274,9 +274,18 @@ ROUTING_PREFERENCE_PROFILES: Dict[str, RoutingPreferenceProfile] = {
         key="stress_physical_base",
         label="Безопасность на физической базе",
         alpha=1.0,
-        beta=0.14,
-        gamma=1.08,
+        beta=0.12,
+        gamma=0.94,
         delta=1.05,
+    ),
+    # Тепло+безопасность: явно выше вес тепла, ниже стресса, чем у balanced — меньше совпадений со stress.
+    "heat_stress_physical_base": RoutingPreferenceProfile(
+        key="heat_stress_physical_base",
+        label="Тепло и безопасность на физической базе",
+        alpha=1.0,
+        beta=1.24,
+        gamma=0.58,
+        delta=0.92,
     ),
 }
 
@@ -469,6 +478,33 @@ class Settings:
     heat_open_sky_wind_gain: float = _env("HEAT_OPEN_SKY_WIND_GAIN", 0.28, float)
     heat_open_sky_gust_gain: float = _env("HEAT_OPEN_SKY_GUST_GAIN", 0.22, float)
     heat_open_sky_humid_gain: float = _env("HEAT_OPEN_SKY_HUMID_GAIN", 0.18, float)
+    heat_apparent_temp_enable: bool = _env_bool("HEAT_APPARENT_TEMP_ENABLE", True)
+    heat_apparent_temp_ref: float = _env("HEAT_APPARENT_TEMP_REF", 25.0, float)
+    heat_apparent_temp_hot_ref: float = _env("HEAT_APPARENT_TEMP_HOT_REF", 32.0, float)
+    heat_apparent_temp_extreme_ref: float = _env(
+        "HEAT_APPARENT_TEMP_EXTREME_REF", 38.0, float
+    )
+    heat_open_sky_apparent_gain: float = _env(
+        "HEAT_OPEN_SKY_APPARENT_GAIN", 0.45, float
+    )
+    heat_open_sky_radiation_gain: float = _env(
+        "HEAT_OPEN_SKY_RADIATION_GAIN", 0.35, float
+    )
+    heat_open_sky_hot_extra_gain: float = _env(
+        "HEAT_OPEN_SKY_HOT_EXTRA_GAIN", 0.25, float
+    )
+    heat_tree_shade_apparent_gain: float = _env(
+        "HEAT_TREE_SHADE_APPARENT_GAIN", 0.38, float
+    )
+    heat_tree_shade_radiation_gain: float = _env(
+        "HEAT_TREE_SHADE_RADIATION_GAIN", 0.30, float
+    )
+    heat_tree_shade_extreme_gain: float = _env(
+        "HEAT_TREE_SHADE_EXTREME_GAIN", 0.20, float
+    )
+    heat_building_shade_radiation_gain: float = _env(
+        "HEAT_BUILDING_SHADE_RADIATION_GAIN", 0.14, float
+    )
 
     heat_building_shade_wind_gain: float = _env(
         "HEAT_BUILDING_SHADE_WIND_GAIN", 0.32, float
@@ -532,7 +568,7 @@ class Settings:
     heat_coeff_clamp_hi: float = _env("HEAT_COEFF_CLAMP_HI", 1.42, float)
 
     # Погодный stress: доля глобального wm.stress (остальное — edge-specific в routing).
-    weather_stress_global_blend: float = _env("WEATHER_STRESS_GLOBAL_BLEND", 0.38, float)
+    weather_stress_global_blend: float = _env("WEATHER_STRESS_GLOBAL_BLEND", 0.28, float)
     weather_stress_edge_rain_slip: float = _env("WEATHER_STRESS_EDGE_RAIN_SLIP", 0.22, float)
     weather_stress_edge_wind_open: float = _env("WEATHER_STRESS_EDGE_WIND_OPEN", 0.20, float)
     weather_stress_edge_lts_fast: float = _env("WEATHER_STRESS_EDGE_LTS_FAST", 0.17, float)
@@ -992,12 +1028,39 @@ def routing_engine_cache_fingerprint() -> str:
         ),
         "heat_tree_shade_temp_gain": _env("HEAT_TREE_SHADE_TEMP_GAIN", 0.42, float),
         "heat_open_sky_temp_gain": _env("HEAT_OPEN_SKY_TEMP_GAIN", 0.52, float),
+        "heat_apparent_temp_enable": _env_bool("HEAT_APPARENT_TEMP_ENABLE", True),
+        "heat_apparent_temp_ref": _env("HEAT_APPARENT_TEMP_REF", 25.0, float),
+        "heat_apparent_temp_hot_ref": _env("HEAT_APPARENT_TEMP_HOT_REF", 32.0, float),
+        "heat_apparent_temp_extreme_ref": _env(
+            "HEAT_APPARENT_TEMP_EXTREME_REF", 38.0, float
+        ),
+        "heat_open_sky_apparent_gain": _env(
+            "HEAT_OPEN_SKY_APPARENT_GAIN", 0.45, float
+        ),
+        "heat_open_sky_radiation_gain": _env(
+            "HEAT_OPEN_SKY_RADIATION_GAIN", 0.35, float
+        ),
+        "heat_open_sky_hot_extra_gain": _env(
+            "HEAT_OPEN_SKY_HOT_EXTRA_GAIN", 0.25, float
+        ),
+        "heat_tree_shade_apparent_gain": _env(
+            "HEAT_TREE_SHADE_APPARENT_GAIN", 0.38, float
+        ),
+        "heat_tree_shade_radiation_gain": _env(
+            "HEAT_TREE_SHADE_RADIATION_GAIN", 0.30, float
+        ),
+        "heat_tree_shade_extreme_gain": _env(
+            "HEAT_TREE_SHADE_EXTREME_GAIN", 0.20, float
+        ),
+        "heat_building_shade_radiation_gain": _env(
+            "HEAT_BUILDING_SHADE_RADIATION_GAIN", 0.14, float
+        ),
         "heat_coeff_clamp_lo": _env("HEAT_COEFF_CLAMP_LO", 0.72, float),
         "heat_coeff_clamp_hi": _env("HEAT_COEFF_CLAMP_HI", 1.42, float),
         "heat_temp_cool_ref": _env("HEAT_TEMP_COOL_REF", 14.0, float),
         "heat_temp_cool_range": _env("HEAT_TEMP_COOL_RANGE", 10.0, float),
         "heat_tree_shade_cold_damp": _env("HEAT_TREE_SHADE_COLD_DAMP", 0.58, float),
-        "weather_stress_global_blend": _env("WEATHER_STRESS_GLOBAL_BLEND", 0.38, float),
+        "weather_stress_global_blend": _env("WEATHER_STRESS_GLOBAL_BLEND", 0.28, float),
         "season_green_mult_winter": _env("SEASON_GREEN_MULT_WINTER", 0.08, float),
         "season_green_ramp_end_day": _env("SEASON_GREEN_RAMP_END_DAY", 20.0, float),
         "snow_depth_mult_tier3": _env("SNOW_DEPTH_MULT_TIER3", 1.28, float),

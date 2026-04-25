@@ -379,7 +379,7 @@ def compute_edge_route_criteria(
 
     regime_st = float(getattr(weather, "stress_route_regime_factor", 1.0) or 1.0)
     if regime_st <= 0.0 or not math.isfinite(regime_st):
-        blend = float(getattr(weather, "weather_stress_global_blend", 0.38))
+        blend = float(getattr(weather, "weather_stress_global_blend", 0.28))
         snow_add = float(getattr(weather, "snow_stress_global_add", 0.0))
         srm = float(getattr(weather, "season_stress_route_mult", 1.0) or 1.0)
         regime_st = (1.0 + blend * (float(wm.stress) - 1.0) + snow_add) * srm

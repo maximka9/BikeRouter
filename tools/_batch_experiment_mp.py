@@ -64,6 +64,9 @@ def run_heat_weather_chunk_task(
         test_meta = {
             "weather_test_case_id": syn_case.case_id,
             "weather_test_temperature_c": syn_case.temperature_c,
+            "weather_test_apparent_temperature_c": getattr(
+                syn_case, "apparent_temperature_c", None
+            ),
             "weather_test_precipitation_mm": syn_case.precipitation_mm,
             "weather_test_wind_speed_ms": syn_case.wind_speed_ms,
             "weather_test_wind_gusts_ms": syn_case.wind_gusts_ms,
@@ -184,6 +187,9 @@ def run_variants_weather_chunk_task(
         test_meta = {
             "weather_test_case_id": case_id,
             "weather_test_temperature_c": syn_case.temperature_c,
+            "weather_test_apparent_temperature_c": getattr(
+                syn_case, "apparent_temperature_c", None
+            ),
             "weather_test_precipitation_mm": syn_case.precipitation_mm,
             "weather_test_wind_speed_ms": syn_case.wind_speed_ms,
             "weather_test_wind_gusts_ms": syn_case.wind_gusts_ms,

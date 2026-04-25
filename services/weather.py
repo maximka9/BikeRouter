@@ -109,7 +109,7 @@ class WeatherWeightParams:
     heat_edge_rain_building_mult: float = 0.56
     heat_edge_rain_wind_exp_mult: float = 0.22
     # Нормированные сигналы и edge-stress (заполняются при enabled + settings).
-    weather_stress_global_blend: float = 0.38
+    weather_stress_global_blend: float = 0.28
     stress_edge_rain_slip: float = 0.22
     stress_edge_wind_open: float = 0.20
     stress_edge_lts_fast: float = 0.17
@@ -255,12 +255,19 @@ def wmo_weather_code_profile(code: Optional[int]) -> Dict[str, float]:
 def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, float]:
     """Нормированные сигналы [0..1] и cold_like [0..1] для непрерывной тепловой модели."""
     T = float(snap.temperature_c)
+    at_raw = getattr(snap, "apparent_temperature_c", None)
+    use_at = bool(getattr(s, "heat_apparent_temp_enable", True))
+    Teff = float(at_raw) if (use_at and at_raw is not None) else T
     rain = float(snap.precipitation_mm)
     wind = float(snap.wind_speed_ms)
     gust_o = snap.wind_gusts_ms
     gust = float(gust_o) if gust_o is not None else wind
     clouds = float(snap.cloud_cover_pct)
     hum = float(snap.humidity_pct)
+    sw = snap.shortwave_radiation_wm2
+    radiation_norm = (
+        _clamp(float(sw) / 750.0, 0.0, 1.0) if sw is not None else 0.0
+    )
 
     tmax = max(float(getattr(s, "heat_temp_ref_max", 30.0)), 1e-6)
     rmax = max(float(getattr(s, "heat_rain_ref_max", 3.0)), 1e-6)
@@ -270,6 +277,7 @@ def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, floa
     tc_rng = max(float(getattr(s, "heat_temp_cool_range", 15.0)), 1e-6)
 
     temp_norm = _clamp(T / tmax, 0.0, 1.0)
+    heat_temp_norm = _clamp(Teff / tmax, 0.0, 1.0)
     rain_norm = _clamp(rain / rmax, 0.0, 1.0)
     wind_norm = _clamp(wind / wmax, 0.0, 1.0)
     gust_delta = max(0.0, gust - wind)
@@ -277,16 +285,33 @@ def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, floa
     cloud_norm = _clamp(clouds / 100.0, 0.0, 1.0)
     humidity_norm = _clamp(hum / 100.0, 0.0, 1.0)
     cold_like_norm = _clamp((tcref - T) / tc_rng, 0.0, 1.0)
+    at_ref = float(getattr(s, "heat_apparent_temp_ref", 25.0))
+    at_ext = float(getattr(s, "heat_apparent_temp_extreme_ref", 38.0))
+    denom_hot = max(1e-6, at_ext - at_ref)
+    apparent_heat_norm = (
+        _clamp((Teff - at_ref) / denom_hot, 0.0, 1.0) if Teff >= at_ref else 0.0
+    )
+    apparent_cold_norm = _clamp(max(0.0, 15.0 - Teff) / 20.0, 0.0, 1.0)
+    apparent_minus_air_norm = (
+        _clamp((Teff - T) / 15.0, -1.0, 1.0)
+        if (use_at and at_raw is not None)
+        else 0.0
+    )
     snd, snf = normalized_snow_signals(snap, s)
     wc = wmo_weather_code_profile(getattr(snap, "weather_code", None))
     out = {
         "temp_norm": temp_norm,
+        "heat_temp_norm": heat_temp_norm,
         "rain_norm": rain_norm,
         "wind_norm": wind_norm,
         "gust_norm": gust_norm,
         "cloud_norm": cloud_norm,
         "humidity_norm": humidity_norm,
         "cold_like_norm": cold_like_norm,
+        "radiation_norm": float(radiation_norm),
+        "apparent_heat_norm": float(apparent_heat_norm),
+        "apparent_cold_norm": float(apparent_cold_norm),
+        "apparent_minus_air_norm": float(apparent_minus_air_norm),
         "snow_depth_norm": float(snd),
         "snow_fresh_norm": float(snf),
     }
@@ -298,37 +323,62 @@ def _continuous_six_coefficients(
     sig: Dict[str, float], s: Any
 ) -> Tuple[float, float, float, float, float, float]:
     """Шесть непрерывных множителей для поправки тепловой компоненты ребра."""
-    tn = sig["temp_norm"]
+    tn = float(sig.get("heat_temp_norm", sig["temp_norm"]))
     rn = sig["rain_norm"]
     wn = sig["wind_norm"]
     gn = sig["gust_norm"]
     cn = sig["cloud_norm"]
     hn = sig["humidity_norm"]
     cl = sig["cold_like_norm"]
+    radn = float(sig.get("radiation_norm", 0.0))
+    ahn = float(sig.get("apparent_heat_norm", 0.0))
 
     a1 = float(getattr(s, "heat_tree_shade_temp_gain", 0.42))
     a2 = float(getattr(s, "heat_tree_shade_rain_damp", 0.35))
     a3 = float(getattr(s, "heat_tree_shade_cold_damp", 0.38))
-    tree_shade_bonus = 1.0 + a1 * tn - a2 * rn - a3 * cl
+    ta_app = float(getattr(s, "heat_tree_shade_apparent_gain", 0.38))
+    ta_rad = float(getattr(s, "heat_tree_shade_radiation_gain", 0.30))
+    ta_ext = float(getattr(s, "heat_tree_shade_extreme_gain", 0.20))
+    tree_shade_bonus = (
+        1.0
+        + a1 * tn
+        - a2 * rn
+        - a3 * cl
+        + ta_app * ahn
+        + ta_rad * radn
+        + ta_ext * ahn * radn
+    )
 
     b1 = float(getattr(s, "heat_open_sky_temp_gain", 0.52))
     b2 = float(getattr(s, "heat_open_sky_wind_gain", 0.28))
     b3 = float(getattr(s, "heat_open_sky_gust_gain", 0.22))
     b4 = float(getattr(s, "heat_open_sky_humid_gain", 0.18))
+    os_app = float(getattr(s, "heat_open_sky_apparent_gain", 0.45))
+    os_rad = float(getattr(s, "heat_open_sky_radiation_gain", 0.35))
+    os_hotx = float(getattr(s, "heat_open_sky_hot_extra_gain", 0.25))
     open_sky_penalty = (
         1.0
         + b1 * tn * (1.0 - cn)
         + b2 * wn
         + b3 * gn
         + b4 * hn * tn
+        + os_app * ahn * (1.0 - cn)
+        + os_rad * radn * (1.0 - cn)
+        + os_hotx * ahn * radn
     )
 
     c1 = float(getattr(s, "heat_building_shade_wind_gain", 0.32))
     c2 = float(getattr(s, "heat_building_shade_gust_gain", 0.22))
     c3 = float(getattr(s, "heat_building_shade_rain_gain", 0.26))
     c4 = float(getattr(s, "heat_building_shade_humid_gain", 0.14))
+    c_rad = float(getattr(s, "heat_building_shade_radiation_gain", 0.14))
     building_shade_bonus = (
-        1.0 + c1 * wn + c2 * gn + c3 * rn + c4 * hn * (1.0 - cn)
+        1.0
+        + c1 * wn
+        + c2 * gn
+        + c3 * rn
+        + c4 * hn * (1.0 - cn)
+        + c_rad * radn * (1.0 - 0.5 * cn)
     )
 
     d1 = float(getattr(s, "heat_covered_rain_gain", 0.45))
@@ -388,7 +438,7 @@ def _edge_params_from_settings(s: Any) -> Dict[str, float]:
 def _stress_and_phys_wet_params_from_settings(s: Any) -> Dict[str, float]:
     return {
         "weather_stress_global_blend": float(
-            getattr(s, "weather_stress_global_blend", 0.38)
+            getattr(s, "weather_stress_global_blend", 0.28)
         ),
         "stress_edge_rain_slip": float(getattr(s, "weather_stress_edge_rain_slip", 0.22)),
         "stress_edge_wind_open": float(
@@ -616,7 +666,7 @@ def build_weather_weight_params(
         season_wind_orient_rm = season_wind_orientation_route_multiplier(
             lab, settings
         )
-    blend_sg = float(spw.get("weather_stress_global_blend", 0.38)) if spw else 0.38
+    blend_sg = float(spw.get("weather_stress_global_blend", 0.28)) if spw else 0.28
     stress_route_regime_factor = (
         1.0 + blend_sg * (float(mults.stress) - 1.0) + float(snow_stress_add)
     ) * float(season_stress_rm)
@@ -724,6 +774,7 @@ def classify_weather_regime(snap: WeatherSnapshot) -> str:
     """Грубая классификация: жара/инсоляция vs холод/ветер/влага для микроклимата на рёбрах."""
     T = float(snap.temperature_c)
     Ta = float(snap.apparent_temperature_c) if snap.apparent_temperature_c is not None else T
+    Teff = Ta
     sw = snap.shortwave_radiation_wm2
     wind = max(float(snap.wind_speed_ms), float(snap.wind_gusts_ms or 0.0))
     hum = float(snap.humidity_pct)
@@ -733,7 +784,7 @@ def classify_weather_regime(snap: WeatherSnapshot) -> str:
     snow_f = float(getattr(snap, "snowfall_cm_h", 0.0) or 0.0)
 
     hot_score = 0.0
-    if max(T, Ta) >= 23.5:
+    if Teff >= 23.5:
         hot_score += 2.0
     if sw is not None:
         swf = float(sw)
@@ -749,7 +800,7 @@ def classify_weather_regime(snap: WeatherSnapshot) -> str:
         hot_score += 0.6
 
     cold_score = 0.0
-    if min(T, Ta) <= 12.5:
+    if min(T, Teff) <= 12.5:
         cold_score += 2.0
     if wind >= 9.0:
         cold_score += 1.2
@@ -788,8 +839,13 @@ def compute_weather_multipliers(
     cc = pol.get("cloud_cover_pct") or {}
     hu = pol.get("humidity_pct") or {}
 
-    T = snap.temperature_c
-    Ta = snap.apparent_temperature_c if snap.apparent_temperature_c is not None else T
+    T = float(snap.temperature_c)
+    Ta = (
+        float(snap.apparent_temperature_c)
+        if snap.apparent_temperature_c is not None
+        else T
+    )
+    Teff = Ta
     sw = snap.shortwave_radiation_wm2
     rain = snap.precipitation_mm
     wind = snap.wind_speed_ms
@@ -827,15 +883,19 @@ def compute_weather_multipliers(
     if hum > float(hu.get("humid_above", 80)):
         phys *= float(mp.get("humid_surface", 1.05))
 
-    # heat (thermal discomfort routing component): T, облака, осадки + ощущаемая температура и солнце
+    # heat (thermal discomfort): эффективная температура = AT при заданной AT, иначе T
     heat = float(mh.get("base", 1.0))
-    t_for_heat = max(T, Ta)
+    t_for_heat = Teff
     if t_for_heat > ref_heat:
-        heat += float(mh.get("per_temp_above_22", 0.022)) * (t_for_heat - ref_heat) * (
+        heat += float(mh.get("per_temp_above_22", 0.036)) * (t_for_heat - ref_heat) * (
             0.85 + 0.15 * rs
         )
+    elif t_for_heat < ref_heat:
+        cold_gap = ref_heat - t_for_heat
+        damp = float(mh.get("per_degree_cold", 0.009)) * cold_gap * (0.85 + 0.15 * rs)
+        heat *= max(0.70, 1.0 - damp)
     if Ta > T + 0.5:
-        heat *= 1.0 + 0.012 * rs * min(8.0, Ta - T)
+        heat *= 1.0 + 0.022 * rs * min(8.0, Ta - T)
     heat *= max(0.65, 1.0 - float(mh.get("cloud_reduction_per_pct", 0.0022)) * clouds)
     if rain > dry_max:
         heat *= float(
@@ -845,7 +905,7 @@ def compute_weather_multipliers(
             )
         )
     if sw is not None:
-        sw_norm = max(0.0, min(1.0, (float(sw) - 120.0) / 780.0))
+        sw_norm = max(0.0, min(1.0, float(sw) / 750.0))
         heat *= 1.0 + 0.14 * rs * sw_norm
 
     # green comfort multiplier (applied with trees_pct on edge)

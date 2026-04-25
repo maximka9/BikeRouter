@@ -5,7 +5,7 @@
 ``pool.imap`` chunksize 1.
 
 Число строк маршрутов примерно ``n*(n-1) * n_profiles * n_weather * 6`` при направленных парах
-(по умолчанию). Сетки: summer=90, winter=135, all=225.
+(по умолчанию). Сетки: summer=95, winter=135, all=230.
 
 Запуск::
 
@@ -56,7 +56,7 @@ def run_combined_route_batch_experiment(
         grid = winter_g
     else:
         grid = summer_g
-    assert len(grid) in (90, 135, 225)
+    assert len(grid) in (95, 135, 230)
 
     mw = mp_resolve_pool_workers(0)
     return run_variants_over_weather_cases(
@@ -87,7 +87,7 @@ def main() -> None:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Сетки: summer=90, winter=135, all=225. По умолчанию пары направленные n*(n-1). "
+            "Сетки: summer=95, winter=135, all=230. По умолчанию пары направленные n*(n-1). "
             "Вершины в csv.gz не пишутся. Параллель: min(6, CPU-1) процессов, чанк погоды 25."
         ),
     )

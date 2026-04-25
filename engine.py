@@ -216,6 +216,16 @@ def _build_weather_route_context(
                 hm[f"norm_{k}"] = float(v)
             except (TypeError, ValueError):
                 pass
+        T_air = float(snap.temperature_c)
+        Ta_o = getattr(snap, "apparent_temperature_c", None)
+        teff = float(Ta_o) if Ta_o is not None else T_air
+        hm["effective_heat_temperature_c"] = teff
+        hm["apparent_minus_air_c"] = (
+            float(Ta_o) - T_air if Ta_o is not None else 0.0
+        )
+        hm["norm_apparent_heat"] = float(ns.get("apparent_heat_norm", 0.0))
+        hm["norm_apparent_cold"] = float(ns.get("apparent_cold_norm", 0.0))
+        hm["norm_apparent_minus_air"] = float(ns.get("apparent_minus_air_norm", 0.0))
     return WeatherRouteContext(
         enabled=bool(wp.enabled),
         mode=request_mode,
@@ -325,6 +335,7 @@ def _resolve_route_weather(
     humidity_pct: Optional[float] = None,
     wind_gusts_ms: Optional[float] = None,
     wind_direction_deg: Optional[float] = None,
+    apparent_temperature_c: Optional[float] = None,
     shortwave_radiation_wm2: Optional[float] = None,
     snowfall_cm_h: Optional[float] = None,
     snow_depth_m: Optional[float] = None,
@@ -344,6 +355,7 @@ def _resolve_route_weather(
             wind_gusts_ms=wind_gusts_ms,
             cloud_cover_pct=cloud_cover_pct,
             humidity_pct=humidity_pct,
+            apparent_temperature_c=apparent_temperature_c,
             shortwave_radiation_wm2=shortwave_radiation_wm2,
             snowfall_cm_h=snowfall_cm_h,
             snow_depth_m=snow_depth_m,
@@ -2244,6 +2256,7 @@ class RouteEngine:
         humidity_pct: Optional[float] = None,
         wind_gusts_ms: Optional[float] = None,
         shortwave_radiation_wm2: Optional[float] = None,
+        apparent_temperature_c: Optional[float] = None,
         snowfall_cm_h: Optional[float] = None,
         snow_depth_m: Optional[float] = None,
         weather_code: Optional[int] = None,
@@ -2251,8 +2264,9 @@ class RouteEngine:
     ) -> AlternativesResponse:
         """Все доступные варианты сразу: кратчайший, энергия, зелёный, тепло, стресс, тепло+безопасность.
 
-        Внутри для тепло/стресс комбинаций используется профиль предпочтений
-        ``balanced`` (см. ``routing_preference_profile`` в config).
+        Для shortest/full/green метрики — ``balanced``; для ``heat``/``stress``/``heat_stress``
+        в конце вызываются критерии с профилями ``thermal_physical_base``,
+        ``stress_physical_base``, ``heat_stress_physical_base`` (см. config).
 
         ``corridor_expand_schedule_meters``: если задано, подставляется вместо
         ``Settings.corridor_expand_schedule_meters`` при переборе буферов коридора
@@ -2291,6 +2305,7 @@ class RouteEngine:
             humidity_pct=humidity_pct,
             wind_gusts_ms=wind_gusts_ms,
             wind_direction_deg=wind_direction_deg,
+            apparent_temperature_c=apparent_temperature_c,
             shortwave_radiation_wm2=shortwave_radiation_wm2,
             snowfall_cm_h=snowfall_cm_h,
             snow_depth_m=snow_depth_m,
@@ -2419,7 +2434,11 @@ class RouteEngine:
             G = self._graph
 
         extra_routes: List[RouteResponse] = []
-        for sub in ("heat", "stress", "heat_stress"):
+        for sub, rp_crit in (
+            ("heat", "thermal_physical_base"),
+            ("stress", "stress_physical_base"),
+            ("heat_stress", "heat_stress_physical_base"),
+        ):
             try:
                 lst = self._build_criterion_routes(
                     start,
@@ -2427,7 +2446,7 @@ class RouteEngine:
                     profile_key,
                     G,
                     sub,
-                    rp_internal,
+                    rp_crit,
                     slot_key,
                     season=season_val,
                     air_temperature_c=air_eff,
@@ -2472,6 +2491,7 @@ class RouteEngine:
         humidity_pct: Optional[float] = None,
         wind_gusts_ms: Optional[float] = None,
         shortwave_radiation_wm2: Optional[float] = None,
+        apparent_temperature_c: Optional[float] = None,
         snowfall_cm_h: Optional[float] = None,
         snow_depth_m: Optional[float] = None,
         weather_code: Optional[int] = None,
@@ -2488,7 +2508,7 @@ class RouteEngine:
                 f"Допустимые: {list(_PROFILE_MAP)}"
             )
 
-        rp_internal = "balanced"
+        rp_heat_metrics = "thermal_physical_base"
         now_utc = datetime.now(timezone.utc)
         dep_for_weather = departure_time or now_utc.replace(microsecond=0).isoformat()
 
@@ -2514,6 +2534,7 @@ class RouteEngine:
             humidity_pct=humidity_pct,
             wind_gusts_ms=wind_gusts_ms,
             wind_direction_deg=wind_direction_deg,
+            apparent_temperature_c=apparent_temperature_c,
             shortwave_radiation_wm2=shortwave_radiation_wm2,
             snowfall_cm_h=snowfall_cm_h,
             snow_depth_m=snow_depth_m,
@@ -2572,7 +2593,7 @@ class RouteEngine:
                 end,
                 profile_key,
                 criterion="heat",
-                routing_profile_key=rp_internal,
+                routing_profile_key=rp_heat_metrics,
                 time_slot_key=slot_key,
                 green_enabled=green_enabled,
                 corridor_buffer_meters=corridor_buffer_meters,

@@ -71,8 +71,10 @@ const state = {
   mobileInputSheetExpanded: false,
   /** Озеленение всегда запрашивается с сервера. */
   greenEnabled: true,
-  /** pending=['green'] от API; сбрасывается при пустом pending или при mode===green в routes */
+  /** Фоновый poll /alternatives/job: пока pending не пуст (green или progressive 2.0). */
   jobPendingGreen: false,
+  /** Копия pending из API: ['green'] или ['green','heat',…] */
+  jobPendingModes: [],
   /** Инкремент при сбросе — отмена фонового poll */
   routeFetchSeq: 0,
   /** Тестовая маска стресса дорожного графа (не влияет на расчёт). */
@@ -1507,10 +1509,10 @@ async function buildRoute() {
     await applyRoutesPayload(data, prefer);
     syncUrlFromState();
 
-    state.jobPendingGreen =
-      !!(body.pending && body.pending.includes('green'));
-    const pendingGreen = state.jobPendingGreen && body.job_id;
-    if (pendingGreen) {
+    state.jobPendingModes = Array.isArray(body.pending) ? [...body.pending] : [];
+    state.jobPendingGreen = !!(body.job_id && state.jobPendingModes.length > 0);
+    const pendingJob = state.jobPendingGreen && body.job_id;
+    if (pendingJob) {
       setLoading(false);
       updateTripStatus();
       const jobId = body.job_id;
@@ -1520,6 +1522,7 @@ async function buildRoute() {
         pollN += 1;
         if (fetchSeq !== state.routeFetchSeq) {
           state.jobPendingGreen = false;
+          state.jobPendingModes = [];
           return;
         }
         const jr = await fetch(`${API}/alternatives/job/${encodeURIComponent(jobId)}`, {
@@ -1533,6 +1536,7 @@ async function buildRoute() {
         }
         if (!jr.ok) {
           state.jobPendingGreen = false;
+          state.jobPendingModes = [];
           updateTripStatus();
           const detail = jd && jd.detail;
           const code =
@@ -1550,10 +1554,12 @@ async function buildRoute() {
         }
         if (fetchSeq !== state.routeFetchSeq) {
           state.jobPendingGreen = false;
+          state.jobPendingModes = [];
           return;
         }
         if (jd.status === 'failed') {
           state.jobPendingGreen = false;
+          state.jobPendingModes = [];
           const em =
             jd.error && jd.error.message
               ? jd.error.message
@@ -1584,10 +1590,14 @@ async function buildRoute() {
         );
         syncUrlFromState();
         const rlist = jd.routes || [];
+        state.jobPendingModes = Array.isArray(jd.pending) ? [...jd.pending] : [];
         state.jobPendingGreen =
-          Array.isArray(jd.pending) && jd.pending.includes('green') && !rlist.some((r) => r.mode === 'green');
+          Array.isArray(jd.pending)
+          && jd.pending.length > 0
+          && jd.pending.some((m) => !rlist.some((r) => r.mode === m));
         if (!jd.pending || !jd.pending.length) {
           state.jobPendingGreen = false;
+          state.jobPendingModes = [];
           updateTripStatus();
           break;
         }
@@ -1595,9 +1605,11 @@ async function buildRoute() {
       }
     } else {
       state.jobPendingGreen = false;
+      state.jobPendingModes = [];
     }
   } catch (e) {
     state.jobPendingGreen = false;
+    state.jobPendingModes = [];
     state.pendingVariantFromUrl = null;
     if (e.name === 'AbortError') {
       showToast(
@@ -1718,12 +1730,30 @@ function selectVariant(idx, routes) {
   updateTripStatus();
 }
 
-/** Placeholder зелёного маршрута: только пока API ждёт green и в routes ещё нет mode===green. */
+/** Placeholder пока job pending: для каждого mode из API ещё нет маршрута с этим mode. */
 function greenRoutePlaceholderVisible(routes) {
-  if (!state.greenEnabled) return false;
+  if (!state.jobPendingGreen) return false;
   const rlist = routes || [];
-  if (rlist.some((r) => r.mode === 'green')) return false;
-  return state.jobPendingGreen;
+  const pend = state.jobPendingModes || [];
+  if (!pend.length) return false;
+  return pend.some((m) => !rlist.some((r) => r.mode === m));
+}
+
+function progressivePendingLabel() {
+  const pend = state.jobPendingModes || [];
+  if (!pend.length) return { desk: 'Дополнительные варианты — вычисляются…', mob: 'вычисляется…' };
+  const labels = {
+    green: 'озеленение',
+    heat: 'тепло',
+    stress: 'стресс',
+    heat_stress: 'тепло+стресс',
+  };
+  const parts = pend.map((m) => labels[m] || m);
+  const joined = parts.join(', ');
+  return {
+    desk: `Варианты (${joined}) — вычисляются…`,
+    mob: `${joined} — вычисляется…`,
+  };
 }
 
 /** Одна строка варианта: короткое время из time_s (м:сс или ч:мм). */
@@ -1761,10 +1791,11 @@ function buildVariantTabs(routes) {
       ${desk}
     </button>`;
   }).join('');
+  const pl = progressivePendingLabel();
   const pendingTab = greenRoutePlaceholderVisible(routes)
       ? `<div class="variant-tab variant-tab-pending" role="status" aria-live="polite">
-          <span class="variant-tab-desktop-stack"><span class="variant-tab-row"><span class="swatch swatch-pending"></span><span class="variant-tab-title">С учётом озеленения — вычисляется…</span></span><span class="variant-tab-meta variant-tab-meta-muted">Подождите, спутниковый анализ</span></span>
-          <span class="variant-tab-mobile-line variant-tab-mobile-pending"><span class="swatch swatch-pending"></span><span class="vt-one-row"><strong>С учётом озеленения</strong><span class="vt-sep"> · </span><span class="vt-metrics">вычисляется…</span></span></span>
+          <span class="variant-tab-desktop-stack"><span class="variant-tab-row"><span class="swatch swatch-pending"></span><span class="variant-tab-title">${escHtml(pl.desk)}</span></span><span class="variant-tab-meta variant-tab-meta-muted">Фоновый расчёт на сервере</span></span>
+          <span class="variant-tab-mobile-line variant-tab-mobile-pending"><span class="swatch swatch-pending"></span><span class="vt-one-row"><strong>Ожидание</strong><span class="vt-sep"> · </span><span class="vt-metrics">${escHtml(pl.mob)}</span></span></span>
         </div>`
       : '';
   dom.variantTabs.innerHTML = main + pendingTab;

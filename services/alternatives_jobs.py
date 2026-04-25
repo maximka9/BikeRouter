@@ -90,3 +90,26 @@ class AlternativesJobStore:
             if green_warning:
                 rec.green_warning = green_warning
         inc_green_job_failed()
+
+    def finalize_progressive_job(
+        self,
+        job_id: str,
+        *,
+        routes: List[Dict[str, Any]],
+        pending: List[str],
+        status: str,
+        error: Optional[Dict[str, Any]] = None,
+        green_warning: Optional[str] = None,
+    ) -> None:
+        """Итог progressive 2.0: полный список маршрутов и статус (done / failed)."""
+        with self._lock:
+            rec = self._jobs.get(job_id)
+        if rec is None:
+            return
+        with rec.mut:
+            rec.routes = list(routes)
+            rec.pending = list(pending)
+            rec.status = status
+            rec.error = error
+            if green_warning is not None:
+                rec.green_warning = green_warning

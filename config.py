@@ -780,6 +780,14 @@ class Settings:
 
     # --- Progressive alternatives / TTL job store ---
     alternatives_job_ttl_sec: float = _env("ALTERNATIVES_JOB_TTL_SEC", 1800.0, float)
+    progressive_alternatives_enabled: bool = _env_bool(
+        "PROGRESSIVE_ALTERNATIVES_ENABLED", False
+    )
+    progressive_background_variants: str = _env(
+        "PROGRESSIVE_BACKGROUND_VARIANTS",
+        "green,heat,stress,heat_stress",
+        str,
+    )
     # --- HTTP retry (Overpass через OSMnx, Nominatim, TMS; см. services/retry.py) ---
     http_retry_max_attempts: int = int(
         max(1, round(_env("HTTP_RETRY_MAX_ATTEMPTS", 4.0, float)))

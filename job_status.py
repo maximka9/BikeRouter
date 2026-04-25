@@ -8,6 +8,8 @@ from enum import Enum
 class AlternativesJobStatus(str, Enum):
     """Состояние записи POST /alternatives/start → GET /alternatives/job/{id}."""
 
+    RUNNING = "running"
+    PARTIAL = "partial"
     RUNNING_GREEN = "running_green"
     DONE = "done"
     FAILED = "failed"

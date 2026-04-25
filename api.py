@@ -18,8 +18,9 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import requests
 from fastapi import FastAPI, HTTPException, Query
@@ -29,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .config import ROUTING_ALGO_VERSION
-from .engine import RouteEngine
+from .engine import RouteEngine, _resolve_season_for_heat_alternatives
 from .exceptions import (
     BikeRouterError,
     OverpassUnavailableError,
@@ -84,8 +85,113 @@ def _parse_stored_criteria_bundle(
 
 
 def _use_progressive_phase1(_req: AlternativesStartRequest) -> bool:
-    """Раньше: кратчайший + энергия, зелёный в фоне. Сейчас всегда полный ответ одним запросом."""
-    return False
+    """Progressive 2.0: фаза 1 (shortest+full), затем green/heat/stress/heat_stress в фоне (см. .env)."""
+    return bool(engine.settings.progressive_alternatives_enabled)
+
+
+def _progressive_pending_modes(req: AlternativesStartRequest) -> List[str]:
+    raw = getattr(engine.settings, "progressive_background_variants", "") or ""
+    modes = [x.strip() for x in str(raw).split(",") if x.strip()]
+    allowed = {"green", "heat", "stress", "heat_stress"}
+    modes = [m for m in modes if m in allowed]
+    if not req.green_enabled:
+        modes = [m for m in modes if m != "green"]
+    return modes if modes else ["heat", "stress", "heat_stress"]
+
+
+def _alternatives_kw_common(
+    req: Union[AlternativesRequest, AlternativesStartRequest],
+) -> Dict[str, Any]:
+    season_ov = req.season.value if req.season is not None else None
+    return {
+        "green_enabled": req.green_enabled,
+        "departure_time": req.departure_time,
+        "time_slot_override": req.time_slot,
+        "air_temperature_c": req.air_temperature_c,
+        "weather_mode": req.weather_mode,
+        "use_live_weather": req.use_live_weather,
+        "weather_time": req.weather_time,
+        "temperature_c": req.temperature_c,
+        "apparent_temperature_c": getattr(req, "apparent_temperature_c", None),
+        "precipitation_mm": req.precipitation_mm,
+        "wind_speed_ms": req.wind_speed_ms,
+        "wind_direction_deg": req.wind_direction_deg,
+        "cloud_cover_pct": req.cloud_cover_pct,
+        "humidity_pct": req.humidity_pct,
+        "wind_gusts_ms": req.wind_gusts_ms,
+        "shortwave_radiation_wm2": req.shortwave_radiation_wm2,
+        "snowfall_cm_h": req.snowfall_cm_h,
+        "snow_depth_m": req.snow_depth_m,
+        "weather_code": req.weather_code,
+        "season": season_ov,
+    }
+
+
+def _run_progressive_background_thread(
+    job_id: str,
+    start: tuple,
+    end: tuple,
+    profile_key: str,
+    alt_kw: Dict[str, Any],
+) -> None:
+    try:
+        out = engine.compute_alternatives(
+            start=start,
+            end=end,
+            profile_key=profile_key,
+            **alt_kw,
+        )
+        dumps = [r.model_dump(mode="json") for r in out.routes]
+        alternatives_job_store.finalize_progressive_job(
+            job_id,
+            routes=dumps,
+            pending=[],
+            status=AJS.DONE.value,
+        )
+        reqlog.info(
+            "alternatives_job progressive job_id=%s done routes=%d",
+            job_id,
+            len(dumps),
+        )
+    except BikeRouterError as exc:
+        rec = alternatives_job_store.get(job_id)
+        keep: List[Dict[str, Any]] = []
+        if rec is not None:
+            with rec.mut:
+                keep = list(rec.routes)
+        alternatives_job_store.finalize_progressive_job(
+            job_id,
+            routes=keep,
+            pending=[],
+            status=AJS.FAILED.value,
+            error={"code": exc.code, "message": str(exc)},
+            green_warning=(
+                "Не удалось досчитать дополнительные варианты маршрута "
+                "(зелёный, тепло, стресс и т.д.). Первые два варианта сохранены."
+            ),
+        )
+        reqlog.warning(
+            "alternatives_job progressive job_id=%s failed code=%s",
+            job_id,
+            exc.code,
+        )
+    except Exception as exc:
+        rec = alternatives_job_store.get(job_id)
+        keep = []
+        if rec is not None:
+            with rec.mut:
+                keep = list(rec.routes)
+        alternatives_job_store.finalize_progressive_job(
+            job_id,
+            routes=keep,
+            pending=[],
+            status=AJS.FAILED.value,
+            error={"code": "INTERNAL_ERROR", "message": str(exc)},
+            green_warning=(
+                "Внутренняя ошибка при досчёте вариантов. Первые два маршрута сохранены."
+            ),
+        )
+        reqlog.exception("alternatives_job progressive job_id=%s", job_id)
 
 
 def _run_green_job_thread(
@@ -187,10 +293,15 @@ app = FastAPI(
     title="Bike Router API",
     description=(
         "Оптимизация маршрутов для велосипедистов и пешеходов.\n\n"
-        "Два профиля (`cyclist`, `pedestrian`); режимы `full`, `green`, `shortest`.\n"
-        "``POST /alternatives`` возвращает 2–3 варианта маршрута.\n\n"
-        "Ответ содержит: геометрию (полилиния по рёбрам), длину, время, "
-        "рельеф, озеленение, лестницы, покрытия, долю N/A и профиль высот."
+        "Профили: ``cyclist``, ``pedestrian``. "
+        "``POST /alternatives`` — синхронно до шести вариантов: "
+        "``shortest``, ``full``, ``green``, ``heat``, ``stress``, ``heat_stress`` "
+        "(набор зависит от ``green_enabled`` и доступности путей).\n\n"
+        "``POST /alternatives/start`` при ``PROGRESSIVE_ALTERNATIVES_ENABLED=true``: "
+        "сначала ``shortest`` и ``full``, остальные варианты досчитываются в фоне "
+        "(см. ``pending`` и ``GET /alternatives/job/{job_id}``).\n\n"
+        "Ответ маршрута: геометрия, длина, время, рельеф, озеленение, лестницы, "
+        "покрытия, погодный контекст и др."
     ),
     version=__version__,
     lifespan=lifespan,
@@ -284,36 +395,19 @@ async def route(req: RouteRequest):
         422: {"model": ErrorDetail},
         502: {"model": ErrorDetail},
     },
-    summary="Несколько вариантов маршрута (2–3)",
+    summary="Несколько вариантов маршрута (до 6)",
     tags=["Routing"],
 )
 async def alternatives(req: AlternativesRequest):
-    """Варианты одним запросом: оптимальный по энергии, зелёный, кратчайший по карте (или альтернатива)."""
+    """Синхронно: shortest, full, green, heat, stress, heat_stress (по доступности)."""
     t0 = time.perf_counter()
     try:
+        kw = _alternatives_kw_common(req)
         out = engine.compute_alternatives(
             start=(req.start.lat, req.start.lon),
             end=(req.end.lat, req.end.lon),
             profile_key=req.profile.value,
-            green_enabled=req.green_enabled,
-            departure_time=req.departure_time,
-            time_slot_override=req.time_slot,
-            air_temperature_c=req.air_temperature_c,
-            weather_mode=req.weather_mode,
-            use_live_weather=req.use_live_weather,
-            weather_time=req.weather_time,
-            temperature_c=req.temperature_c,
-            apparent_temperature_c=req.apparent_temperature_c,
-            precipitation_mm=req.precipitation_mm,
-            wind_speed_ms=req.wind_speed_ms,
-            wind_direction_deg=req.wind_direction_deg,
-            cloud_cover_pct=req.cloud_cover_pct,
-            humidity_pct=req.humidity_pct,
-            wind_gusts_ms=req.wind_gusts_ms,
-            shortwave_radiation_wm2=req.shortwave_radiation_wm2,
-            snowfall_cm_h=req.snowfall_cm_h,
-            snow_depth_m=req.snow_depth_m,
-            weather_code=req.weather_code,
+            **kw,
         )
         ms = (time.perf_counter() - t0) * 1000
         reqlog.info(
@@ -412,7 +506,7 @@ async def graph_stress_overlay(
     tags=["Routing"],
 )
 async def alternatives_start(req: AlternativesStartRequest):
-    """Сначала 1–2 маршрута или полный расчёт; при необходимости зелёный в фоне."""
+    """При PROGRESSIVE_ALTERNATIVES_ENABLED: shortest+full сразу, остальное в фоне; иначе полный ответ или только green в фоне."""
     job_id = new_job_id()
     t0 = time.perf_counter()
     st = (req.start.lat, req.start.lon)
@@ -425,62 +519,53 @@ async def alternatives_start(req: AlternativesStartRequest):
     )
     try:
         if _use_progressive_phase1(req):
-            routes_phase1 = engine.compute_alternatives_phase1_two_routes(st, en, pk)
+            alt_kw = _alternatives_kw_common(req)
+            now_utc = datetime.now(timezone.utc)
+            dep_for = req.departure_time or now_utc.replace(microsecond=0).isoformat()
+            heat_season = _resolve_season_for_heat_alternatives(
+                season_override=alt_kw.get("season"),
+                weather_time_iso=req.weather_time,
+                departure_time_iso=dep_for,
+                now_utc=now_utc,
+            )
+            routes_phase1 = engine.compute_alternatives_phase1_two_routes(
+                st, en, pk, season=heat_season
+            )
+            pending_modes = _progressive_pending_modes(req)
             ms = (time.perf_counter() - t0) * 1000
             reqlog.info(
-                "alternatives_start job_id=%s phase1 routes=%d duration_ms=%.1f",
+                "alternatives_start job_id=%s progressive phase1 routes=%d pending=%s duration_ms=%.1f",
                 job_id,
                 len(routes_phase1),
+                ",".join(pending_modes),
                 ms,
             )
             alternatives_job_store.create(
                 job_id,
                 JobRecord(
                     job_id=job_id,
-                    status=AJS.RUNNING_GREEN.value,
+                    status=AJS.RUNNING.value,
                     routes=[r.model_dump(mode="json") for r in routes_phase1],
-                    pending=["green"],
+                    pending=list(pending_modes),
                     criteria_bundle=None,
                 ),
             )
             threading.Thread(
-                target=_run_green_job_thread,
-                args=(job_id, st, en, pk),
-                name=f"alt-green-{job_id[:8]}",
+                target=_run_progressive_background_thread,
+                args=(job_id, st, en, pk, alt_kw),
+                name=f"alt-progressive-{job_id[:8]}",
                 daemon=True,
             ).start()
             return AlternativesStartResponse(
                 job_id=job_id,
-                status=AJS.RUNNING_GREEN.value,
+                status=AJS.RUNNING.value,
                 routes=routes_phase1,
-                pending=["green"],
+                pending=list(pending_modes),
                 criteria_bundle=None,
             )
 
-        out = engine.compute_alternatives(
-            start=st,
-            end=en,
-            profile_key=pk,
-            green_enabled=req.green_enabled,
-            departure_time=req.departure_time,
-            time_slot_override=req.time_slot,
-            air_temperature_c=req.air_temperature_c,
-            weather_mode=req.weather_mode,
-            use_live_weather=req.use_live_weather,
-            weather_time=req.weather_time,
-            temperature_c=req.temperature_c,
-            apparent_temperature_c=req.apparent_temperature_c,
-            precipitation_mm=req.precipitation_mm,
-            wind_speed_ms=req.wind_speed_ms,
-            wind_direction_deg=req.wind_direction_deg,
-            cloud_cover_pct=req.cloud_cover_pct,
-            humidity_pct=req.humidity_pct,
-            wind_gusts_ms=req.wind_gusts_ms,
-            shortwave_radiation_wm2=req.shortwave_radiation_wm2,
-            snowfall_cm_h=req.snowfall_cm_h,
-            snow_depth_m=req.snow_depth_m,
-            weather_code=req.weather_code,
-        )
+        kw = _alternatives_kw_common(req)
+        out = engine.compute_alternatives(start=st, end=en, profile_key=pk, **kw)
         routes = list(out.routes)
         cb = out.criteria_bundle
         cb_dump = _serialize_criteria_bundle(cb)
@@ -578,7 +663,13 @@ async def alternatives_job_status(job_id: str):
         cb_stored = rec.criteria_bundle
     routes = [RouteResponse.model_validate(x) for x in routes_raw]
     criteria_bundle = _parse_stored_criteria_bundle(cb_stored)
-    if status in (AJS.DONE.value, AJS.FAILED.value, AJS.RUNNING_GREEN.value):
+    if status in (
+        AJS.DONE.value,
+        AJS.FAILED.value,
+        AJS.RUNNING.value,
+        AJS.PARTIAL.value,
+        AJS.RUNNING_GREEN.value,
+    ):
         reqlog.debug(
             "alternatives_job poll job_id=%s status=%s routes=%d pending=%s",
             job_id,

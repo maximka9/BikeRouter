@@ -85,9 +85,12 @@ class AlternativesRequest(BaseModel):
         default=None,
         description="Явный слот: morning | noon | evening | night (если задан — важнее departure_time)",
     )
-    season: SeasonEnum = Field(
-        SeasonEnum.summer,
-        description="Сезон для множителя тепла (summer | spring_autumn)",
+    season: Optional[SeasonEnum] = Field(
+        default=None,
+        description=(
+            "Сезон для множителя тепла (summer | spring_autumn). "
+            "Если не задан — берётся из weather_time / departure_time / даты сервера."
+        ),
     )
     air_temperature_c: Optional[float] = Field(
         default=None,
@@ -149,7 +152,10 @@ class AlternativesStartRequest(BaseModel):
         default=None,
         description="Явный слот (важнее departure_time, если задан)",
     )
-    season: SeasonEnum = Field(SeasonEnum.summer, description="Сезон для множителя тепла")
+    season: Optional[SeasonEnum] = Field(
+        default=None,
+        description="Сезон для тепла; None — как в POST /alternatives (по датам запроса)",
+    )
     air_temperature_c: Optional[float] = Field(
         default=None,
         description="Температура воздуха °C (опционально)",
@@ -175,12 +181,16 @@ class AlternativesStartResponse(BaseModel):
     job_id: str
     status: str = Field(
         ...,
-        description="running_green | done | failed — фаза 1+ожидание зелёного или сразу готово",
+        description=(
+            "running — progressive 2.0, досчитываются варианты из pending; "
+            "running_green — только зелёный в фоне (legacy); "
+            "done | failed"
+        ),
     )
     routes: List["RouteResponse"] = Field(default_factory=list)
     pending: List[str] = Field(
         default_factory=list,
-        description="Например [\"green\"] пока считается третий вариант",
+        description="Режимы, ещё не пришедшие в ответе (напр. green, heat при progressive 2.0)",
     )
     criteria_bundle: Optional[Dict[str, List["RouteResponse"]]] = Field(
         default=None,

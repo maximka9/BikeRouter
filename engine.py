@@ -411,6 +411,32 @@ def _infer_season_from_month(month_1_12: int) -> str:
     return "spring_autumn"
 
 
+def _resolve_season_for_heat_alternatives(
+    *,
+    season_override: Optional[str],
+    weather_time_iso: Optional[str],
+    departure_time_iso: Optional[str],
+    now_utc: datetime,
+) -> str:
+    """Сезон для heat_context_multiplier и критериев: явный override, иначе месяц из дат погоды/выезда, иначе now_utc."""
+    if season_override:
+        s = str(season_override).strip().lower()
+        if s in ("summer", "spring_autumn"):
+            return s
+    for raw in (weather_time_iso, departure_time_iso):
+        if not raw:
+            continue
+        try:
+            iso = str(raw).strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return _infer_season_from_month(int(dt.month))
+        except (ValueError, TypeError):
+            continue
+    return _infer_season_from_month(int(now_utc.month))
+
+
 def _pct_deviation(mult: float) -> int:
     """Отклонение множителя от 1.0 в процентах (округление)."""
     return int(round(abs(float(mult) - 1.0) * 100.0))
@@ -2260,6 +2286,7 @@ class RouteEngine:
         snowfall_cm_h: Optional[float] = None,
         snow_depth_m: Optional[float] = None,
         weather_code: Optional[int] = None,
+        season: Optional[str] = None,
         corridor_expand_schedule_meters: Optional[Sequence[float]] = None,
     ) -> AlternativesResponse:
         """Все доступные варианты сразу: кратчайший, энергия, зелёный, тепло, стресс, тепло+безопасность.
@@ -2313,7 +2340,12 @@ class RouteEngine:
             thermal_scales=_thermal,
             settings=_s,
         )
-        season_val = _infer_season_from_month(now_utc.month)
+        season_val = _resolve_season_for_heat_alternatives(
+            season_override=season,
+            weather_time_iso=weather_time,
+            departure_time_iso=dep_for_weather,
+            now_utc=now_utc,
+        )
         air_eff: Optional[float] = air_temperature_c
         if air_eff is None:
             air_eff = float(w_snap.temperature_c)
@@ -2495,6 +2527,7 @@ class RouteEngine:
         snowfall_cm_h: Optional[float] = None,
         snow_depth_m: Optional[float] = None,
         weather_code: Optional[int] = None,
+        season: Optional[str] = None,
         corridor_expand_schedule_meters: Optional[Sequence[float]] = None,
     ) -> AlternativesResponse:
         """Только вариант ``heat`` (один критерий), без shortest/full/green/stress.
@@ -2542,7 +2575,12 @@ class RouteEngine:
             thermal_scales=_thermal,
             settings=_s,
         )
-        season_val = _infer_season_from_month(now_utc.month)
+        season_val = _resolve_season_for_heat_alternatives(
+            season_override=season,
+            weather_time_iso=weather_time,
+            departure_time_iso=dep_for_weather,
+            now_utc=now_utc,
+        )
         air_eff: Optional[float] = air_temperature_c
         if air_eff is None:
             air_eff = float(w_snap.temperature_c)
@@ -2651,6 +2689,8 @@ class RouteEngine:
         start: Tuple[float, float],
         end: Tuple[float, float],
         profile_key: str,
+        *,
+        season: Optional[str] = None,
     ) -> List[RouteResponse]:
         """Первые два маршрута (кратчайший + энергия) без спутниковой зелени; с авторасширением.
 
@@ -2676,6 +2716,9 @@ class RouteEngine:
                 logger.debug("alternatives_phase1: route cache invalid, recalculating")
 
         inc_route_disk_miss()
+        s_val = (season or "").strip().lower()
+        if s_val not in ("summer", "spring_autumn"):
+            s_val = "summer"
         buf_sched = s.corridor_expand_schedule_meters
         if not s.use_dynamic_corridor_graph or not buf_sched:
             return self._compute_alternatives_once(
@@ -2685,6 +2728,7 @@ class RouteEngine:
                 include_green_route=False,
                 skip_satellite_green=True,
                 corridor_buffer_meters=None,
+                season=s_val,
             )
         last_nf: Optional[RouteNotFoundError] = None
         for attempt, eff in enumerate(buf_sched, start=1):
@@ -2696,6 +2740,7 @@ class RouteEngine:
                     include_green_route=False,
                     skip_satellite_green=True,
                     corridor_buffer_meters=float(eff),
+                    season=s_val,
                 )
                 logger.info(
                     "alternatives_phase1 attempt=%d corridor_m=%.0f routes=%d",

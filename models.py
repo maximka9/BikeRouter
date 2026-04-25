@@ -291,12 +291,22 @@ class CombinedCostBreakdown(BaseModel):
     """Разложение комбинированной стоимости (для heat_stress)."""
 
     physical: float = 0.0
+    physical_cost: float = 0.0
+    physical_cost_norm: float = 0.0
     heat_effective: float = 0.0
     heat_raw: float = 0.0
+    heat_cost: float = 0.0
+    heat_cost_norm: float = 0.0
     stress: float = 0.0
+    stress_cost: float = 0.0
+    stress_cost_norm: float = 0.0
+    green_cost: float = 0.0
+    green_cost_norm: float = 0.0
     stress_segment: float = 0.0
     stress_intersection: float = 0.0
     turn_penalty: float = 0.0
+    combined_cost: float = 0.0
+    combined_cost_norm: float = 0.0
     heat_context_multiplier: float = Field(
         default=1.0,
         description="κ: сезон и/или температура",
@@ -502,6 +512,9 @@ class HeatStressMetrics(BaseModel):
         le=1.0,
         description="Доля «тяжёлого» зимнего покрытия и лестниц по длине (прокси)",
     )
+    route_mean_street_width_proxy_m: float = Field(default=0.0, ge=0.0)
+    route_mean_urban_canyon_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    route_mean_solar_shade_potential: float = Field(default=0.0, ge=0.0, le=1.0)
     route_wind_direction_aware: float = Field(
         default=0.0,
         ge=0.0,
@@ -722,6 +735,9 @@ class RouteResponse(BaseModel):
         le=1.0,
         description="Прокси доли тяжёлого зимнего покрытия и лестниц",
     )
+    route_mean_street_width_proxy_m: float = Field(default=0.0, ge=0.0)
+    route_mean_urban_canyon_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    route_mean_solar_shade_potential: float = Field(default=0.0, ge=0.0, le=1.0)
     vegetation_shade_share: float = Field(default=0.0, ge=0.0, le=1.0)
     stressful_intersections_count: int = Field(default=0)
     high_stress_segments_count: int = Field(default=0)

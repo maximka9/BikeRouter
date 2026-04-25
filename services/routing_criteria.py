@@ -181,6 +181,7 @@ def continuous_heat_edge_factor_and_split(
     rn = _clamp01(float(sig.get("rain_norm", 0.0)))
     cn = float(sig.get("cloud_norm", 0.0))
     hn = float(sig.get("humidity_norm", 0.0))
+    exn = _clamp01(float(sig.get("extreme_heat_norm", 0.0)))
     # Жара + ясное небо + почти без дождя — усилить open/tree/building на выборе маршрута.
     hot_clear_dry = min(
         1.0,
@@ -196,7 +197,13 @@ def continuous_heat_edge_factor_and_split(
     rain_open_amp = 1.0 + float(getattr(weather, "heat_edge_rain_open_mult", 0.72)) * rn
     rain_build_amp = 1.0 + float(getattr(weather, "heat_edge_rain_building_mult", 0.78)) * rn
     rain_wind_exp_amp = 1.0 + float(getattr(weather, "heat_edge_rain_wind_exp_mult", 0.32)) * rn
-    k1_eff = k1 * rain_open_amp * (1.0 + 0.58 * hot_clear_dry) * (1.0 + 0.42 * rain_route)
+    k1_eff = (
+        k1
+        * rain_open_amp
+        * (1.0 + 0.58 * hot_clear_dry)
+        * (1.0 + 0.42 * rain_route)
+        * (1.0 + float(getattr(weather, "heat_extreme_open_route_gain", 0.22)) * exn)
+    )
     k3_eff = k3 * rain_build_amp * (1.0 + 0.24 * hot_clear_dry) * (1.0 + 0.38 * rain_route)
     k6_eff = k6 * rain_wind_exp_amp
     osp = float(getattr(weather, "open_sky_penalty", 1.0))
@@ -218,7 +225,11 @@ def continuous_heat_edge_factor_and_split(
     wc_open = float(getattr(weather, "wc_winter_open_sky_penalty_amp", 0.05))
     wc_shelter = float(getattr(weather, "wc_winter_building_shelter_bonus_amp", 0.06))
     pos_open = rs * k1_eff * osp * O * wo * (1.0 + wc_open * (wcw + 0.65 * wcm) * O)
-    tree_hot = 1.0 + 0.46 * hot_clear_dry
+    tree_hot = (
+        1.0
+        + 0.46 * hot_clear_dry
+        + float(getattr(weather, "heat_extreme_tree_route_gain", 0.18)) * exn
+    )
     neg_tree = -rs * k2 * tree_hot * tsb * V * wt
     neg_build = -rs * k3_eff * bsb * B * b_build * (1.0 - wc_shelter * wcm * B)
     neg_cover = -rs * k4 * cbn * C * winter_cover_boost

@@ -603,6 +603,19 @@ SUMMARY_NUM_KEYS = (
     "avg_trees_pct",
     "avg_grass_pct",
     "stress_cost_total",
+    "physical_cost",
+    "physical_cost_norm",
+    "heat_cost",
+    "heat_cost_norm",
+    "stress_cost",
+    "stress_cost_norm",
+    "green_cost",
+    "green_cost_norm",
+    "combined_cost",
+    "combined_cost_norm",
+    "surface_na_fraction",
+    "surface_inferred_fraction",
+    "highway_inferred_fraction",
     "weather_temperature_c",
     "weather_apparent_temperature_c",
     "weather_effective_heat_temperature_c",
@@ -639,6 +652,7 @@ SUMMARY_NUM_KEYS = (
     "heat_covered_bonus",
     "heat_wind_open_penalty",
     "heat_wet_surface_penalty",
+    "heat_extreme_route_mult",
     "heat_norm_temp",
     "heat_norm_rain",
     "heat_norm_wind",
@@ -650,6 +664,7 @@ SUMMARY_NUM_KEYS = (
     "heat_norm_snow_fresh",
     "heat_norm_radiation",
     "heat_norm_apparent_heat",
+    "heat_norm_extreme_heat",
     "heat_norm_apparent_cold",
     "heat_norm_apparent_minus_air",
     "route_open_sky_share",
@@ -657,6 +672,9 @@ SUMMARY_NUM_KEYS = (
     "route_covered_share",
     "route_bad_wet_surface_share",
     "route_winter_harsh_surface_share",
+    "route_mean_street_width_proxy_m",
+    "route_mean_urban_canyon_score",
+    "route_mean_solar_shade_potential",
     "route_wind_direction_aware",
     "route_mean_wind_to_street_angle_deg",
     "route_mean_heat_directional_wind_exp",
@@ -719,6 +737,7 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "heat_covered_bonus": None,
         "heat_wind_open_penalty": None,
         "heat_wet_surface_penalty": None,
+        "heat_extreme_route_mult": None,
         "heat_norm_temp": None,
         "heat_norm_rain": None,
         "heat_norm_wind": None,
@@ -730,6 +749,7 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "heat_norm_snow_fresh": None,
         "heat_norm_radiation": None,
         "heat_norm_apparent_heat": None,
+        "heat_norm_extreme_heat": None,
         "heat_norm_apparent_cold": None,
         "heat_norm_apparent_minus_air": None,
     }
@@ -836,6 +856,7 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
             "covered_bonus": "heat_covered_bonus",
             "wind_open_penalty": "heat_wind_open_penalty",
             "wet_surface_penalty": "heat_wet_surface_penalty",
+            "heat_extreme_route_mult": "heat_extreme_route_mult",
             "norm_temp_norm": "heat_norm_temp",
             "norm_rain_norm": "heat_norm_rain",
             "norm_wind_norm": "heat_norm_wind",
@@ -847,6 +868,7 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
             "norm_snow_fresh_norm": "heat_norm_snow_fresh",
             "norm_radiation_norm": "heat_norm_radiation",
             "norm_apparent_heat_norm": "heat_norm_apparent_heat",
+            "norm_extreme_heat_norm": "heat_norm_extreme_heat",
             "norm_apparent_cold_norm": "heat_norm_apparent_cold",
             "norm_apparent_minus_air_norm": "heat_norm_apparent_minus_air",
         }
@@ -1007,6 +1029,32 @@ def _stress_fields(r: Any) -> Dict[str, Any]:
     return out
 
 
+def _combined_cost_fields(r: Any) -> Dict[str, Any]:
+    hs = getattr(r, "heat_stress", None)
+    br = getattr(hs, "combined_breakdown", None) if hs else None
+    keys = (
+        "physical_cost",
+        "physical_cost_norm",
+        "heat_cost",
+        "heat_cost_norm",
+        "stress_cost",
+        "stress_cost_norm",
+        "green_cost",
+        "green_cost_norm",
+        "combined_cost",
+        "combined_cost_norm",
+    )
+    out: Dict[str, Any] = {k: None for k in keys}
+    if br is None:
+        return out
+    for k in keys:
+        try:
+            out[k] = float(getattr(br, k))
+        except (TypeError, ValueError):
+            out[k] = None
+    return out
+
+
 def route_to_raw_row(
     *,
     experiment_id: str,
@@ -1025,6 +1073,7 @@ def route_to_raw_row(
     test_weather_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     st = _stress_fields(r)
+    cc = _combined_cost_fields(r)
     wn, wt = _warnings_text(r)
     elev = r.elevation
     green = r.green
@@ -1071,11 +1120,21 @@ def route_to_raw_row(
         "avg_trees_pct": float(green.avg_trees_pct),
         "avg_grass_pct": float(green.avg_grass_pct),
         "stress_cost_total": st["stress_cost_total"],
+        **cc,
         "avg_stress_lts": st["avg_stress_lts"],
         "max_stress_lts": st["max_stress_lts"],
         "high_stress_segments_count": st["high_stress_segments_count"],
         "stressful_intersections_count": st["stressful_intersections_count"],
         "cost": float(r.cost),
+        "surface_na_fraction": float(getattr(r.surfaces, "na_fraction", 0.0) or 0.0),
+        "surface_inferred_fraction": float(
+            getattr(getattr(r, "quality_hints", None), "inferred_surface_fraction", 0.0)
+            or 0.0
+        ),
+        "highway_inferred_fraction": float(
+            getattr(getattr(r, "quality_hints", None), "inferred_highway_fraction", 0.0)
+            or 0.0
+        ),
         "mode": r.mode,
         "warnings_count": wn,
         "warnings_text": wt,
@@ -1090,6 +1149,15 @@ def route_to_raw_row(
         ),
         "route_winter_harsh_surface_share": round(
             float(getattr(r, "route_winter_harsh_surface_share", 0.0)), 4
+        ),
+        "route_mean_street_width_proxy_m": round(
+            float(getattr(r, "route_mean_street_width_proxy_m", 0.0)), 3
+        ),
+        "route_mean_urban_canyon_score": round(
+            float(getattr(r, "route_mean_urban_canyon_score", 0.0)), 4
+        ),
+        "route_mean_solar_shade_potential": round(
+            float(getattr(r, "route_mean_solar_shade_potential", 0.0)), 4
         ),
         "route_stairs_length_m": round(float(r.stairs.total_length_m), 2),
         "route_stairs_length_fraction": round(
@@ -1921,6 +1989,158 @@ def build_heat_qa_warning_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str,
         warns.append({"severity": "info", "code": "empty", "message": "нет строк маршрутов"})
         return warns
 
+    by_trip_case: Dict[Tuple[str, str, str, str], Dict[str, Dict[str, Any]]] = defaultdict(dict)
+    for r in raw_rows:
+        key = (
+            str(r.get("origin_point_id") or ""),
+            str(r.get("destination_point_id") or ""),
+            str(r.get("profile") or ""),
+            str(r.get("weather_test_case_id") or r.get("weather_date") or ""),
+        )
+        by_trip_case[key][str(r.get("variant_key") or "")] = r
+
+    def _same_geom(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> bool:
+        return bool(a and b and str(a.get("geometry_json") or "") == str(b.get("geometry_json") or ""))
+
+    heat_full_same = sum(
+        1 for modes in by_trip_case.values() if _same_geom(modes.get("heat"), modes.get("full"))
+    )
+    heat_full_total = sum(1 for modes in by_trip_case.values() if modes.get("heat") and modes.get("full"))
+    if heat_full_total and heat_full_same:
+        warns.append(
+            {
+                "severity": "info",
+                "code": "heat_same_as_full",
+                "message": (
+                    f"heat совпал с full в {heat_full_same}/{heat_full_total} "
+                    "O-D×профиль×погодных кейсах; проверяйте heat_cost_norm и признаки open/tree."
+                ),
+            }
+        )
+
+    hs_stress_same = sum(
+        1
+        for modes in by_trip_case.values()
+        if _same_geom(modes.get("heat_stress"), modes.get("stress"))
+    )
+    hs_stress_total = sum(
+        1 for modes in by_trip_case.values() if modes.get("heat_stress") and modes.get("stress")
+    )
+    if hs_stress_total and hs_stress_same:
+        warns.append(
+            {
+                "severity": "warning" if hs_stress_same / hs_stress_total > 0.35 else "info",
+                "code": "heat_stress_same_as_stress",
+                "message": (
+                    f"heat_stress совпал со stress в {hs_stress_same}/{hs_stress_total} "
+                    "кейсах; если доля велика, увеличивайте β heat_stress или снижайте γ."
+                ),
+            }
+        )
+
+    green_bad = 0
+    for modes in by_trip_case.values():
+        g = modes.get("green")
+        f = modes.get("full")
+        if not g or not f:
+            continue
+        try:
+            dl = float(g.get("length_m", 0.0)) - float(f.get("length_m", 0.0))
+            stress_ratio = float(g.get("stress_cost_total", 0.0)) / max(
+                float(f.get("stress_cost_total", 0.0)), 1e-9
+            )
+            if dl > max(100.0, 0.03 * float(f.get("length_m", 0.0))) and stress_ratio > 1.08:
+                green_bad += 1
+        except (TypeError, ValueError):
+            continue
+    if green_bad:
+        warns.append(
+            {
+                "severity": "warning",
+                "code": "green_detour_stress_worse",
+                "message": (
+                    f"green длиннее full и stress хуже >8% в {green_bad} кейсах; "
+                    "проверьте ограничение крюка/штраф stress для зелёного варианта."
+                ),
+            }
+        )
+
+    heat_app: Dict[Tuple[str, str, str], Dict[float, Dict[str, Any]]] = defaultdict(dict)
+    for r in raw_rows:
+        if str(r.get("variant_key") or "") != "heat":
+            continue
+        at = r.get("weather_test_apparent_temperature_c")
+        if at is None or at == "":
+            continue
+        try:
+            atf = round(float(at), 1)
+        except (TypeError, ValueError):
+            continue
+        if atf not in (32.0, 38.0):
+            continue
+        heat_app[
+            (
+                str(r.get("origin_point_id") or ""),
+                str(r.get("destination_point_id") or ""),
+                str(r.get("profile") or ""),
+            )
+        ][atf] = r
+    same_32_38 = sum(
+        1 for d in heat_app.values() if _same_geom(d.get(32.0), d.get(38.0))
+    )
+    total_32_38 = sum(1 for d in heat_app.values() if 32.0 in d and 38.0 in d)
+    if total_32_38 and same_32_38:
+        warns.append(
+            {
+                "severity": "warning" if same_32_38 == total_32_38 else "info",
+                "code": "heat_at32_same_as_at38",
+                "message": (
+                    f"heat AT32 совпал с AT38 в {same_32_38}/{total_32_38} "
+                    "O-D×профилях; смотрите heat_norm_extreme_heat и heat_cost_norm."
+                ),
+            }
+        )
+
+    cyclist_short_stairs = [
+        r
+        for r in raw_rows
+        if str(r.get("profile") or "") == "cyclist"
+        and str(r.get("variant_key") or "") == "shortest"
+        and float(r.get("route_stairs_length_m") or 0.0) > 20.0
+    ]
+    if cyclist_short_stairs:
+        warns.append(
+            {
+                "severity": "warning",
+                "code": "cyclist_shortest_stairs_gt_20m",
+                "message": (
+                    f"cyclist shortest содержит лестницы >20 м в {len(cyclist_short_stairs)} строках; "
+                    "для UX лучше подсвечивать или ограничивать такой shortest."
+                ),
+            }
+        )
+
+    unknown_surface = [
+        r
+        for r in raw_rows
+        if max(
+            float(r.get("surface_na_fraction") or 0.0),
+            float(r.get("surface_inferred_fraction") or 0.0),
+        )
+        >= 0.35
+    ]
+    if unknown_surface:
+        warns.append(
+            {
+                "severity": "warning",
+                "code": "surface_unknown_high",
+                "message": (
+                    f"surface unknown/fallback ≥35% в {len(unknown_surface)}/{len(raw_rows)} строках; "
+                    "выводы по покрытию и дождю требуют осторожности."
+                ),
+            }
+        )
+
     gr = _col_finite_floats(raw_rows, "route_mean_green_route_factor")
     if gr and max(gr) - min(gr) < 1e-4:
         warns.append(
@@ -2372,6 +2592,7 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "heat_covered_bonus": "Heat: бонус укрытий",
     "heat_wind_open_penalty": "Heat: ветровой штраф (открыто)",
     "heat_wet_surface_penalty": "Heat: мокрое покрытие",
+    "heat_extreme_route_mult": "Heat: extreme route β multiplier",
     "heat_norm_temp": "Heat: норм. температура",
     "heat_norm_rain": "Heat: норм. осадки",
     "heat_norm_wind": "Heat: норм. ветер",
@@ -2383,6 +2604,7 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "heat_norm_snow_fresh": "Heat: норм. снегопад",
     "heat_norm_radiation": "Heat: норм. КВ (0..1 от 750 Вт/м²)",
     "heat_norm_apparent_heat": "Heat: норм. жар (ощущаемая)",
+    "heat_norm_extreme_heat": "Heat: норм. экстремальная жара (AT≥35)",
     "heat_norm_apparent_cold": "Heat: норм. холод (ощущаемая)",
     "heat_norm_apparent_minus_air": "Heat: норм. (AT−T)/15",
     "route_open_sky_share": "Маршрут: доля открытого неба",
@@ -2390,6 +2612,9 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "route_covered_share": "Маршрут: укрытия",
     "route_bad_wet_surface_share": "Маршрут: плохое мокрое покрытие",
     "route_winter_harsh_surface_share": "Маршрут: тяжёлое зимнее покрытие (прокси)",
+    "route_mean_street_width_proxy_m": "Маршрут: street_width_proxy_m",
+    "route_mean_urban_canyon_score": "Маршрут: urban_canyon_score",
+    "route_mean_solar_shade_potential": "Маршрут: solar_shade_potential",
     "route_wind_direction_aware": "Маршрут: учтено направление ветра (0/1)",
     "route_mean_wind_to_street_angle_deg": "Маршрут: средний угол улица–ветер, °",
     "route_mean_heat_directional_wind_exp": "Маршрут: средняя ветроэкспозиция (heat)",
@@ -2440,11 +2665,24 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "avg_trees_pct": "Деревья, %",
     "avg_grass_pct": "Трава, %",
     "stress_cost_total": "Стресс, суммарно",
+    "physical_cost": "physical_cost",
+    "physical_cost_norm": "physical_cost_norm",
+    "heat_cost": "heat_cost",
+    "heat_cost_norm": "heat_cost_norm",
+    "stress_cost": "stress_cost",
+    "stress_cost_norm": "stress_cost_norm",
+    "green_cost": "green_cost",
+    "green_cost_norm": "green_cost_norm",
+    "combined_cost": "combined_cost",
+    "combined_cost_norm": "combined_cost_norm",
     "avg_stress_lts": "Средний LTS",
     "max_stress_lts": "Макс. LTS",
     "high_stress_segments_count": "Высокий стресс, сегм.",
     "stressful_intersections_count": "Стресс. пересечения",
     "cost": "Стоимость модели",
+    "surface_na_fraction": "Доля surface=N/A",
+    "surface_inferred_fraction": "Доля покрытия по fallback",
+    "highway_inferred_fraction": "Доля highway по fallback",
     "mode": "Режим (техн.)",
     "warnings_count": "Число предупреждений",
     "warnings_text": "Предупреждения",

@@ -159,6 +159,9 @@ class WeatherWeightParams:
     heat_wind_cross_build_amp: float = 0.35
     stress_wind_along_open_amp: float = 0.32
     stress_wind_cross_shelter_amp: float = 0.40
+    heat_extreme_route_mult: float = 1.0
+    heat_extreme_open_route_gain: float = 0.22
+    heat_extreme_tree_route_gain: float = 0.18
     # Ослабление бонуса зданий, когда ветер «вдоль» коридора (мало экранирования фасадом).
     heat_wind_along_build_damp: float = 0.24
     # Сезон (календарь vs адаптивный снимок) — дублируется для логов/Excel.
@@ -182,6 +185,15 @@ class WeatherWeightParams:
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
+
+
+def _soft_upper_coeff_clamp(x: float, lo: float, hi: float, soft: float, hard: float) -> float:
+    y = max(lo, float(x))
+    if y <= hi:
+        return y
+    hard_hi = max(hi, float(hard))
+    soft_gain = max(0.0, min(1.0, float(soft)))
+    return min(hard_hi, hi + (y - hi) * soft_gain)
 
 
 def snapshot_from_manual(
@@ -287,9 +299,14 @@ def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, floa
     cold_like_norm = _clamp((tcref - T) / tc_rng, 0.0, 1.0)
     at_ref = float(getattr(s, "heat_apparent_temp_ref", 25.0))
     at_ext = float(getattr(s, "heat_apparent_temp_extreme_ref", 38.0))
+    at_x0 = float(getattr(s, "heat_extreme_apparent_threshold", 35.0))
     denom_hot = max(1e-6, at_ext - at_ref)
+    denom_ext = max(1e-6, at_ext - at_x0)
     apparent_heat_norm = (
         _clamp((Teff - at_ref) / denom_hot, 0.0, 1.0) if Teff >= at_ref else 0.0
+    )
+    extreme_heat_norm = (
+        _clamp((Teff - at_x0) / denom_ext, 0.0, 1.0) if Teff >= at_x0 else 0.0
     )
     apparent_cold_norm = _clamp(max(0.0, 15.0 - Teff) / 20.0, 0.0, 1.0)
     apparent_minus_air_norm = (
@@ -310,6 +327,7 @@ def _normalized_weather_signals(snap: WeatherSnapshot, s: Any) -> Dict[str, floa
         "cold_like_norm": cold_like_norm,
         "radiation_norm": float(radiation_norm),
         "apparent_heat_norm": float(apparent_heat_norm),
+        "extreme_heat_norm": float(extreme_heat_norm),
         "apparent_cold_norm": float(apparent_cold_norm),
         "apparent_minus_air_norm": float(apparent_minus_air_norm),
         "snow_depth_norm": float(snd),
@@ -395,14 +413,16 @@ def _continuous_six_coefficients(
     wet_surface_penalty = 1.0 + e1 * rn + e2 * hn
 
     lo = float(getattr(s, "heat_coeff_clamp_lo", 0.72))
-    hi = float(getattr(s, "heat_coeff_clamp_hi", 1.42))
+    hi = float(getattr(s, "heat_coeff_clamp_hi", 1.60))
+    soft = float(getattr(s, "heat_coeff_soft_overflow_gain", 0.0))
+    hard = float(getattr(s, "heat_coeff_hard_hi", hi))
     return (
-        _clamp(tree_shade_bonus, lo, hi),
-        _clamp(open_sky_penalty, lo, hi),
-        _clamp(building_shade_bonus, lo, hi),
-        _clamp(covered_bonus, lo, hi),
-        _clamp(wind_open_penalty, lo, hi),
-        _clamp(wet_surface_penalty, lo, hi),
+        _soft_upper_coeff_clamp(tree_shade_bonus, lo, hi, soft, hard),
+        _soft_upper_coeff_clamp(open_sky_penalty, lo, hi, soft, hard),
+        _soft_upper_coeff_clamp(building_shade_bonus, lo, hi, soft, hard),
+        _soft_upper_coeff_clamp(covered_bonus, lo, hi, soft, hard),
+        _soft_upper_coeff_clamp(wind_open_penalty, lo, hi, soft, hard),
+        _soft_upper_coeff_clamp(wet_surface_penalty, lo, hi, soft, hard),
     )
 
 
@@ -650,6 +670,20 @@ def build_weather_weight_params(
     if settings is not None:
         wind_dir_kw = _wind_direction_params_from_settings(settings)
         wc_kw = _wc_routing_params_from_settings(settings)
+    exn = float(sig.get("extreme_heat_norm", 0.0) or 0.0)
+    heat_extreme_route_mult = 1.0
+    heat_extreme_open_gain = 0.22
+    heat_extreme_tree_gain = 0.18
+    if settings is not None:
+        heat_extreme_route_mult = 1.0 + exn * float(
+            getattr(settings, "heat_extreme_route_beta_gain", 0.30)
+        )
+        heat_extreme_open_gain = float(
+            getattr(settings, "heat_extreme_open_route_gain", 0.22)
+        )
+        heat_extreme_tree_gain = float(
+            getattr(settings, "heat_extreme_tree_route_gain", 0.18)
+        )
 
     season_stress_rm = 1.0
     season_stairs_rm = 1.0
@@ -704,6 +738,9 @@ def build_weather_weight_params(
         snow_export_surface_amp=float(snow_surf_export),
         snow_export_stress_amp=float(snow_stress_export),
         snow_export_phys_amp=float(mults.physical / max(1e-9, phys_before)),
+        heat_extreme_route_mult=float(heat_extreme_route_mult),
+        heat_extreme_open_route_gain=float(heat_extreme_open_gain),
+        heat_extreme_tree_route_gain=float(heat_extreme_tree_gain),
         wind_direction_deg=wdir_val,
         wind_direction_available=bool(wdir_ok),
         **wind_dir_kw,

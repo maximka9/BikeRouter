@@ -28,7 +28,10 @@ from .heat import (
     edge_bearing_deg_from_geom,
     exposure_units_detailed_all_slots,
     heat_cost_for_edge,
+    solar_shade_potential,
+    street_width_proxy_m,
     thermal_edge_features,
+    urban_canyon_score,
 )
 from .policy_data import load_stress_policy
 from .stress import (
@@ -57,6 +60,8 @@ _OSM_STRESS_TAG_KEYS = (
     "segregated",
     "bicycle",
     "width",
+    "est:width",
+    "est_width",
     "foot",
     "covered",
     "tunnel",
@@ -143,6 +148,8 @@ class GraphBuilder:
             "segregated",
             "bicycle",
             "width",
+            "est:width",
+            "est_width",
             "foot",
             "lit",
             "covered",
@@ -597,6 +604,9 @@ class GraphBuilder:
         v_sh = np.zeros(n, dtype=np.float64)
         b_sh = np.zeros(n, dtype=np.float64)
         c_cov = np.zeros(n, dtype=np.float64)
+        street_width = np.zeros(n, dtype=np.float64)
+        canyon_score = np.zeros(n, dtype=np.float64)
+        shade_potential = np.zeros(n, dtype=np.float64)
         use_proxy = np.zeros(n, dtype=np.int8)
         heat_by_slot = {s.key: np.zeros(n, dtype=np.float64) for s in TIME_SLOTS}
         exp_by_slot = {s.key: np.zeros(n, dtype=np.float64) for s in TIME_SLOTS}
@@ -624,6 +634,9 @@ class GraphBuilder:
             v_sh[i] = V
             b_sh[i] = B
             c_cov[i] = C
+            street_width[i] = street_width_proxy_m(tags)
+            canyon_score[i] = urban_canyon_score(tags)
+            shade_potential[i] = solar_shade_potential(V, B, C)
 
             fb = use_fallback_green or (
                 float(trees[i]) < 0.5 and float(grass[i]) < 0.5
@@ -660,6 +673,9 @@ class GraphBuilder:
         edges_gdf["thermal_vegetation_shade_share"] = v_sh
         edges_gdf["thermal_building_shade_share"] = b_sh
         edges_gdf["thermal_covered_share"] = c_cov
+        edges_gdf["street_width_proxy_m"] = street_width
+        edges_gdf["urban_canyon_score"] = canyon_score
+        edges_gdf["solar_shade_potential"] = shade_potential
         edges_gdf["thermal_use_proxy"] = use_proxy
         edges_gdf["stress_lts"] = lts_arr
         edges_gdf["stress_intersection_score"] = int_score_arr
@@ -787,6 +803,9 @@ class GraphBuilder:
             "thermal_vegetation_shade_share",
             "thermal_building_shade_share",
             "thermal_covered_share",
+            "street_width_proxy_m",
+            "urban_canyon_score",
+            "solar_shade_potential",
             "thermal_use_proxy",
             "stress_lts",
             "stress_intersection_score",
@@ -838,6 +857,9 @@ class GraphBuilder:
                     "thermal_vegetation_shade_share",
                     "thermal_building_shade_share",
                     "thermal_covered_share",
+                    "street_width_proxy_m",
+                    "urban_canyon_score",
+                    "solar_shade_potential",
                     "stress_segment_cost",
                     "stress_intersection_cost",
                 ):

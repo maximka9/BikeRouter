@@ -107,18 +107,57 @@ def covered_share(tags: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _parse_float_tag(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    try:
+        return float(str(raw).replace("m", "").replace(",", ".").strip().split()[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def street_width_proxy_m(tags: Dict[str, Any]) -> float:
+    """Прокси ширины улицы по OSM width/lanes/highway, если нет building footprints."""
+    if not tags:
+        return 18.0
+    w = _parse_float_tag(tags.get("width") or tags.get("est:width") or tags.get("est_width"))
+    if w is not None and w > 0:
+        return float(max(2.0, min(60.0, w)))
+    lanes = _parse_float_tag(tags.get("lanes"))
+    if lanes is not None and lanes > 0:
+        return float(max(3.0, min(60.0, lanes * 3.25 + 3.0)))
+    hw = str(tags.get("highway") or "").strip().lower()
+    defaults = {
+        "footway": 4.0,
+        "path": 3.0,
+        "cycleway": 4.2,
+        "pedestrian": 9.0,
+        "living_street": 8.5,
+        "residential": 12.0,
+        "service": 9.0,
+        "unclassified": 13.0,
+        "tertiary": 16.0,
+        "secondary": 20.0,
+        "primary": 24.0,
+        "steps": 3.0,
+        "track": 4.5,
+    }
+    return float(defaults.get(hw, 18.0))
+
+
+def urban_canyon_score(tags: Dict[str, Any]) -> float:
+    """0..1: узкая улица/пешеходный коридор как прокси городского каньона."""
+    w = street_width_proxy_m(tags)
+    width_score = max(0.0, min(1.0, (28.0 - w) / 24.0))
+    hw = str((tags or {}).get("highway") or "").strip().lower()
+    hw_boost = 0.12 if hw in ("footway", "pedestrian", "living_street", "service") else 0.0
+    return float(max(0.0, min(1.0, width_score + hw_boost)))
+
+
 def building_shade_share(tags: Dict[str, Any]) -> float:
     """Прокси тени зданий по ширине проезда [0..1]."""
-    w = tags.get("width") or tags.get("est:width")
-    if w is None:
-        return 0.22
-    try:
-        wm = float(str(w).replace("m", "").strip().split()[0])
-    except (ValueError, IndexError):
-        return 0.22
-    if wm <= 0:
-        return 0.22
-    return float(min(0.82, max(0.05, 1.0 - wm / 32.0)))
+    canyon = urban_canyon_score(tags)
+    return float(min(0.82, max(0.05, 0.12 + 0.70 * canyon)))
 
 
 def direct_sun_factor(bearing_deg: float, slot: TimeSlotDef) -> float:
@@ -150,6 +189,14 @@ def open_unfavorable_unit(
     # совместное ослабление прямого солнца на открытом участке
     shade_combined = 1.0 - (1.0 - Vm * veg_weight) * (1.0 - Bm * bld_weight)
     return max(0.0, min(1.0, Dm * Om * (1.0 - shade_combined)))
+
+
+def solar_shade_potential(V: float, B: float, C: float) -> float:
+    """0..1: совместный потенциал защиты от солнца растительностью/зданиями/укрытиями."""
+    Vm = max(0.0, min(1.0, float(V)))
+    Bm = max(0.0, min(1.0, float(B)))
+    Cm = max(0.0, min(1.0, float(C)))
+    return float(1.0 - (1.0 - 0.88 * Vm) * (1.0 - 0.62 * Bm) * (1.0 - 0.90 * Cm))
 
 
 def legacy_exposure_unit(

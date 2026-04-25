@@ -388,6 +388,7 @@ def continuous_heat_edge_weather_factor(
 
     sig = getattr(weather, "normalized_signals", None) or {}
     rn = _clamp01(float(sig.get("rain_norm", 0.0)))
+    exn = _clamp01(float(sig.get("extreme_heat_norm", 0.0)))
     rain_open_amp = 1.0 + float(
         getattr(weather, "heat_edge_rain_open_mult", 0.48)
     ) * rn
@@ -397,7 +398,9 @@ def continuous_heat_edge_weather_factor(
     rain_wind_exp_amp = 1.0 + float(
         getattr(weather, "heat_edge_rain_wind_exp_mult", 0.22)
     ) * rn
-    k1_eff = k1 * rain_open_amp
+    k1_eff = k1 * rain_open_amp * (
+        1.0 + float(getattr(weather, "heat_extreme_open_route_gain", 0.22)) * exn
+    )
     k3_eff = k3 * rain_build_amp
     k6_eff = k6 * rain_wind_exp_amp
 
@@ -419,7 +422,12 @@ def continuous_heat_edge_weather_factor(
     raw = (
         1.0
         + rs * k1_eff * osp * O * wo
-        - rs * k2 * tsb * V * wt
+        - rs
+        * k2
+        * tsb
+        * V
+        * wt
+        * (1.0 + float(getattr(weather, "heat_extreme_tree_route_gain", 0.18)) * exn)
         - rs * k3_eff * bsb * B * b_build
         - rs * k4 * cbn * C
         + rs * k5 * wsp * wet_eff
@@ -570,6 +578,9 @@ _GRAPHML_NUMERIC_EDGE_ATTRS = frozenset(
         "thermal_vegetation_shade_share",
         "thermal_building_shade_share",
         "thermal_covered_share",
+        "street_width_proxy_m",
+        "urban_canyon_score",
+        "solar_shade_potential",
         *[f"heat_{s.key}" for s in TIME_SLOTS],
         *[f"heat_exposure_{s.key}" for s in TIME_SLOTS],
     }
@@ -815,6 +826,21 @@ class RouteService:
             return None
 
     @staticmethod
+    def effective_heat_beta(
+        pref: RoutingPreferenceProfile,
+        weather: Optional[WeatherWeightParams] = None,
+    ) -> float:
+        """β с динамическим усилением для extreme-heat режимов heat/heat_stress."""
+        beta = float(pref.beta)
+        if (
+            weather is not None
+            and getattr(weather, "enabled", False)
+            and pref.key in ("thermal_physical_base", "heat_stress_physical_base")
+        ):
+            beta *= float(getattr(weather, "heat_extreme_route_mult", 1.0) or 1.0)
+        return beta
+
+    @staticmethod
     def combined_edge_weight(
         edge_data: dict,
         profile_key: str,
@@ -835,7 +861,8 @@ class RouteService:
             physical_weight_key=physical_weight_key,
         )
         phys_r = ec.phys_eff * ec.criteria.green_route_factor
-        c = pref.alpha * phys_r + pref.beta * ec.heat_eff + pref.gamma * ec.st_eff
+        beta_eff = RouteService.effective_heat_beta(pref, weather)
+        c = pref.alpha * phys_r + beta_eff * ec.heat_eff + pref.gamma * ec.st_eff
         if not math.isfinite(c) or c <= 0:
             return float("inf")
         return float(c)
@@ -1076,7 +1103,9 @@ class RouteService:
     ) -> Dict[str, float]:
         """Суммы physical, heat (с κ), stress по выбранному слоту."""
         z: Dict[str, float] = {
+            "physical_base": 0.0,
             "physical": 0.0,
+            "green_cost": 0.0,
             "heat": 0.0,
             "heat_raw": 0.0,
             "stress": 0.0,
@@ -1116,7 +1145,10 @@ class RouteService:
                 z["_criteria_weight_len"] += ln
                 for _ck in CRITERION_KEYS:
                     z[f"route_mean_{_ck}"] += ln * float(getattr(ec.criteria, _ck))
-                pe = ec.phys_eff * ec.criteria.green_route_factor
+                pe_base = ec.phys_eff
+                pe = pe_base * ec.criteria.green_route_factor
+                z["physical_base"] += pe_base
+                z["green_cost"] += pe - pe_base
                 z["physical"] += pe
                 z["heat"] += ec.heat_eff
                 z["stress"] += ec.st_eff
@@ -1127,9 +1159,11 @@ class RouteService:
                     d.get("stress_intersection_cost"), fallback=0.0
                 ) * sw
             else:
-                z["physical"] += coerce_edge_weight_numeric(
+                pe_base = coerce_edge_weight_numeric(
                     d.get(phys_k), fallback=0.0
                 )
+                z["physical_base"] += pe_base
+                z["physical"] += pe_base
                 z["heat"] += hr * hm
                 z["stress"] += coerce_edge_weight_numeric(
                     d.get("stress_cost"), fallback=0.0
@@ -1172,9 +1206,10 @@ class RouteService:
             physical_weight_key=physical_weight_key,
         )
         turn_part = float(pref.delta * TURN_PENALTY_BASE * max(0, turn_count))
+        beta_eff = RouteService.effective_heat_beta(pref, weather)
         return float(
             pref.alpha * seg["physical"]
-            + pref.beta * seg["heat"]
+            + beta_eff * seg["heat"]
             + pref.gamma * seg["stress"]
             + turn_part
         )
@@ -1272,6 +1307,9 @@ class RouteService:
                 "route_covered_share": 0.0,
                 "route_bad_wet_surface_share": 0.0,
                 "route_winter_harsh_surface_share": 0.0,
+                "route_mean_street_width_proxy_m": 0.0,
+                "route_mean_urban_canyon_score": 0.0,
+                "route_mean_solar_shade_potential": 0.0,
             }
         tlen = 0.0
         so = 0.0
@@ -1279,6 +1317,9 @@ class RouteService:
         sc = 0.0
         sw = 0.0
         sw_h = 0.0
+        swidth = 0.0
+        scan = 0.0
+        sshade = 0.0
         for i in range(route.edge_count):
             d = G.edges[route.edges[i]]
             ln = float(d.get("length", 0.0) or 0.0)
@@ -1290,6 +1331,9 @@ class RouteService:
             sc += ln * float(d.get("thermal_covered_share", 0.0) or 0.0)
             sw += ln * wet_surface_edge_slip_factor(d.get("surface_effective"))
             sw_h += ln * _edge_winter_harsh_surface_indicator(d)
+            swidth += ln * float(d.get("street_width_proxy_m", 18.0) or 18.0)
+            scan += ln * float(d.get("urban_canyon_score", 0.0) or 0.0)
+            sshade += ln * float(d.get("solar_shade_potential", 0.0) or 0.0)
         if tlen <= 0:
             return {
                 "route_open_sky_share": 0.0,
@@ -1297,6 +1341,9 @@ class RouteService:
                 "route_covered_share": 0.0,
                 "route_bad_wet_surface_share": 0.0,
                 "route_winter_harsh_surface_share": 0.0,
+                "route_mean_street_width_proxy_m": 0.0,
+                "route_mean_urban_canyon_score": 0.0,
+                "route_mean_solar_shade_potential": 0.0,
             }
         return {
             "route_open_sky_share": float(so / tlen),
@@ -1304,6 +1351,9 @@ class RouteService:
             "route_covered_share": float(sc / tlen),
             "route_bad_wet_surface_share": float(sw / tlen),
             "route_winter_harsh_surface_share": float(sw_h / tlen),
+            "route_mean_street_width_proxy_m": float(swidth / tlen),
+            "route_mean_urban_canyon_score": float(scan / tlen),
+            "route_mean_solar_shade_potential": float(sshade / tlen),
         }
 
     @staticmethod

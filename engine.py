@@ -209,6 +209,9 @@ def _build_weather_route_context(
             "covered_bonus": float(getattr(wp, "covered_bonus", 1.0)),
             "wind_open_penalty": float(getattr(wp, "wind_open_penalty", 1.0)),
             "wet_surface_penalty": float(getattr(wp, "wet_surface_penalty", 1.0)),
+            "heat_extreme_route_mult": float(
+                getattr(wp, "heat_extreme_route_mult", 1.0)
+            ),
         }
         ns = getattr(wp, "normalized_signals", None) or {}
         for k, v in ns.items():
@@ -1279,6 +1282,15 @@ class RouteEngine:
             route_winter_harsh_surface_share=float(hm.route_winter_harsh_surface_share)
             if hm
             else 0.0,
+            route_mean_street_width_proxy_m=float(hm.route_mean_street_width_proxy_m)
+            if hm
+            else 0.0,
+            route_mean_urban_canyon_score=float(hm.route_mean_urban_canyon_score)
+            if hm
+            else 0.0,
+            route_mean_solar_shade_potential=float(hm.route_mean_solar_shade_potential)
+            if hm
+            else 0.0,
             vegetation_shade_share=float(hm.vegetation_shade_share) if hm else 0.0,
             stressful_intersections_count=int(hm.stressful_intersections_count)
             if hm
@@ -1784,14 +1796,31 @@ class RouteEngine:
             wm_dict = {
                 k: round(float(v), 4) for k, v in asdict(weather.mults).items()
             }
+        beta_eff = router.effective_heat_beta(pref, weather)
+        length_m = max(float(seg.get("length_m", 0.0) or 0.0), 1e-9)
+        physical_cost = float(pref.alpha * seg.get("physical_base", seg["physical"]))
+        green_cost = float(pref.alpha * seg.get("green_cost", 0.0))
+        heat_cost = float(beta_eff * seg["heat"])
+        heat_raw_cost = float(beta_eff * seg["heat_raw"])
+        stress_cost = float(pref.gamma * seg["stress"])
         br = CombinedCostBreakdown(
             physical=round(pref.alpha * seg["physical"], 1),
-            heat_effective=round(pref.beta * seg["heat"], 1),
-            heat_raw=round(pref.beta * seg["heat_raw"], 1),
-            stress=round(pref.gamma * seg["stress"], 1),
+            physical_cost=round(physical_cost, 1),
+            physical_cost_norm=round(physical_cost / length_m, 6),
+            heat_effective=round(heat_cost, 1),
+            heat_raw=round(heat_raw_cost, 1),
+            heat_cost=round(heat_cost, 1),
+            heat_cost_norm=round(heat_cost / length_m, 6),
+            stress=round(stress_cost, 1),
+            stress_cost=round(stress_cost, 1),
+            stress_cost_norm=round(stress_cost / length_m, 6),
+            green_cost=round(green_cost, 1),
+            green_cost_norm=round(green_cost / length_m, 6),
             stress_segment=round(pref.gamma * seg["stress_segment"], 1),
             stress_intersection=round(pref.gamma * seg["stress_intersection"], 1),
             turn_penalty=round(turn_part, 1),
+            combined_cost=round(comb, 1),
+            combined_cost_norm=round(comb / length_m, 6),
             heat_context_multiplier=round(hm, 4),
             weather_multipliers=wm_dict,
         )
@@ -1819,6 +1848,15 @@ class RouteEngine:
             route_bad_wet_surface_share=round(sh_rt["route_bad_wet_surface_share"], 4),
             route_winter_harsh_surface_share=round(
                 float(sh_rt.get("route_winter_harsh_surface_share", 0.0)), 4
+            ),
+            route_mean_street_width_proxy_m=round(
+                float(sh_rt.get("route_mean_street_width_proxy_m", 0.0)), 3
+            ),
+            route_mean_urban_canyon_score=round(
+                float(sh_rt.get("route_mean_urban_canyon_score", 0.0)), 4
+            ),
+            route_mean_solar_shade_potential=round(
+                float(sh_rt.get("route_mean_solar_shade_potential", 0.0)), 4
             ),
             route_wind_direction_aware=float(wdm.get("route_wind_direction_aware", 0.0)),
             route_mean_wind_to_street_angle_deg=round(

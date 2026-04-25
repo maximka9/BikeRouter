@@ -265,8 +265,8 @@ ROUTING_PREFERENCE_PROFILES: Dict[str, RoutingPreferenceProfile] = {
         key="thermal_physical_base",
         label="Тепло на физической базе",
         alpha=1.0,
-        beta=0.44,
-        gamma=0.14,
+        beta=0.58,
+        gamma=0.08,
         delta=0.72,
     ),
     # Стресс-маршрут на той же физической базе, что и full (не чистый stress_cost).
@@ -283,8 +283,8 @@ ROUTING_PREFERENCE_PROFILES: Dict[str, RoutingPreferenceProfile] = {
         key="heat_stress_physical_base",
         label="Тепло и безопасность на физической базе",
         alpha=1.0,
-        beta=1.24,
-        gamma=0.58,
+        beta=1.45,
+        gamma=0.46,
         delta=0.92,
     ),
 }
@@ -485,13 +485,25 @@ class Settings:
         "HEAT_APPARENT_TEMP_EXTREME_REF", 38.0, float
     )
     heat_open_sky_apparent_gain: float = _env(
-        "HEAT_OPEN_SKY_APPARENT_GAIN", 0.45, float
+        "HEAT_OPEN_SKY_APPARENT_GAIN", 0.30, float
     )
     heat_open_sky_radiation_gain: float = _env(
-        "HEAT_OPEN_SKY_RADIATION_GAIN", 0.35, float
+        "HEAT_OPEN_SKY_RADIATION_GAIN", 0.25, float
     )
     heat_open_sky_hot_extra_gain: float = _env(
-        "HEAT_OPEN_SKY_HOT_EXTRA_GAIN", 0.25, float
+        "HEAT_OPEN_SKY_HOT_EXTRA_GAIN", 0.15, float
+    )
+    heat_extreme_apparent_threshold: float = _env(
+        "HEAT_EXTREME_APPARENT_THRESHOLD", 35.0, float
+    )
+    heat_extreme_route_beta_gain: float = _env(
+        "HEAT_EXTREME_ROUTE_BETA_GAIN", 0.30, float
+    )
+    heat_extreme_open_route_gain: float = _env(
+        "HEAT_EXTREME_OPEN_ROUTE_GAIN", 0.22, float
+    )
+    heat_extreme_tree_route_gain: float = _env(
+        "HEAT_EXTREME_TREE_ROUTE_GAIN", 0.18, float
     )
     heat_tree_shade_apparent_gain: float = _env(
         "HEAT_TREE_SHADE_APPARENT_GAIN", 0.38, float
@@ -565,7 +577,11 @@ class Settings:
     heat_edge_factor_max: float = _env("HEAT_EDGE_FACTOR_MAX", 1.75, float)
 
     heat_coeff_clamp_lo: float = _env("HEAT_COEFF_CLAMP_LO", 0.72, float)
-    heat_coeff_clamp_hi: float = _env("HEAT_COEFF_CLAMP_HI", 1.42, float)
+    heat_coeff_clamp_hi: float = _env("HEAT_COEFF_CLAMP_HI", 1.60, float)
+    heat_coeff_soft_overflow_gain: float = _env(
+        "HEAT_COEFF_SOFT_OVERFLOW_GAIN", 0.18, float
+    )
+    heat_coeff_hard_hi: float = _env("HEAT_COEFF_HARD_HI", 1.85, float)
 
     # Погодный stress: доля глобального wm.stress (остальное — edge-specific в routing).
     weather_stress_global_blend: float = _env("WEATHER_STRESS_GLOBAL_BLEND", 0.28, float)
@@ -961,7 +977,7 @@ OSM_HIGHWAY_FILTER: str = (
 
 # Увеличивайте при изменении формул весов в ``graph.calculate_weights``,
 # ``apply_weights``, подсегментов высот, клипа озеленения и т.п.
-ROUTING_ALGO_VERSION: str = _env("ROUTING_ALGO_VERSION", "2", str)
+ROUTING_ALGO_VERSION: str = _env("ROUTING_ALGO_VERSION", "3", str)
 
 
 def routing_engine_cache_fingerprint() -> str:
@@ -1043,13 +1059,25 @@ def routing_engine_cache_fingerprint() -> str:
             "HEAT_APPARENT_TEMP_EXTREME_REF", 38.0, float
         ),
         "heat_open_sky_apparent_gain": _env(
-            "HEAT_OPEN_SKY_APPARENT_GAIN", 0.45, float
+            "HEAT_OPEN_SKY_APPARENT_GAIN", 0.30, float
         ),
         "heat_open_sky_radiation_gain": _env(
-            "HEAT_OPEN_SKY_RADIATION_GAIN", 0.35, float
+            "HEAT_OPEN_SKY_RADIATION_GAIN", 0.25, float
         ),
         "heat_open_sky_hot_extra_gain": _env(
-            "HEAT_OPEN_SKY_HOT_EXTRA_GAIN", 0.25, float
+            "HEAT_OPEN_SKY_HOT_EXTRA_GAIN", 0.15, float
+        ),
+        "heat_extreme_apparent_threshold": _env(
+            "HEAT_EXTREME_APPARENT_THRESHOLD", 35.0, float
+        ),
+        "heat_extreme_route_beta_gain": _env(
+            "HEAT_EXTREME_ROUTE_BETA_GAIN", 0.30, float
+        ),
+        "heat_extreme_open_route_gain": _env(
+            "HEAT_EXTREME_OPEN_ROUTE_GAIN", 0.22, float
+        ),
+        "heat_extreme_tree_route_gain": _env(
+            "HEAT_EXTREME_TREE_ROUTE_GAIN", 0.18, float
         ),
         "heat_tree_shade_apparent_gain": _env(
             "HEAT_TREE_SHADE_APPARENT_GAIN", 0.38, float
@@ -1064,7 +1092,11 @@ def routing_engine_cache_fingerprint() -> str:
             "HEAT_BUILDING_SHADE_RADIATION_GAIN", 0.14, float
         ),
         "heat_coeff_clamp_lo": _env("HEAT_COEFF_CLAMP_LO", 0.72, float),
-        "heat_coeff_clamp_hi": _env("HEAT_COEFF_CLAMP_HI", 1.42, float),
+        "heat_coeff_clamp_hi": _env("HEAT_COEFF_CLAMP_HI", 1.60, float),
+        "heat_coeff_soft_overflow_gain": _env(
+            "HEAT_COEFF_SOFT_OVERFLOW_GAIN", 0.18, float
+        ),
+        "heat_coeff_hard_hi": _env("HEAT_COEFF_HARD_HI", 1.85, float),
         "heat_temp_cool_ref": _env("HEAT_TEMP_COOL_REF", 14.0, float),
         "heat_temp_cool_range": _env("HEAT_TEMP_COOL_RANGE", 10.0, float),
         "heat_tree_shade_cold_damp": _env("HEAT_TREE_SHADE_COLD_DAMP", 0.58, float),

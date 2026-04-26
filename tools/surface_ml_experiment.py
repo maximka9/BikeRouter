@@ -2,7 +2,10 @@
 
 Run from the repository parent:
 
-    python -m bike_router.tools.surface_ml_experiment --mode all --max-edges 500
+    python -m bike_router.tools.surface_ml_experiment
+    python -m bike_router.tools.surface_ml_experiment --max-edges 500   # smoke run
+
+Artifacts: ``<BIKE_ROUTER_BASE_DIR or bike_router/data>/experiments/surface_ml_YYYYMMDD_HHMMSS/``.
 """
 
 from __future__ import annotations
@@ -11,7 +14,6 @@ import argparse
 import logging
 import os
 import sys
-from pathlib import Path
 
 
 def _ensure_pkg_path() -> None:
@@ -25,22 +27,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="Train and run an experimental ML model for missing OSM surface tags."
     )
     parser.add_argument(
-        "--mode",
-        choices=("all",),
-        default="all",
-        help="Experiment stage to run. First-stage implementation supports all only.",
-    )
-    parser.add_argument(
         "--max-edges",
         type=int,
         default=None,
-        help="Optional deterministic edge limit for smoke runs.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Optional output directory. Defaults to data/experiments/surface_ml_YYYYMMDD_HHMMSS.",
+        help="Optional cap on edges for smoke runs; default is no limit (all edges in area).",
     )
     parser.add_argument("--sample-step-m", type=float, default=7.0)
     parser.add_argument("--pixel-window", type=int, default=5)
@@ -84,7 +74,6 @@ def main(argv: list[str] | None = None) -> None:
         settings=Settings(),
         config=config,
         max_edges=args.max_edges,
-        output_dir=args.output_dir,
     )
     print(str(artifacts.output_dir))
 

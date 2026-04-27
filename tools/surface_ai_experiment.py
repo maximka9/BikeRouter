@@ -32,6 +32,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional deterministic cap for smoke runs; default uses all edges.",
     )
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--output-mode",
+        choices=("compact", "full"),
+        default=None,
+        help="compact writes the <=20 CSV/XLSX/PNG report set; full also writes heavy debug artifacts.",
+    )
+    parser.add_argument(
+        "--save-heavy-artifacts",
+        action="store_true",
+        help="Save GeoJSON/joblib/json/txt debug artifacts; implies --output-mode full.",
+    )
     parser.add_argument("--models", default=None, help="Comma-separated model candidates override.")
     parser.add_argument("--min-class-count", type=int, default=None)
     parser.add_argument("--sample-step-m", type=float, default=None)
@@ -83,6 +94,12 @@ def _override_config(config, args):
         updates["rf_n_estimators"] = int(args.n_estimators)
     if args.no_satellite:
         updates["use_satellite_features"] = False
+    if args.output_mode is not None:
+        updates["output_mode"] = args.output_mode
+        updates["save_heavy_artifacts"] = args.output_mode == "full"
+    if args.save_heavy_artifacts:
+        updates["output_mode"] = "full"
+        updates["save_heavy_artifacts"] = True
     if args.reuse_edges_cache:
         updates["reuse_edges_cache"] = True
     if args.write_edges_cache:
@@ -120,4 +137,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

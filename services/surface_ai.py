@@ -16,7 +16,7 @@ import os
 import re
 import subprocess
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -268,10 +268,8 @@ GROUP_COLORS: Dict[str, str] = {
     "unknown": "#8A8A8A",
 }
 
-# Обратная совместимость: старое имя без реального oversampling → weighted RF.
-_GROUP_MODEL_CANDIDATE_ALIASES: Dict[str, str] = {
-    "group_direct_combined_rf_paved_rough_oversampled": "group_direct_combined_rf_paved_rough_weighted",
-}
+# Backward-compatible hook for old candidate aliases.
+_GROUP_MODEL_CANDIDATE_ALIASES: Dict[str, str] = {}
 
 
 def _normalize_group_model_candidates(names: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -336,6 +334,7 @@ class SurfaceAIConfig:
         "group_direct_combined_rf_balanced_without_spatial_prior",
         "group_direct_combined_rf_neighbor_features",
         "group_direct_combined_rf_class_weight_manual",
+        "group_direct_combined_rf_paved_rough_oversampled",
         "group_direct_combined_rf_threshold_tuned",
     )
     concrete_target_mode: str = "compact"
@@ -444,13 +443,111 @@ class SurfaceAIConfig:
 
     @classmethod
     def from_env(cls) -> "SurfaceAIConfig":
-        """Дефолты Surface AI — в полях dataclass; из окружения только SURFACE_AI_ENABLED."""
-        return cls(
-            enabled=_env_bool("SURFACE_AI_ENABLED", False),
-            reuse_edges_cache=_env_bool("SURFACE_AI_REUSE_EDGES_CACHE", False),
-            edges_cache_write=_env_bool("SURFACE_AI_EDGES_CACHE_WRITE", False),
-            edges_cache_dir=os.getenv("SURFACE_AI_EDGES_CACHE_DIR", "").strip(),
-        )
+        """Load Surface AI settings from ``SURFACE_AI_*`` environment variables."""
+        base = cls()
+        updates: Dict[str, Any] = {
+            "enabled": _env_bool("SURFACE_AI_ENABLED", base.enabled),
+            "mode": _env_str("SURFACE_AI_MODE", base.mode),
+            "target": _env_str("SURFACE_AI_TARGET", base.target),
+            "min_class_count": _env_int("SURFACE_AI_MIN_CLASS_COUNT", base.min_class_count),
+            "selection_metric": _env_str("SURFACE_AI_SELECTION_METRIC", base.selection_metric),
+            "group_selection_metric": _env_str("SURFACE_AI_GROUP_SELECTION_METRIC", base.group_selection_metric),
+            "dangerous_error_penalty": _env_float("SURFACE_AI_DANGEROUS_ERROR_PENALTY", base.dangerous_error_penalty),
+            "min_bad_surface_recall": _env_float("SURFACE_AI_MIN_BAD_SURFACE_RECALL", base.min_bad_surface_recall),
+            "min_paved_rough_recall": _env_float("SURFACE_AI_MIN_PAVED_ROUGH_RECALL", base.min_paved_rough_recall),
+            "paved_rough_recall_weight": _env_float("SURFACE_AI_PAVED_ROUGH_RECALL_WEIGHT", base.paved_rough_recall_weight),
+            "unpaved_soft_recall_weight": _env_float("SURFACE_AI_UNPAVED_SOFT_RECALL_WEIGHT", base.unpaved_soft_recall_weight),
+            "group_class_weight_mode": _env_str("SURFACE_AI_GROUP_CLASS_WEIGHT_MODE", base.group_class_weight_mode),
+            "group_class_weight_paved_good": _env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_PAVED_GOOD", base.group_class_weight_paved_good),
+            "group_class_weight_paved_rough": _env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_PAVED_ROUGH", base.group_class_weight_paved_rough),
+            "group_class_weight_unpaved_soft": _env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_UNPAVED_SOFT", base.group_class_weight_unpaved_soft),
+            "group_threshold_tuning": _env_bool("SURFACE_AI_GROUP_THRESHOLD_TUNING", base.group_threshold_tuning),
+            "paved_rough_min_proba": _env_float("SURFACE_AI_PAVED_ROUGH_MIN_PROBA", base.paved_rough_min_proba),
+            "unpaved_soft_min_proba": _env_float("SURFACE_AI_UNPAVED_SOFT_MIN_PROBA", base.unpaved_soft_min_proba),
+            "concrete_target_mode": _env_str("SURFACE_AI_CONCRETE_TARGET_MODE", base.concrete_target_mode),
+            "group_target_mode": _env_str("SURFACE_AI_GROUP_TARGET_MODE", base.group_target_mode),
+            "train_direct_group_model": _env_bool("SURFACE_AI_TRAIN_DIRECT_GROUP_MODEL", base.train_direct_group_model),
+            "calibration_enabled": _env_bool("SURFACE_AI_CALIBRATION_ENABLED", base.calibration_enabled),
+            "calibration_method": _env_str("SURFACE_AI_CALIBRATION_METHOD", base.calibration_method),
+            "calibration_share": _env_float("SURFACE_AI_CALIBRATION_SHARE", base.calibration_share),
+            "calibration_min_class_count": _env_int("SURFACE_AI_CALIBRATION_MIN_CLASS_COUNT", base.calibration_min_class_count),
+            "enable_spatial_prior": _env_bool("SURFACE_AI_ENABLE_SPATIAL_PRIOR", base.enable_spatial_prior),
+            "run_spatial_prior_ablation": _env_bool("SURFACE_AI_RUN_SPATIAL_PRIOR_ABLATION", base.run_spatial_prior_ablation),
+            "use_neighbor_features": _env_bool("SURFACE_AI_USE_NEIGHBOR_FEATURES", base.use_neighbor_features),
+            "neighbor_hops": _env_int("SURFACE_AI_NEIGHBOR_HOPS", base.neighbor_hops),
+            "neighbor_use_prediction_pass2": _env_bool("SURFACE_AI_NEIGHBOR_USE_PREDICTION_PASS2", base.neighbor_use_prediction_pass2),
+            "strict_area_precache": _env_bool("SURFACE_AI_STRICT_AREA_PRECACHE", base.strict_area_precache),
+            "use_tile_coverage_polygon": _env_bool("SURFACE_AI_USE_TILE_COVERAGE_POLYGON", base.use_tile_coverage_polygon),
+            "tile_usage_report": _env_bool("SURFACE_AI_TILE_USAGE_REPORT", base.tile_usage_report),
+            "use_green_cache_features": _env_bool("SURFACE_AI_USE_GREEN_CACHE_FEATURES", base.use_green_cache_features),
+            "use_tile_green_mask_features": _env_bool("SURFACE_AI_USE_TILE_GREEN_MASK_FEATURES", base.use_tile_green_mask_features),
+            "max_dangerous_upgrade_rate_effective": _env_float("SURFACE_AI_MAX_DANGEROUS_UPGRADE_RATE_EFFECTIVE", base.max_dangerous_upgrade_rate_effective),
+            "max_calibration_ece": _env_float("SURFACE_AI_MAX_CALIBRATION_ECE", base.max_calibration_ece),
+            "train_area_mode": _env_str("SURFACE_AI_TRAIN_AREA_MODE", base.train_area_mode),
+            "predict_area_mode": _env_str("SURFACE_AI_PREDICT_AREA_MODE", base.predict_area_mode),
+            "train_on_all_tile_edges": _env_bool("SURFACE_AI_TRAIN_ON_ALL_TILE_EDGES", base.train_on_all_tile_edges),
+            "predict_only_inside_polygon": _env_bool("SURFACE_AI_PREDICT_ONLY_INSIDE_POLYGON", base.predict_only_inside_polygon),
+            "osmnx_retain_all": _env_bool("SURFACE_AI_OSMNX_RETAIN_ALL", base.osmnx_retain_all),
+            "osmnx_truncate_by_edge": _env_bool("SURFACE_AI_OSMNX_TRUNCATE_BY_EDGE", base.osmnx_truncate_by_edge),
+            "osmnx_simplify": _env_bool("SURFACE_AI_OSMNX_SIMPLIFY", base.osmnx_simplify),
+            "osmnx_network_type": _env_str("SURFACE_AI_OSMNX_NETWORK_TYPE", base.osmnx_network_type),
+            "osmnx_custom_filter": _env_str("SURFACE_AI_OSMNX_CUSTOM_FILTER", base.osmnx_custom_filter),
+            "holdout_predict_polygon_known_share": _env_float("SURFACE_AI_HOLDOUT_PREDICT_POLYGON_KNOWN_SHARE", base.holdout_predict_polygon_known_share),
+            "tile_edge_match_mode": _env_str("SURFACE_AI_TILE_EDGE_MATCH_MODE", base.tile_edge_match_mode),
+            "edge_tile_buffer_m": _env_float("SURFACE_AI_EDGE_TILE_BUFFER_M", base.edge_tile_buffer_m),
+            "compact_output": _env_bool("SURFACE_AI_COMPACT_OUTPUT", base.compact_output),
+            "output_mode": _env_str("SURFACE_AI_OUTPUT_MODE", base.output_mode),
+            "max_output_files": _env_int("SURFACE_AI_MAX_OUTPUT_FILES", base.max_output_files),
+            "compact_cleanup": _env_bool("SURFACE_AI_COMPACT_CLEANUP", base.compact_cleanup),
+            "save_heavy_artifacts": _env_bool("SURFACE_AI_SAVE_HEAVY_ARTIFACTS", base.save_heavy_artifacts),
+            "save_full_predictions_geojson": _env_bool("SURFACE_AI_SAVE_FULL_PREDICTIONS_GEOJSON", base.save_full_predictions_geojson),
+            "run_holdout_leakage_checks": _env_bool("SURFACE_AI_RUN_HOLDOUT_LEAKAGE_CHECKS", base.run_holdout_leakage_checks),
+            "holdout_split_mode": _env_str("SURFACE_AI_HOLDOUT_SPLIT_MODE", base.holdout_split_mode),
+            "holdout_large_grid_m": _env_float("SURFACE_AI_HOLDOUT_LARGE_GRID_M", base.holdout_large_grid_m),
+            "mask_holdout_labels_for_neighbors": _env_bool("SURFACE_AI_MASK_HOLDOUT_LABELS_FOR_NEIGHBORS", base.mask_holdout_labels_for_neighbors),
+            "prevent_directed_edge_leakage": _env_bool("SURFACE_AI_PREVENT_DIRECTED_EDGE_LEAKAGE", base.prevent_directed_edge_leakage),
+            "use_satellite_features": _env_bool("SURFACE_AI_USE_SATELLITE_FEATURES", base.use_satellite_features),
+            "sample_step_m": _env_float("SURFACE_AI_SAMPLE_STEP_M", base.sample_step_m),
+            "pixel_window": _env_int("SURFACE_AI_PIXEL_WINDOW", base.pixel_window),
+            "tms_server": _env_str("SURFACE_AI_TMS_SERVER", base.tms_server),
+            "tile_zoom": _env_int("SURFACE_AI_TILE_ZOOM", base.tile_zoom),
+            "tiles_dir": _env_str("SURFACE_AI_TILES_DIR", base.tiles_dir),
+            "spatial_grid_m": _env_float("SURFACE_AI_SPATIAL_GRID_M", base.spatial_grid_m),
+            "test_share": _env_float("SURFACE_AI_TEST_SHARE", base.test_share),
+            "random_state": _env_int("SURFACE_AI_RANDOM_STATE", base.random_state),
+            "rf_n_estimators": _env_int("SURFACE_AI_RF_N_ESTIMATORS", base.rf_n_estimators),
+            "rf_class_weight": _env_str("SURFACE_AI_RF_CLASS_WEIGHT", base.rf_class_weight),
+            "min_confidence": _env_float("SURFACE_AI_MIN_CONFIDENCE", base.min_confidence),
+            "conf_high": _env_float("SURFACE_AI_CONF_HIGH", base.conf_high),
+            "conf_medium": _env_float("SURFACE_AI_CONF_MEDIUM", base.conf_medium),
+            "enable_safety_policy": _env_bool("SURFACE_AI_ENABLE_SAFETY_POLICY", base.enable_safety_policy),
+            "paved_good_min_confidence": _env_float("SURFACE_AI_PAVED_GOOD_MIN_CONFIDENCE", base.paved_good_min_confidence),
+            "bad_surface_min_confidence": _env_float("SURFACE_AI_BAD_SURFACE_MIN_CONFIDENCE", base.bad_surface_min_confidence),
+            "min_margin": _env_float("SURFACE_AI_MIN_MARGIN", base.min_margin),
+            "out_dir": _env_str("SURFACE_AI_OUT_DIR", base.out_dir),
+            "min_known_edges": _env_int("SURFACE_AI_MIN_KNOWN_EDGES", base.min_known_edges),
+            "max_tile_cache_items": _env_int("SURFACE_AI_MAX_TILE_CACHE_ITEMS", base.max_tile_cache_items),
+            "reuse_edges_cache": _env_bool("SURFACE_AI_REUSE_EDGES_CACHE", base.reuse_edges_cache),
+            "edges_cache_write": _env_bool("SURFACE_AI_EDGES_CACHE_WRITE", base.edges_cache_write),
+            "edges_cache_dir": os.getenv("SURFACE_AI_EDGES_CACHE_DIR", base.edges_cache_dir).strip(),
+            "auto_parallel": _env_bool("SURFACE_AI_AUTO_PARALLEL", base.auto_parallel),
+            "model_outer_parallel_min_candidates": _env_int("SURFACE_AI_MODEL_OUTER_PARALLEL_MIN_CANDIDATES", base.model_outer_parallel_min_candidates),
+        }
+        if os.getenv("SURFACE_AI_MODEL_CANDIDATES"):
+            updates["model_candidates"] = _split_csv(os.getenv("SURFACE_AI_MODEL_CANDIDATES", ""))
+        if os.getenv("SURFACE_AI_GROUP_MODEL_CANDIDATES"):
+            updates["group_model_candidates"] = _normalize_group_model_candidates(
+                _split_csv(os.getenv("SURFACE_AI_GROUP_MODEL_CANDIDATES", ""))
+            )
+        if os.getenv("SURFACE_AI_GRAPH_SOURCE_PRIORITY"):
+            updates["graph_source_priority"] = _split_csv(os.getenv("SURFACE_AI_GRAPH_SOURCE_PRIORITY", ""))
+        if os.getenv("SURFACE_AI_TRAIN_GRAPH_SOURCE_PRIORITY"):
+            updates["train_graph_source_priority"] = _split_csv(os.getenv("SURFACE_AI_TRAIN_GRAPH_SOURCE_PRIORITY", ""))
+        if os.getenv("SURFACE_AI_PREDICT_GRAPH_SOURCE_PRIORITY"):
+            updates["predict_graph_source_priority"] = _split_csv(os.getenv("SURFACE_AI_PREDICT_GRAPH_SOURCE_PRIORITY", ""))
+        if os.getenv("SURFACE_AI_COMPACT_ALLOWED_EXTENSIONS"):
+            updates["compact_allowed_extensions"] = _split_csv(os.getenv("SURFACE_AI_COMPACT_ALLOWED_EXTENSIONS", ""))
+        return replace(base, **updates)
 
 
 @dataclass
@@ -553,6 +650,43 @@ def normalize_surface_value(raw: Any) -> Optional[str]:
             return part
     first = aliases.get(parts[0], parts[0])
     return first if first in CONCRETE_SURFACE_VALUES else None
+
+
+def _surface_values_from_edge_row(row: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(raw_surface, normalized_surface)`` from raw or derived graph columns.
+
+    Some cached graph variants keep ``surface_osm_raw``/``surface_osm_norm`` but do
+    not expose the original ``surface`` tag after GraphML round-tripping. The ML
+    dataset must treat those columns as the same OSM truth, otherwise all known
+    surfaces can be silently marked unknown.
+    """
+    raw_candidates = (
+        getattr(row, "surface", None),
+        getattr(row, "surface_osm_raw", None),
+        getattr(row, "surface_raw", None),
+    )
+    norm_candidates = (
+        getattr(row, "surface_osm_norm", None),
+        getattr(row, "surface_norm", None),
+        getattr(row, "surface_true_concrete", None),
+    )
+
+    raw_surface: Optional[str] = None
+    for value in raw_candidates:
+        first = _first_osm_value(value)
+        if first is not None and str(first).strip().lower() not in {"", "none", "null", "nan"}:
+            raw_surface = str(first)
+            break
+
+    surface_norm = normalize_surface_value(raw_surface)
+    if surface_norm is None:
+        for value in norm_candidates:
+            surface_norm = normalize_surface_value(value)
+            if surface_norm is not None:
+                break
+    if raw_surface is None and surface_norm is not None:
+        raw_surface = surface_norm
+    return raw_surface, surface_norm
 
 
 def surface_to_group(surface: Any) -> str:
@@ -715,7 +849,7 @@ def build_osm_geometry_dataset(
         "[3/8] OSM/geometry features",
         total=len(edges_gdf),
     ):
-        surface_norm = normalize_surface_value(getattr(row, "surface", None))
+        surface_raw, surface_norm = _surface_values_from_edge_row(row)
         true_group = surface_to_group(surface_norm)
         item: Dict[str, Any] = {
             "edge_id": row.edge_id,
@@ -723,9 +857,9 @@ def build_osm_geometry_dataset(
             "v": str(row.v),
             "key": str(row.key),
             "length_m": float(getattr(row, "length_m", np.nan)),
-            "surface_raw": _first_osm_value(getattr(row, "surface", None)),
+            "surface_raw": surface_raw,
             "surface_norm": surface_norm or "unknown",
-            "surface_osm_raw": _first_osm_value(getattr(row, "surface", None)),
+            "surface_osm_raw": surface_raw,
             "surface_osm_norm": surface_norm or "unknown",
             "surface_true_concrete": surface_norm or "unknown",
             "surface_true_concrete_legacy": surface_norm or "unknown",
@@ -969,14 +1103,28 @@ def spatial_train_test_split(
     candidate_mask = dataset.get("is_train_candidate", dataset["is_surface_known"]).astype(bool)
     known = dataset[candidate_mask].copy()
     if len(known) < int(config.min_known_edges):
+        inside_train = dataset.get("inside_train_area", pd.Series(False, index=dataset.index)).astype(bool)
+        has_tiles = dataset.get("has_tile_features", pd.Series(False, index=dataset.index)).astype(bool)
+        surface_known = dataset.get("is_surface_known", pd.Series(False, index=dataset.index)).astype(bool)
+        diagnostics = {
+            "total_edges": int(len(dataset)),
+            "inside_train_area": int(inside_train.sum()),
+            "has_tile_features": int(has_tiles.sum()),
+            "known_surface_edges": int(surface_known.sum()),
+            "known_inside_train_area": int((inside_train & surface_known).sum()),
+            "known_with_tile_features": int((surface_known & has_tiles).sum()),
+            "known_inside_train_with_tile_features": int((inside_train & surface_known & has_tiles).sum()),
+        }
         raise ValueError(
             f"Not enough known train-candidate surface edges for training: found {len(known)}. "
-            f"Need at least {config.min_known_edges}."
+            f"Need at least {config.min_known_edges}. Diagnostics: {diagnostics}"
         )
     if known["surface_train_label"].nunique() < 2:
         raise ValueError("Need at least two concrete surface classes for training")
 
-    edge_lookup = edges_gdf.set_index("edge_id")
+    edge_lookup_df = edges_gdf.copy()
+    edge_lookup_df["edge_id"] = edge_lookup_df["edge_id"].map(lambda x: "" if pd.isna(x) else str(x).strip())
+    edge_lookup = edge_lookup_df.drop_duplicates("edge_id", keep="first").set_index("edge_id")
     known_edges = edge_lookup.loc[known["edge_id"].astype(str)].reset_index()
     projected = known_edges.to_crs(_utm_crs_for(known_edges))
     cent = projected.geometry.centroid
@@ -1212,6 +1360,7 @@ def _build_pipeline(
         if candidate in {
             "group_direct_combined_rf_class_weight_manual",
             "group_direct_combined_rf_paved_rough_weighted",
+            "group_direct_combined_rf_paved_rough_oversampled",
             "group_direct_combined_rf_threshold_tuned",
         }:
             cw = _manual_group_class_weight(config)
@@ -1302,6 +1451,7 @@ def _candidate_feature_set(candidate: str) -> str:
     if key in {
         "combined_rf_class_weight_manual",
         "combined_rf_paved_rough_weighted",
+        "combined_rf_paved_rough_oversampled",
         "combined_rf_threshold_tuned",
     }:
         return "combined"
@@ -1340,6 +1490,10 @@ def _candidate_display(candidate: str) -> Tuple[str, str]:
         "group_direct_combined_rf_paved_rough_weighted": (
             "Group direct RF manual weights (paved_rough emphasis)",
             "OSM + geometry + satellite; same RF weights as class_weight_manual until real oversampling exists",
+        ),
+        "group_direct_combined_rf_paved_rough_oversampled": (
+            "Group direct RF paved_rough oversampled",
+            "OSM + geometry + satellite; implemented as manual class weights",
         ),
         "group_direct_combined_rf_threshold_tuned": ("Group direct RF + post-hoc group thresholds", "OSM + geometry + satellite"),
     }
@@ -2439,6 +2593,16 @@ def dataset_summary(dataset: pd.DataFrame) -> Dict[str, Any]:
             ).sum()
         ),
         "train_known_surface_edges": int(dataset.get("is_train_candidate", pd.Series(False, index=dataset.index)).astype(bool).sum()),
+        "train_known_surface_edges_with_tile_features": int(
+            (
+                dataset.get("inside_train_area", pd.Series(False, index=dataset.index)).astype(bool)
+                & dataset["is_surface_known"].astype(bool)
+                & dataset.get("has_tile_features", pd.Series(False, index=dataset.index)).astype(bool)
+            ).sum()
+        ),
+        "train_known_surface_edges_osm_fallback": int(
+            dataset.get("is_train_candidate_osm_fallback", pd.Series(False, index=dataset.index)).astype(bool).sum()
+        ),
         "train_unknown_surface_edges": int(
             (
                 dataset.get("inside_train_area", pd.Series(False, index=dataset.index)).astype(bool)
@@ -3939,17 +4103,54 @@ def mark_dataset_area_flags(dataset: pd.DataFrame, config: SurfaceAIConfig) -> p
         df["has_tile_features"] = (sampled > 0) & (missing < 1.0)
     else:
         df["has_tile_features"] = True
-    df["is_train_candidate"] = (
+    known_inside_train = (
+        df["inside_train_area"].astype(bool)
+        & df["is_surface_known"].astype(bool)
+    )
+    strict_train_candidate = (
         df["inside_train_area"].astype(bool)
         & df["has_tile_features"].astype(bool)
         & df["is_surface_known"].astype(bool)
     )
+    df["train_candidate_fallback_reason"] = ""
+    df["is_train_candidate_osm_fallback"] = False
+    if int(strict_train_candidate.sum()) == 0 and int(known_inside_train.sum()) >= int(config.min_known_edges):
+        _log_surface_ai.warning(
+            "Surface AI: no known train candidates with tile features; "
+            "falling back to OSM/geometry features for %d known train-area edges",
+            int(known_inside_train.sum()),
+        )
+        df["is_train_candidate"] = known_inside_train
+        fallback_rows = known_inside_train & ~df["has_tile_features"].astype(bool)
+        df.loc[fallback_rows, "is_train_candidate_osm_fallback"] = True
+        df.loc[fallback_rows, "train_candidate_fallback_reason"] = "no_tile_features_osm_geometry_fallback"
+    else:
+        df["is_train_candidate"] = strict_train_candidate
     predict_area_mask = df["inside_predict_area"].astype(bool) if config.predict_only_inside_polygon else pd.Series(True, index=df.index)
-    df["is_prediction_candidate"] = (
+    strict_prediction_candidate = (
         predict_area_mask
         & df["has_tile_features"].astype(bool)
         & ~df["is_surface_known"].astype(bool)
     )
+    unknown_predict_area = predict_area_mask & ~df["is_surface_known"].astype(bool)
+    df["is_prediction_candidate_osm_fallback"] = False
+    if int(strict_prediction_candidate.sum()) == 0 and int(unknown_predict_area.sum()) > 0:
+        _log_surface_ai.warning(
+            "Surface AI: no unknown prediction candidates with tile features; "
+            "falling back to OSM/geometry features for %d unknown predict-area edges",
+            int(unknown_predict_area.sum()),
+        )
+        df["is_prediction_candidate"] = unknown_predict_area
+        fallback_rows = unknown_predict_area & ~df["has_tile_features"].astype(bool)
+        df.loc[fallback_rows, "is_prediction_candidate_osm_fallback"] = True
+        df.loc[fallback_rows, "train_candidate_fallback_reason"] = df.loc[
+            fallback_rows, "train_candidate_fallback_reason"
+        ].where(
+            df.loc[fallback_rows, "train_candidate_fallback_reason"].astype(str).str.len() > 0,
+            "no_tile_features_prediction_osm_geometry_fallback",
+        )
+    else:
+        df["is_prediction_candidate"] = strict_prediction_candidate
     df["surface_true"] = df["surface_true_concrete"].where(df["is_surface_known"].astype(bool), None)
     return df
 
@@ -4765,14 +4966,15 @@ def run_surface_ai_experiment(
     write_predictions_csv(predictions_inside, artifacts.predictions_inside_polygon_csv)
     if save_heavy_artifacts(config):
         write_predictions_geojson(predictions_inside, predict_edges, artifacts.predictions_inside_polygon_geojson)
-    write_runtime_router_predictions_from_experiment(
-        predictions_inside,
-        predict_edges,
-        settings=settings,
-        group_selected=group_selected,
-        artifacts=artifacts,
-        precache_polygon=precache_polygon,
-    )
+    if save_heavy_artifacts(config):
+        write_runtime_router_predictions_from_experiment(
+            predictions_inside,
+            predict_edges,
+            settings=settings,
+            group_selected=group_selected,
+            artifacts=artifacts,
+            precache_polygon=precache_polygon,
+        )
     write_baseline_tables(baseline_table, artifacts)
 
     tile_coverage = (

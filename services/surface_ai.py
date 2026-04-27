@@ -9,9 +9,11 @@ future integration, but the live graph is not mutated.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
+import subprocess
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -312,13 +314,27 @@ class SurfaceAIConfig:
         "group_direct_combined_rf_without_spatial_prior",
         "group_direct_combined_rf_balanced_without_spatial_prior",
         "group_direct_combined_rf_neighbor_features",
+        "group_direct_combined_rf_class_weight_manual",
+        "group_direct_combined_rf_paved_rough_oversampled",
+        "group_direct_combined_rf_threshold_tuned",
     )
     concrete_target_mode: str = "compact"
     group_target_mode: str = "3class_unpaved_hard_to_soft"
     train_direct_group_model: bool = True
     selection_metric: str = "macro_f1_safe"
+    group_selection_metric: str = "macro_f1_safe_rough_aware"
     dangerous_error_penalty: float = 0.50
     min_bad_surface_recall: float = 0.50
+    min_paved_rough_recall: float = 0.25
+    paved_rough_recall_weight: float = 0.25
+    unpaved_soft_recall_weight: float = 0.25
+    group_class_weight_mode: str = "balanced_manual"
+    group_class_weight_paved_good: float = 1.0
+    group_class_weight_paved_rough: float = 4.0
+    group_class_weight_unpaved_soft: float = 3.0
+    group_threshold_tuning: bool = True
+    paved_rough_min_proba: float = 0.25
+    unpaved_soft_min_proba: float = 0.35
     calibration_enabled: bool = True
     calibration_method: str = "sigmoid"
     calibration_share: float = 0.10
@@ -363,8 +379,17 @@ class SurfaceAIConfig:
     tile_edge_match_mode: str = "samples_and_buffer"
     edge_tile_buffer_m: float = 10.0
     compact_output: bool = True
+    output_mode: str = "compact"
     max_output_files: int = 20
+    compact_cleanup: bool = True
+    save_heavy_artifacts: bool = False
+    compact_allowed_extensions: Tuple[str, ...] = (".csv", ".xlsx", ".png")
     save_full_predictions_geojson: bool = False
+    run_holdout_leakage_checks: bool = True
+    holdout_split_mode: str = "grouped_geometry_or_way"
+    holdout_large_grid_m: float = 1000.0
+    mask_holdout_labels_for_neighbors: bool = True
+    prevent_directed_edge_leakage: bool = True
     use_satellite_features: bool = True
     sample_step_m: float = 7.0
     pixel_window: int = 5
@@ -403,15 +428,26 @@ class SurfaceAIConfig:
             group_model_candidates=_split_csv(
                 _env_str(
                     "SURFACE_AI_GROUP_MODEL_CANDIDATES",
-                    "group_direct_always_majority,group_direct_highway_heuristic,group_direct_osm_only_rf,group_direct_satellite_only_rf,group_direct_combined_rf,group_direct_combined_rf_balanced,group_direct_combined_rf_calibrated,group_direct_combined_rf_without_spatial_prior,group_direct_combined_rf_balanced_without_spatial_prior,group_direct_combined_rf_neighbor_features",
+                    "group_direct_always_majority,group_direct_highway_heuristic,group_direct_osm_only_rf,group_direct_satellite_only_rf,group_direct_combined_rf,group_direct_combined_rf_balanced,group_direct_combined_rf_calibrated,group_direct_combined_rf_without_spatial_prior,group_direct_combined_rf_balanced_without_spatial_prior,group_direct_combined_rf_neighbor_features,group_direct_combined_rf_class_weight_manual,group_direct_combined_rf_paved_rough_oversampled,group_direct_combined_rf_threshold_tuned",
                 )
             ),
             concrete_target_mode=_env_str("SURFACE_AI_CONCRETE_TARGET_MODE", "compact"),
             group_target_mode=_env_str("SURFACE_AI_GROUP_TARGET_MODE", "3class_unpaved_hard_to_soft"),
             train_direct_group_model=_env_bool("SURFACE_AI_TRAIN_DIRECT_GROUP_MODEL", True),
             selection_metric=_env_str("SURFACE_AI_SELECTION_METRIC", "macro_f1_safe"),
+            group_selection_metric=_env_str("SURFACE_AI_GROUP_SELECTION_METRIC", "macro_f1_safe_rough_aware"),
             dangerous_error_penalty=_env_float("SURFACE_AI_DANGEROUS_ERROR_PENALTY", 0.50),
             min_bad_surface_recall=_env_float("SURFACE_AI_MIN_BAD_SURFACE_RECALL", 0.50),
+            min_paved_rough_recall=_env_float("SURFACE_AI_MIN_PAVED_ROUGH_RECALL", 0.25),
+            paved_rough_recall_weight=_env_float("SURFACE_AI_PAVED_ROUGH_RECALL_WEIGHT", 0.25),
+            unpaved_soft_recall_weight=_env_float("SURFACE_AI_UNPAVED_SOFT_RECALL_WEIGHT", 0.25),
+            group_class_weight_mode=_env_str("SURFACE_AI_GROUP_CLASS_WEIGHT_MODE", "balanced_manual"),
+            group_class_weight_paved_good=_env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_PAVED_GOOD", 1.0),
+            group_class_weight_paved_rough=_env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_PAVED_ROUGH", 4.0),
+            group_class_weight_unpaved_soft=_env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_UNPAVED_SOFT", 3.0),
+            group_threshold_tuning=_env_bool("SURFACE_AI_GROUP_THRESHOLD_TUNING", True),
+            paved_rough_min_proba=_env_float("SURFACE_AI_PAVED_ROUGH_MIN_PROBA", 0.25),
+            unpaved_soft_min_proba=_env_float("SURFACE_AI_UNPAVED_SOFT_MIN_PROBA", 0.35),
             calibration_enabled=_env_bool("SURFACE_AI_CALIBRATION_ENABLED", True),
             calibration_method=_env_str("SURFACE_AI_CALIBRATION_METHOD", "sigmoid"),
             calibration_share=_env_float("SURFACE_AI_CALIBRATION_SHARE", 0.10),
@@ -459,8 +495,17 @@ class SurfaceAIConfig:
             tile_edge_match_mode=_env_str("SURFACE_AI_TILE_EDGE_MATCH_MODE", "samples_and_buffer"),
             edge_tile_buffer_m=_env_float("SURFACE_AI_EDGE_TILE_BUFFER_M", 10.0),
             compact_output=_env_bool("SURFACE_AI_COMPACT_OUTPUT", True),
+            output_mode=_env_str("SURFACE_AI_OUTPUT_MODE", "compact"),
             max_output_files=_env_int("SURFACE_AI_MAX_OUTPUT_FILES", 20),
+            compact_cleanup=_env_bool("SURFACE_AI_COMPACT_CLEANUP", True),
+            save_heavy_artifacts=_env_bool("SURFACE_AI_SAVE_HEAVY_ARTIFACTS", False),
+            compact_allowed_extensions=_split_csv(_env_str("SURFACE_AI_COMPACT_ALLOWED_EXTENSIONS", ".csv,.xlsx,.png")),
             save_full_predictions_geojson=_env_bool("SURFACE_AI_SAVE_FULL_PREDICTIONS_GEOJSON", False),
+            run_holdout_leakage_checks=_env_bool("SURFACE_AI_RUN_HOLDOUT_LEAKAGE_CHECKS", True),
+            holdout_split_mode=_env_str("SURFACE_AI_HOLDOUT_SPLIT_MODE", "grouped_geometry_or_way"),
+            holdout_large_grid_m=_env_float("SURFACE_AI_HOLDOUT_LARGE_GRID_M", 1000.0),
+            mask_holdout_labels_for_neighbors=_env_bool("SURFACE_AI_MASK_HOLDOUT_LABELS_FOR_NEIGHBORS", True),
+            prevent_directed_edge_leakage=_env_bool("SURFACE_AI_PREVENT_DIRECTED_EDGE_LEAKAGE", True),
             use_satellite_features=_env_bool("SURFACE_AI_USE_SATELLITE_FEATURES", True),
             sample_step_m=_env_float("SURFACE_AI_SAMPLE_STEP_M", 7.0),
             pixel_window=_env_int("SURFACE_AI_PIXEL_WINDOW", 5),
@@ -531,6 +576,14 @@ class SurfaceAIArtifacts:
     tile_usage_map_train_png: Path
     tile_usage_map_predict_png: Path
     train_vs_predict_report_txt: Path
+    dangerous_errors_global_test_csv: Path
+    dangerous_errors_predict_holdout_csv: Path
+    dangerous_errors_global_test_raw_png: Path
+    dangerous_errors_global_test_effective_png: Path
+    dangerous_errors_predict_holdout_raw_png: Path
+    dangerous_errors_predict_holdout_effective_png: Path
+    unknown_risk_map_png: Path
+    run_summary_csv: Path
 
 
 def normalize_surface_value(raw: Any) -> Optional[str]:
@@ -698,6 +751,24 @@ def _geometry_features_with_center(
     return item
 
 
+def _short_hash(value: str) -> str:
+    return hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def _rounded_geometry_hash(geometry: Any, precision: int = 6) -> str:
+    if geometry is None:
+        return "none"
+    try:
+        coords = []
+        for x, y in list(geometry.coords):
+            coords.append((round(float(x), precision), round(float(y), precision)))
+        forward = "|".join(f"{x:.{precision}f},{y:.{precision}f}" for x, y in coords)
+        backward = "|".join(f"{x:.{precision}f},{y:.{precision}f}" for x, y in reversed(coords))
+        return _short_hash(min(forward, backward))
+    except Exception:
+        return _short_hash(getattr(geometry, "wkt", str(geometry)))
+
+
 def build_osm_geometry_dataset(
     edges_gdf: gpd.GeoDataFrame,
     polygon: Any,
@@ -737,10 +808,14 @@ def build_osm_geometry_dataset(
             "surface_group_true": true_group,
             "is_surface_known": bool(surface_norm in CONCRETE_SURFACE_VALUES),
             "geometry_wkt": row.geometry.wkt if row.geometry is not None else None,
+            "geometry_hash_rounded": _rounded_geometry_hash(row.geometry),
+            "osm_way_id": _first_osm_value(getattr(row, "osmid", None)),
             "inside_train_area": bool(getattr(row, "inside_train_area", False)),
             "inside_predict_area": bool(getattr(row, "inside_predict_area", False)),
             "surface_ai_edge_source": getattr(row, "surface_ai_edge_source", None),
         }
+        uv = sorted([str(row.u), str(row.v)])
+        item["undirected_edge_key"] = f"{uv[0]}:{uv[1]}:{item['geometry_hash_rounded']}"
         for col in AI_OSM_FEATURES:
             item[col] = _norm_feature(getattr(row, col, None))
         item.update(_geometry_features_with_center(row, projected_geom, center))
@@ -877,7 +952,7 @@ def add_neighbor_features(dataset: pd.DataFrame) -> pd.DataFrame:
     lookup = df.set_index("edge_id", drop=False)
     allowed_known = (
         lookup["is_surface_known"].astype(bool)
-        & (lookup.get("surface_ai_split", pd.Series("", index=lookup.index)) != "test")
+        & ~lookup.get("surface_ai_split", pd.Series("", index=lookup.index)).isin({"test", "predict_holdout"})
     )
 
     def summarize(edge_id: str, neigh_ids: set[str], hop: int, base_highway: str) -> Dict[str, float]:
@@ -1019,11 +1094,35 @@ def spatial_train_test_split(
             (split.loc[known.index] == "train").to_numpy()
             & dataset.loc[known.index, "inside_predict_area"].astype(bool).to_numpy()
         ]
-        holdout_n = int(round(len(train_inside) * holdout_share))
-        if holdout_n > 0 and len(train_inside) > holdout_n:
+        if len(train_inside) > 1:
             rng = np.random.default_rng(int(config.random_state) + 17)
-            chosen = rng.choice(np.array(train_inside), size=holdout_n, replace=False)
-            split.loc[chosen] = "predict_holdout"
+            mode = str(config.holdout_split_mode or "grouped_geometry_or_way")
+            if mode in {"grouped_geometry", "grouped_osm_way", "grouped_geometry_or_way"}:
+                if mode == "grouped_osm_way" and "osm_way_id" in dataset.columns:
+                    groups = dataset.loc[train_inside, "osm_way_id"].fillna("").astype(str)
+                elif mode == "grouped_geometry_or_way":
+                    way = dataset.loc[train_inside, "osm_way_id"].fillna("").astype(str) if "osm_way_id" in dataset.columns else pd.Series("", index=train_inside)
+                    geom = dataset.loc[train_inside, "geometry_hash_rounded"].fillna("").astype(str)
+                    undirected = dataset.loc[train_inside, "undirected_edge_key"].fillna("").astype(str)
+                    groups = way.where(way.str.len() > 0, undirected.where(undirected.str.len() > 0, geom))
+                else:
+                    groups = dataset.loc[train_inside, "geometry_hash_rounded"].fillna("").astype(str)
+                unique_groups = np.array(sorted(groups.unique()))
+                rng.shuffle(unique_groups)
+                group_target = max(1, int(round(len(unique_groups) * holdout_share)))
+                chosen_groups = set(unique_groups[:group_target])
+                chosen = groups[groups.isin(chosen_groups)].index.to_numpy()
+            else:
+                holdout_n = int(round(len(train_inside) * holdout_share))
+                chosen = rng.choice(np.array(train_inside), size=max(1, holdout_n), replace=False) if holdout_n > 0 else np.array([])
+            if len(chosen):
+                split.loc[chosen] = "predict_holdout"
+                if bool(config.prevent_directed_edge_leakage) and "undirected_edge_key" in dataset.columns:
+                    keys = set(dataset.loc[chosen, "undirected_edge_key"].dropna().astype(str))
+                    peer_idx = known.index[
+                        dataset.loc[known.index, "undirected_edge_key"].astype(str).isin(keys).to_numpy()
+                    ]
+                    split.loc[peer_idx] = "predict_holdout"
     if (split == "train").sum() == 0 or (split == "test").sum() == 0:
         raise ValueError("Spatial split produced an empty train or test partition")
     return split
@@ -1104,6 +1203,15 @@ def _rf(config: SurfaceAIConfig, *, class_weight: Optional[str]) -> RandomForest
     )
 
 
+def _manual_group_class_weight(config: SurfaceAIConfig) -> Dict[str, float]:
+    return {
+        "paved_good": float(config.group_class_weight_paved_good),
+        "paved_rough": float(config.group_class_weight_paved_rough),
+        "unpaved_soft": float(config.group_class_weight_unpaved_soft),
+        "rough_or_unpaved": float(config.group_class_weight_unpaved_soft),
+    }
+
+
 def _build_pipeline(candidate: str, feature_set: str, config: SurfaceAIConfig) -> Pipeline:
     _, cat_cols, num_cols = _features_for_model(pd.DataFrame(), feature_set)
     preprocessor = _build_preprocessor(cat_cols, num_cols)
@@ -1112,7 +1220,7 @@ def _build_pipeline(candidate: str, feature_set: str, config: SurfaceAIConfig) -
     elif candidate == "combined_logistic_regression":
         model = LogisticRegression(max_iter=1000, class_weight="balanced", n_jobs=-1)
     else:
-        cw = None
+        cw: Any = None
         if candidate in {
             "combined_rf_balanced",
             "combined_balanced_random_forest",
@@ -1121,6 +1229,12 @@ def _build_pipeline(candidate: str, feature_set: str, config: SurfaceAIConfig) -
             "group_direct_combined_rf_balanced_without_spatial_prior",
         }:
             cw = config.rf_class_weight or "balanced_subsample"
+        if candidate in {
+            "group_direct_combined_rf_class_weight_manual",
+            "group_direct_combined_rf_paved_rough_oversampled",
+            "group_direct_combined_rf_threshold_tuned",
+        }:
+            cw = _manual_group_class_weight(config)
         model = _rf(config, class_weight=cw)
     return Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
@@ -1205,6 +1319,12 @@ def _candidate_feature_set(candidate: str) -> str:
         return "combined_without_spatial_prior"
     if key in {"combined_rf_with_neighbors", "combined_with_neighbors", "combined_rf_neighbor_features"}:
         return "combined_with_neighbors"
+    if key in {
+        "combined_rf_class_weight_manual",
+        "combined_rf_paved_rough_oversampled",
+        "combined_rf_threshold_tuned",
+    }:
+        return "combined"
     if key == "highway_heuristic":
         return "osm"
     return "none"
@@ -1236,6 +1356,9 @@ def _candidate_display(candidate: str) -> Tuple[str, str]:
         "group_direct_combined_rf_balanced_without_spatial_prior": ("Group direct Combined balanced RF without spatial prior", "OSM + geometry + satellite - spatial prior"),
         "group_direct_combined_rf_neighbor_features": ("Group direct RF + neighbor features", "OSM + geometry + satellite + neighbors"),
         "group_direct_combined_rf_with_neighbors": ("Group direct RF + neighbor features", "OSM + geometry + satellite + neighbors"),
+        "group_direct_combined_rf_class_weight_manual": ("Group direct RF manual rough weights", "OSM + geometry + satellite"),
+        "group_direct_combined_rf_paved_rough_oversampled": ("Group direct RF rough oversampled", "OSM + geometry + satellite"),
+        "group_direct_combined_rf_threshold_tuned": ("Group direct RF threshold tuned", "OSM + geometry + satellite"),
     }
     return mapping.get(candidate, (candidate, _candidate_feature_set(candidate)))
 
@@ -1287,6 +1410,10 @@ def _group_metrics_for_predictions(y_true: Sequence[str], y_pred: Sequence[str])
     report = classification_report(ytg, ypg, labels=labels, zero_division=0, output_dict=True)
     bad_mask = pd.Series(ytg).isin({"unpaved_hard", "unpaved_soft", "rough_or_unpaved"})
     pred_bad = pd.Series(ypg).isin({"unpaved_hard", "unpaved_soft", "rough_or_unpaved"})
+    true_s = pd.Series(ytg)
+    pred_s = pd.Series(ypg)
+    rough_mask = true_s == "paved_rough"
+    rough_to_good = rough_mask & (pred_s == "paved_good")
     return {
         "target": "group",
         "accuracy": float(accuracy_score(ytg, ypg)),
@@ -1295,6 +1422,11 @@ def _group_metrics_for_predictions(y_true: Sequence[str], y_pred: Sequence[str])
         "weighted_f1": float(f1_score(ytg, ypg, average="weighted", zero_division=0)),
         "recall_bad_surface": float(pred_bad[bad_mask].mean()) if bad_mask.any() else 0.0,
         "recall_unpaved_soft": float(report.get("unpaved_soft", {}).get("recall", 0.0)),
+        "recall_paved_rough": float(report.get("paved_rough", {}).get("recall", 0.0)),
+        "precision_paved_rough": float(report.get("paved_rough", {}).get("precision", 0.0)),
+        "f1_paved_rough": float(report.get("paved_rough", {}).get("f1-score", 0.0)),
+        "paved_rough_to_paved_good_count": int(rough_to_good.sum()),
+        "paved_rough_to_paved_good_rate": float(rough_to_good.mean()) if rough_mask.any() else 0.0,
         "classification_report": report,
         "confusion_matrix_labels": labels,
         "confusion_matrix": confusion_matrix(ytg, ypg, labels=labels).astype(int).tolist(),
@@ -1351,6 +1483,15 @@ def dangerous_upgrade_metrics(
 def macro_f1_safe(metrics: Dict[str, Any], config: SurfaceAIConfig) -> float:
     return float(metrics.get("macro_f1", 0.0)) - float(config.dangerous_error_penalty) * float(
         metrics.get("dangerous_upgrade_rate_effective", 0.0)
+    )
+
+
+def macro_f1_safe_rough_aware(metrics: Dict[str, Any], config: SurfaceAIConfig) -> float:
+    return (
+        float(metrics.get("macro_f1", 0.0))
+        + float(config.unpaved_soft_recall_weight) * float(metrics.get("recall_unpaved_soft", 0.0))
+        + float(config.paved_rough_recall_weight) * float(metrics.get("recall_paved_rough", 0.0))
+        - float(config.dangerous_error_penalty) * float(metrics.get("dangerous_upgrade_rate_effective", 0.0))
     )
 
 
@@ -1565,6 +1706,43 @@ def _proba_top_fields(proba: pd.DataFrame) -> Tuple[List[str], List[float], List
     return labels, conf, labels2, conf2, margins
 
 
+def _tuned_group_top_fields(
+    proba: pd.DataFrame,
+    config: SurfaceAIConfig,
+    *,
+    candidate: str,
+) -> Tuple[List[str], List[float], List[str], List[float], List[float]]:
+    pred, conf, top2, top2_conf, margin = _proba_top_fields(proba)
+    if not (config.group_threshold_tuning or "threshold_tuned" in candidate):
+        return pred, conf, top2, top2_conf, margin
+    tuned: List[str] = []
+    tuned_conf: List[float] = []
+    tuned_top2: List[str] = []
+    tuned_top2_conf: List[float] = []
+    tuned_margin: List[float] = []
+    for idx, row in proba.iterrows():
+        ordered = row.sort_values(ascending=False)
+        chosen = str(ordered.index[0]) if len(ordered) else "unknown"
+        if chosen == "paved_good":
+            rough_p = float(row.get("paved_rough", 0.0))
+            soft_p = float(row.get("unpaved_soft", 0.0))
+            top_p = float(ordered.iloc[0]) if len(ordered) else 0.0
+            if soft_p >= float(config.unpaved_soft_min_proba) and (top_p - soft_p) <= 0.50:
+                chosen = "unpaved_soft"
+            elif rough_p >= float(config.paved_rough_min_proba) and (top_p - rough_p) <= 0.50:
+                chosen = "paved_rough"
+        c = float(row.get(chosen, 0.0))
+        others = row.drop(labels=[chosen], errors="ignore").sort_values(ascending=False)
+        second = str(others.index[0]) if len(others) else "unknown"
+        c2 = float(others.iloc[0]) if len(others) else 0.0
+        tuned.append(chosen)
+        tuned_conf.append(c)
+        tuned_top2.append(second)
+        tuned_top2_conf.append(c2)
+        tuned_margin.append(c - c2)
+    return tuned, tuned_conf, tuned_top2, tuned_top2_conf, tuned_margin
+
+
 def evaluate_task_model(
     *,
     candidate: str,
@@ -1580,7 +1758,10 @@ def evaluate_task_model(
     else:
         X_test, _, _ = _features_for_model(test, feature_set if feature_set != "none" else "osm")
     proba = _predict_model_proba(model, X_test, labels)
-    pred, conf, _, _, margin = _proba_top_fields(proba)
+    if target == "group_direct":
+        pred, conf, _, _, margin = _tuned_group_top_fields(proba, config, candidate=candidate)
+    else:
+        pred, conf, _, _, margin = _proba_top_fields(proba)
     if target == "group_direct":
         y_true = test["surface_group_direct_label"].astype(str).tolist()
         true_groups = y_true
@@ -1607,7 +1788,16 @@ def evaluate_task_model(
             test["length_m"].astype(float).tolist(),
         )
     )
+    rough_effective_mask = [
+        t == "paved_rough" and p == "paved_good"
+        for t, p in zip(true_groups, effective_groups)
+    ]
+    lengths = pd.to_numeric(test["length_m"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    rough_true_count = sum(1 for t in true_groups if t == "paved_rough")
+    metrics["rough_upgrade_rate_effective"] = float(sum(rough_effective_mask) / rough_true_count) if rough_true_count else 0.0
+    metrics["rough_upgrade_length_m_effective"] = float(lengths[np.asarray(rough_effective_mask, dtype=bool)].sum()) if len(lengths) else 0.0
     metrics["macro_f1_safe"] = macro_f1_safe(metrics, config)
+    metrics["macro_f1_safe_rough_aware"] = macro_f1_safe_rough_aware(metrics, config)
     metrics["confusion_matrix_labels"] = report_labels if target != "group_direct" else list(labels)
     details = pd.DataFrame(
         {
@@ -1674,8 +1864,16 @@ def train_evaluate_task_models(
                 "macro_f1": metrics.get("macro_f1", 0.0),
                 "weighted_f1": metrics.get("weighted_f1", 0.0),
                 "macro_f1_safe": metrics.get("macro_f1_safe", 0.0),
+                "macro_f1_safe_rough_aware": metrics.get("macro_f1_safe_rough_aware", 0.0),
                 "recall_bad_surface": metrics.get("recall_bad_surface", 0.0),
                 "recall_unpaved_soft": metrics.get("recall_unpaved_soft", 0.0),
+                "recall_paved_rough": metrics.get("recall_paved_rough", np.nan),
+                "precision_paved_rough": metrics.get("precision_paved_rough", np.nan),
+                "f1_paved_rough": metrics.get("f1_paved_rough", np.nan),
+                "paved_rough_to_paved_good_count": metrics.get("paved_rough_to_paved_good_count", 0),
+                "paved_rough_to_paved_good_rate": metrics.get("paved_rough_to_paved_good_rate", 0.0),
+                "rough_upgrade_rate_effective": metrics.get("rough_upgrade_rate_effective", 0.0),
+                "rough_upgrade_length_m_effective": metrics.get("rough_upgrade_length_m_effective", 0.0),
                 "recall_asphalt": metrics.get("recall_asphalt", np.nan),
                 "recall_concrete": metrics.get("recall_concrete", np.nan),
                 "recall_paving_stones": metrics.get("recall_paving_stones", np.nan),
@@ -1702,16 +1900,29 @@ def select_model_for_target(models: Dict[str, Any], table: pd.DataFrame, config:
     if table.empty:
         raise ValueError(f"No models evaluated for {target}")
     if target == "group_direct":
-        ranked = table.sort_values(
-            by=[
-                "dangerous_upgrade_rate_effective",
-                "macro_f1",
-                "recall_bad_surface",
-                "recall_unpaved_soft",
-            ],
-            ascending=[True, False, False, False],
-        )
-        selected_by = "min_dangerous_upgrade_rate_effective_then_macro_f1"
+        metric = config.group_selection_metric if config.group_selection_metric in table.columns else "macro_f1_safe_rough_aware"
+        ranked = table.copy()
+        selected_by = metric
+        if metric == "macro_f1_safe_rough_aware":
+            ranked = ranked.sort_values(
+                by=[
+                    metric,
+                    "dangerous_upgrade_rate_effective",
+                    "recall_paved_rough",
+                    "recall_unpaved_soft",
+                ],
+                ascending=[False, True, False, False],
+            )
+        else:
+            ranked = ranked.sort_values(
+                by=[
+                    "dangerous_upgrade_rate_effective",
+                    "macro_f1",
+                    "recall_bad_surface",
+                    "recall_unpaved_soft",
+                ],
+                ascending=[True, False, False, False],
+            )
     else:
         metric = config.selection_metric
         if metric not in table.columns:
@@ -1732,6 +1943,11 @@ def select_model_for_target(models: Dict[str, Any], table: pd.DataFrame, config:
         "metrics": models[key]["metrics"],
         "labels": models[key]["labels"],
         "target": target,
+        "warnings": [
+            "WARNING: no group_direct model satisfies paved_rough recall threshold. paved_rough should not be trusted for routing yet."
+        ]
+        if target == "group_direct" and float(table.get("recall_paved_rough", pd.Series([0.0])).max()) < float(config.min_paved_rough_recall)
+        else [],
     }
 
 
@@ -2021,8 +2237,8 @@ def predict_all_edges(
 
     concrete_pred_raw, concrete_conf_raw, _, _, concrete_margin_raw = _proba_top_fields(concrete_proba_raw)
     concrete_pred, concrete_conf, concrete_top2, concrete_top2_conf, concrete_margin = _proba_top_fields(concrete_proba)
-    group_pred_raw, group_conf_raw, _, _, group_margin_raw = _proba_top_fields(group_proba_raw)
-    group_pred, group_conf, group_top2, group_top2_conf, group_margin = _proba_top_fields(group_proba)
+    group_pred_raw, group_conf_raw, _, _, group_margin_raw = _tuned_group_top_fields(group_proba_raw, config, candidate=group_key)
+    group_pred, group_conf, group_top2, group_top2_conf, group_margin = _tuned_group_top_fields(group_proba, config, candidate=group_key)
 
     out = dataset.copy()
     out["surface_pred_label"] = concrete_pred
@@ -2172,36 +2388,36 @@ def artifact_paths(output_dir: Path) -> SurfaceAIArtifacts:
         dataset_csv=output_dir / "surface_ai_dataset.csv",
         predictions_csv=output_dir / "surface_ai_predictions.csv",
         predictions_geojson=output_dir / "surface_ai_predictions.geojson",
-        baseline_csv=output_dir / "surface_ai_baseline_table.csv",
-        baseline_xlsx=output_dir / "surface_ai_results.xlsx",
-        baseline_png=output_dir / "surface_ai_baseline_table.png",
+        baseline_csv=output_dir / "02_surface_ai_baseline_table.csv",
+        baseline_xlsx=output_dir / "01_surface_ai_results.xlsx",
+        baseline_png=output_dir / "09_surface_ai_baseline_table.png",
         metrics_json=output_dir / "surface_ai_metrics.json",
         model_joblib=output_dir / "surface_ai_model.joblib",
         model_card_json=output_dir / "surface_ai_model_card.json",
         report_txt=output_dir / "surface_ai_report.txt",
-        surface_map_png=output_dir / "surface_ai_surface_map.png",
-        confidence_map_png=output_dir / "surface_ai_confidence_map.png",
-        unknown_predictions_map_png=output_dir / "surface_ai_unknown_predictions_map.png",
-        errors_map_png=output_dir / "surface_ai_errors_map.png",
+        surface_map_png=output_dir / "10_surface_ai_surface_map.png",
+        confidence_map_png=output_dir / "12_surface_ai_confidence_map.png",
+        unknown_predictions_map_png=output_dir / "11_surface_ai_unknown_risk_map.png",
+        errors_map_png=output_dir / "20_surface_ai_errors_map.png",
         confusion_matrix_concrete_png=output_dir / "surface_ai_confusion_matrix_concrete.png",
         confusion_matrix_group_png=output_dir / "surface_ai_confusion_matrix_group.png",
-        feature_importance_png=output_dir / "surface_ai_feature_importance.png",
-        confusion_matrix_concrete_compact_png=output_dir / "surface_ai_confusion_matrix_concrete_compact.png",
+        feature_importance_png=output_dir / "16_surface_ai_feature_importance.png",
+        confusion_matrix_concrete_compact_png=output_dir / "14_surface_ai_confusion_matrix_concrete_compact.png",
         confusion_matrix_concrete_legacy_png=output_dir / "surface_ai_confusion_matrix_concrete_legacy.png",
-        confusion_matrix_group_direct_png=output_dir / "surface_ai_confusion_matrix_group_direct.png",
+        confusion_matrix_group_direct_png=output_dir / "15_surface_ai_confusion_matrix_group_direct.png",
         group_direct_model_joblib=output_dir / "surface_ai_group_direct_model.joblib",
         group_direct_model_card_json=output_dir / "surface_ai_group_direct_model_card.json",
         group_direct_metrics_json=output_dir / "surface_ai_group_direct_metrics.json",
         calibration_curve_concrete_png=output_dir / "surface_ai_calibration_curve_concrete.png",
-        calibration_curve_group_direct_png=output_dir / "surface_ai_calibration_curve_group_direct.png",
+        calibration_curve_group_direct_png=output_dir / "17_surface_ai_calibration_curve_group_direct.png",
         reliability_table_concrete_csv=output_dir / "surface_ai_reliability_table_concrete.csv",
-        reliability_table_group_direct_csv=output_dir / "surface_ai_reliability_table_group_direct.csv",
+        reliability_table_group_direct_csv=output_dir / "07_surface_ai_reliability_table_group_direct.csv",
         dangerous_errors_map_raw_png=output_dir / "surface_ai_dangerous_errors_map_raw.png",
         dangerous_errors_map_effective_png=output_dir / "surface_ai_dangerous_errors_map_effective.png",
         dangerous_errors_csv=output_dir / "surface_ai_dangerous_errors.csv",
         spatial_prior_ablation_txt=output_dir / "surface_ai_spatial_prior_ablation.txt",
-        tile_usage_csv=output_dir / "surface_ai_tile_usage.csv",
-        tile_usage_map_png=output_dir / "surface_ai_tile_usage_map.png",
+        tile_usage_csv=output_dir / "04_surface_ai_tile_usage.csv",
+        tile_usage_map_png=output_dir / "13_surface_ai_tile_usage_map.png",
         neighbor_feature_importance_png=output_dir / "surface_ai_neighbor_feature_importance.png",
         train_polygon_geojson=output_dir / "surface_ai_train_polygon.geojson",
         predict_polygon_geojson=output_dir / "surface_ai_predict_polygon.geojson",
@@ -2209,17 +2425,41 @@ def artifact_paths(output_dir: Path) -> SurfaceAIArtifacts:
         train_edges_geojson=output_dir / "surface_ai_train_edges.geojson",
         predict_edges_geojson=output_dir / "surface_ai_predict_edges.geojson",
         dataset_all_tile_edges_csv=output_dir / "surface_ai_dataset_all_tile_edges.csv",
-        predictions_inside_polygon_csv=output_dir / "surface_ai_predictions_inside_polygon.csv",
+        predictions_inside_polygon_csv=output_dir / "03_surface_ai_predictions_inside_polygon.csv",
         predictions_inside_polygon_geojson=output_dir / "surface_ai_predictions_inside_polygon.geojson",
         tile_usage_map_train_png=output_dir / "surface_ai_tile_usage_map_train.png",
         tile_usage_map_predict_png=output_dir / "surface_ai_tile_usage_map_predict.png",
         train_vs_predict_report_txt=output_dir / "surface_ai_train_vs_predict_report.txt",
+        dangerous_errors_global_test_csv=output_dir / "05_surface_ai_dangerous_errors_global_test.csv",
+        dangerous_errors_predict_holdout_csv=output_dir / "06_surface_ai_dangerous_errors_predict_holdout.csv",
+        dangerous_errors_global_test_raw_png=output_dir / "surface_ai_dangerous_errors_global_test_raw.png",
+        dangerous_errors_global_test_effective_png=output_dir / "18_surface_ai_dangerous_errors_global_test_effective.png",
+        dangerous_errors_predict_holdout_raw_png=output_dir / "surface_ai_dangerous_errors_predict_holdout_raw.png",
+        dangerous_errors_predict_holdout_effective_png=output_dir / "19_surface_ai_dangerous_errors_predict_holdout_effective.png",
+        unknown_risk_map_png=output_dir / "11_surface_ai_unknown_risk_map.png",
+        run_summary_csv=output_dir / "08_surface_ai_run_summary.csv",
     )
 
 
 def write_dataset_csv(dataset: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     dataset.to_csv(path, index=False, encoding="utf-8")
+
+
+def is_compact_output(config: SurfaceAIConfig) -> bool:
+    mode = str(config.output_mode or "").lower()
+    if mode in {"compact", "full"}:
+        return mode == "compact"
+    return bool(config.compact_output)
+
+
+def save_heavy_artifacts(config: SurfaceAIConfig) -> bool:
+    mode = str(config.output_mode or "").lower()
+    if mode == "full":
+        return True
+    if mode == "compact":
+        return False
+    return bool(config.save_heavy_artifacts)
 
 
 def prediction_columns(predictions: pd.DataFrame) -> List[str]:
@@ -2331,14 +2571,8 @@ def write_edges_geojson(edges_gdf: gpd.GeoDataFrame, path: Path) -> None:
 
 
 def write_baseline_tables(baseline_table: pd.DataFrame, artifacts: SurfaceAIArtifacts) -> None:
-    with pd.ExcelWriter(artifacts.baseline_xlsx, engine="openpyxl") as writer:
-        baseline_table.to_excel(writer, sheet_name="all", index=False)
-        baseline_table[baseline_table["target"].astype(str).str.contains("concrete")].to_excel(
-            writer, sheet_name="concrete", index=False
-        )
-        baseline_table[baseline_table["target"].astype(str).str.contains("group")].to_excel(
-            writer, sheet_name="groups", index=False
-        )
+    baseline_table.to_csv(artifacts.baseline_csv, index=False, encoding="utf-8")
+    plot_baseline_table_png(baseline_table, artifacts.baseline_png)
 
 
 def _flat_dict_frame(data: Dict[str, Any]) -> pd.DataFrame:
@@ -2362,27 +2596,40 @@ def write_results_workbook(
     holdout_metrics: Dict[str, Any],
     calibration_metrics: Dict[str, Any],
     dangerous_metrics: Dict[str, Any],
+    predictions_inside: Optional[pd.DataFrame] = None,
+    dangerous_global: Optional[pd.DataFrame] = None,
+    dangerous_holdout: Optional[pd.DataFrame] = None,
+    run_config: Optional[Dict[str, Any]] = None,
+    artifact_manifest: Optional[pd.DataFrame] = None,
 ) -> None:
     with pd.ExcelWriter(artifacts.baseline_xlsx, engine="openpyxl") as writer:
-        baseline_table.to_excel(writer, sheet_name="models_all", index=False)
+        _flat_dict_frame(summary).to_excel(writer, sheet_name="summary", index=False)
+        baseline_table.to_excel(writer, sheet_name="baseline", index=False)
+        _flat_dict_frame({"selected_model": selected}).to_excel(writer, sheet_name="selected_model", index=False)
+        _flat_dict_frame({"group_direct": group_selected}).to_excel(writer, sheet_name="group_direct", index=False)
+        _flat_dict_frame({"concrete_compact": selected}).to_excel(writer, sheet_name="concrete_compact", index=False)
+        if predictions_inside is not None:
+            predictions_inside.head(5000).to_excel(writer, sheet_name="predict_inside_polygon", index=False)
+        _flat_dict_frame(tile_coverage).to_excel(writer, sheet_name="tile_usage_summary", index=False)
+        danger_summary = dict(dangerous_metrics)
+        danger_summary["global_test_rows"] = int(len(dangerous_global)) if dangerous_global is not None else 0
+        danger_summary["predict_holdout_rows"] = int(len(dangerous_holdout)) if dangerous_holdout is not None else 0
+        _flat_dict_frame(danger_summary).to_excel(writer, sheet_name="dangerous_errors_summary", index=False)
+        _flat_dict_frame(calibration_metrics.get("group_direct", calibration_metrics) if isinstance(calibration_metrics, dict) else {}).to_excel(
+            writer, sheet_name="calibration_group_direct", index=False
+        )
+        _flat_dict_frame(holdout_metrics).to_excel(writer, sheet_name="holdout_checks", index=False)
+        _flat_dict_frame(run_config or {}).to_excel(writer, sheet_name="run_config", index=False)
+        if artifact_manifest is not None:
+            artifact_manifest.to_excel(writer, sheet_name="artifact_manifest", index=False)
+        # Compatibility/detail sheets.
         baseline_table[baseline_table["target"].astype(str).str.contains("concrete")].to_excel(
             writer, sheet_name="models_concrete", index=False
         )
         baseline_table[baseline_table["target"].astype(str).str.contains("group")].to_excel(
             writer, sheet_name="models_group", index=False
         )
-        _flat_dict_frame(summary).to_excel(writer, sheet_name="dataset_summary", index=False)
         _flat_dict_frame(area_meta).to_excel(writer, sheet_name="areas", index=False)
-        _flat_dict_frame(tile_coverage).to_excel(writer, sheet_name="tile_usage", index=False)
-        _flat_dict_frame(dangerous_metrics).to_excel(writer, sheet_name="dangerous_errors", index=False)
-        _flat_dict_frame(calibration_metrics).to_excel(writer, sheet_name="calibration", index=False)
-        _flat_dict_frame(holdout_metrics).to_excel(writer, sheet_name="holdout", index=False)
-        _flat_dict_frame(
-            {
-                "selected_model": selected,
-                "selected_group_direct_model": group_selected,
-            }
-        ).to_excel(writer, sheet_name="selected_models", index=False)
 
 
 def plot_baseline_table_png(baseline_table: pd.DataFrame, path: Path) -> None:
@@ -2452,6 +2699,153 @@ def compact_experiment_outputs(artifacts: SurfaceAIArtifacts, config: SurfaceAIC
                 pass
 
 
+def artifact_manifest(output_dir: Path) -> pd.DataFrame:
+    rows = []
+    for path in sorted(output_dir.iterdir(), key=lambda p: p.name):
+        if not path.is_file():
+            continue
+        rows.append(
+            {
+                "filename": path.name,
+                "type": path.suffix.lower().lstrip("."),
+                "description": "Surface AI experiment artifact",
+                "created": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+                "rows_if_table": "",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def expected_compact_manifest(artifacts: SurfaceAIArtifacts) -> pd.DataFrame:
+    files = [
+        (artifacts.baseline_xlsx, "xlsx", "Main workbook with summary, metrics, configuration, and manifest"),
+        (artifacts.baseline_csv, "csv", "Model baseline table"),
+        (artifacts.predictions_inside_polygon_csv, "csv", "Unknown surface predictions inside predict polygon"),
+        (artifacts.tile_usage_csv, "csv", "Tile usage by train/predict areas"),
+        (artifacts.dangerous_errors_global_test_csv, "csv", "Dangerous errors on global known test split"),
+        (artifacts.dangerous_errors_predict_holdout_csv, "csv", "Dangerous errors on predict-polygon holdout split"),
+        (artifacts.reliability_table_group_direct_csv, "csv", "Group-direct reliability table"),
+        (artifacts.run_summary_csv, "csv", "One-row run and safety summary"),
+        (artifacts.baseline_png, "png", "Baseline model table image"),
+        (artifacts.surface_map_png, "png", "Predicted surface map"),
+        (artifacts.unknown_risk_map_png, "png", "Unknown prediction risk map"),
+        (artifacts.confidence_map_png, "png", "Prediction confidence map"),
+        (artifacts.tile_usage_map_png, "png", "Tile usage map"),
+        (artifacts.confusion_matrix_concrete_compact_png, "png", "Concrete compact confusion matrix"),
+        (artifacts.confusion_matrix_group_direct_png, "png", "Group-direct confusion matrix"),
+        (artifacts.feature_importance_png, "png", "Feature importance"),
+        (artifacts.calibration_curve_group_direct_png, "png", "Group-direct calibration curve"),
+        (artifacts.dangerous_errors_global_test_effective_png, "png", "Effective dangerous upgrades on global test"),
+        (artifacts.dangerous_errors_predict_holdout_effective_png, "png", "Effective dangerous upgrades on predict holdout"),
+        (artifacts.errors_map_png, "png", "Known test error map"),
+    ]
+    return pd.DataFrame(
+        [
+            {
+                "filename": p.name,
+                "type": typ,
+                "description": desc,
+                "created": "",
+                "rows_if_table": "",
+            }
+            for p, typ, desc in files
+        ]
+    )
+
+
+def current_git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def polygon_hash(polygon: Any) -> str:
+    return _short_hash(getattr(polygon, "wkt", str(polygon)))
+
+
+def graph_fingerprint(edges: gpd.GeoDataFrame) -> Dict[str, Any]:
+    if edges is None or edges.empty:
+        return {"edges_count": 0, "nodes_count": 0, "graph_hash": "empty"}
+    u = edges.get("u", pd.Series([], dtype=object)).astype(str)
+    v = edges.get("v", pd.Series([], dtype=object)).astype(str)
+    payload = "|".join(sorted(edges.get("edge_id", pd.Series([], dtype=object)).astype(str).head(10000).tolist()))
+    return {
+        "edges_count": int(len(edges)),
+        "nodes_count": int(len(set(u) | set(v))),
+        "graph_hash": _short_hash(payload),
+    }
+
+
+def safety_decision_summary(
+    config: SurfaceAIConfig,
+    group_selected: Dict[str, Any],
+    calibration_metrics: Dict[str, Any],
+    warnings: Dict[str, bool],
+) -> Dict[str, Any]:
+    metrics = group_selected.get("metrics", {})
+    ece = float((calibration_metrics or {}).get("ece_top_label", 1.0))
+    experimental = (
+        float(metrics.get("dangerous_upgrade_rate_effective", 1.0)) <= float(config.max_dangerous_upgrade_rate_effective)
+        and float(metrics.get("recall_bad_surface", 0.0)) >= float(config.min_bad_surface_recall)
+        and ece <= float(config.max_calibration_ece)
+    )
+    main = (
+        experimental
+        and float(metrics.get("recall_paved_rough", 0.0)) >= float(config.min_paved_rough_recall)
+        and not bool(warnings.get("warning_predict_holdout_suspiciously_high", False))
+    )
+    reasons = [
+        f"group_direct dangerous_upgrade_rate_effective = {metrics.get('dangerous_upgrade_rate_effective', 'disabled')}",
+        f"group_direct recall_bad_surface = {metrics.get('recall_bad_surface', 'disabled')}",
+        f"group_direct ece_top_label = {ece}",
+        f"paved_rough recall = {metrics.get('recall_paved_rough', 'disabled')}",
+    ]
+    return {
+        "safe_to_use_for_main_routing": bool(main),
+        "safe_to_use_for_experimental_routing": bool(experimental),
+        "reasons": reasons,
+    }
+
+
+def build_warning_flags(
+    config: SurfaceAIConfig,
+    selected: Dict[str, Any],
+    group_selected: Dict[str, Any],
+    holdout_metrics: Dict[str, Any],
+    dangerous_global_rows: int,
+    dangerous_global_expected: int,
+    output_file_count: int,
+) -> Dict[str, bool]:
+    global_macro = float(group_selected.get("metrics", {}).get("macro_f1", 0.0))
+    holdout_macro = float((holdout_metrics.get("group_direct") or {}).get("macro_f1", 0.0))
+    return {
+        "warning_paved_rough_low_recall": float(group_selected.get("metrics", {}).get("recall_paved_rough", 0.0)) < float(config.min_paved_rough_recall),
+        "warning_dangerous_map_empty_but_metrics_nonzero": int(dangerous_global_expected) > 0 and int(dangerous_global_rows) == 0,
+        "warning_predict_holdout_suspiciously_high": (holdout_macro - global_macro) > 0.20,
+        "warning_neighbor_features_need_leakage_check": bool(config.use_neighbor_features and not config.run_holdout_leakage_checks),
+        "warning_safety_threshold_disabled": any(
+            v is None for v in [
+                config.min_bad_surface_recall,
+                config.max_dangerous_upgrade_rate_effective,
+                config.max_calibration_ece,
+                config.min_paved_rough_recall,
+            ]
+        ),
+        "warning_compact_output_limit_exceeded": is_compact_output(config) and int(output_file_count) > int(config.max_output_files),
+        "warning_train_graph_not_saved": is_compact_output(config) and not save_heavy_artifacts(config),
+    }
+
+
+def write_run_summary_csv(path: Path, summary: Dict[str, Any]) -> None:
+    pd.DataFrame([_json_safe(summary)]).to_csv(path, index=False, encoding="utf-8")
+
+
 def _plot_lines_by_column(
     edges_gdf: gpd.GeoDataFrame,
     predictions: pd.DataFrame,
@@ -2501,16 +2895,7 @@ def plot_surface_maps(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, ar
         path=artifacts.surface_map_png,
         title="Predicted surface group",
     )
-    unknown_mask = ~predictions["is_surface_known"].astype(bool)
-    _plot_lines_by_column(
-        edges_gdf,
-        predictions,
-        value_col="surface_pred_group",
-        color_map=GROUP_COLORS,
-        path=artifacts.unknown_predictions_map_png,
-        only_mask=unknown_mask,
-        title="Unknown OSM surface predictions",
-    )
+    plot_unknown_risk_map(predictions, edges_gdf, artifacts.unknown_risk_map_png, config)
     plot_confidence_map(predictions, edges_gdf, artifacts.confidence_map_png, config)
     plot_errors_map(predictions, edges_gdf, artifacts.errors_map_png)
 
@@ -2553,6 +2938,63 @@ def plot_confidence_map(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, 
             continue
         subset.plot(ax=ax, color=color, linewidth=widths[key], alpha=0.85, label=key)
     ax.legend(loc="lower left", fontsize=8)
+    fig.tight_layout(pad=0)
+    fig.savefig(path, dpi=220, bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
+
+
+def plot_unknown_risk_map(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, path: Path, config: SurfaceAIConfig) -> None:
+    pred_cols = [
+        "edge_id",
+        "is_surface_known",
+        "surface_pred_group_direct",
+        "surface_source",
+        "surface_pred_group_direct_confidence_calibrated",
+    ]
+    gdf = edges_gdf[["edge_id", "geometry"]].merge(
+        predictions[[c for c in pred_cols if c in predictions.columns]],
+        on="edge_id",
+        how="inner",
+    )
+    if "is_surface_known" in gdf.columns:
+        gdf = gdf[~gdf["is_surface_known"].astype(bool)]
+
+    def risk(row: pd.Series) -> str:
+        src = str(row.get("surface_source") or "")
+        group = str(row.get("surface_pred_group_direct") or "unknown")
+        conf = float(row.get("surface_pred_group_direct_confidence_calibrated") or 0.0)
+        if src == "ml_ambiguous":
+            return "ml_ambiguous"
+        if src == "default_low_confidence":
+            return "default_low_confidence"
+        if group == "paved_good" and conf < float(config.conf_medium):
+            return "low_conf_paved_good"
+        if group == "paved_good" and conf < float(config.conf_high):
+            return "medium_conf_paved_good"
+        return "other"
+
+    gdf["unknown_risk"] = gdf.apply(risk, axis=1) if not gdf.empty else []
+    colors = {
+        "low_conf_paved_good": "#d73027",
+        "medium_conf_paved_good": "#fee08b",
+        "ml_ambiguous": "#fc8d59",
+        "default_low_confidence": "#969696",
+    }
+    plt = _import_pyplot()
+    fig, ax = plt.subplots(figsize=(12, 12))
+    ax.set_axis_off()
+    ax.set_title("Unknown surface predictions requiring caution")
+    plotted = False
+    for key, color in colors.items():
+        subset = gdf[gdf["unknown_risk"] == key]
+        if subset.empty:
+            continue
+        subset.plot(ax=ax, color=color, linewidth=1.4, alpha=0.9, label=key)
+        plotted = True
+    if not plotted:
+        ax.text(0.5, 0.5, "No unknown prediction risk flags", ha="center", va="center", transform=ax.transAxes)
+    else:
+        ax.legend(loc="lower left", fontsize=8)
     fig.tight_layout(pad=0)
     fig.savefig(path, dpi=220, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
@@ -2649,6 +3091,132 @@ def write_dangerous_errors_csv(predictions: pd.DataFrame, path: Path) -> None:
         "geometry_wkt",
     ]
     predictions.loc[mask, [c for c in cols if c in predictions.columns]].to_csv(path, index=False, encoding="utf-8")
+
+
+def dangerous_errors_for_split(predictions: pd.DataFrame, split_name: str, config: SurfaceAIConfig) -> pd.DataFrame:
+    split = predictions[
+        (predictions["surface_ai_split"].astype(str) == split_name)
+        & predictions["is_surface_known"].astype(bool)
+    ].copy()
+    if split.empty:
+        return pd.DataFrame(
+            columns=[
+                "edge_id",
+                "u",
+                "v",
+                "key",
+                "split",
+                "true_group",
+                "pred_group_raw",
+                "pred_group_effective",
+                "dangerous_upgrade_raw",
+                "dangerous_upgrade_effective",
+                "dangerous_upgrade_severity",
+                "length_m",
+                "confidence",
+                "margin",
+                "highway",
+                "surface_osm_raw",
+                "geometry_wkt",
+            ]
+        )
+    true_group = split["surface_group_direct_label"].astype(str)
+    raw_group = split.get("surface_pred_group_direct_raw", split.get("surface_pred_group_direct")).astype(str)
+    pred_group = split.get("surface_pred_group_direct", raw_group).astype(str)
+    conf = pd.to_numeric(split.get("surface_pred_group_direct_confidence_calibrated"), errors="coerce").fillna(0.0)
+    margin = pd.to_numeric(split.get("surface_pred_group_direct_margin_calibrated"), errors="coerce").fillna(0.0)
+    effective_group = pd.Series(
+        [
+            _effective_group_for_metrics(p, c, m, config)
+            for p, c, m in zip(pred_group.tolist(), conf.tolist(), margin.tolist())
+        ],
+        index=split.index,
+    )
+    dangerous_raw = pd.Series(
+        [is_dangerous_upgrade(t, p) for t, p in zip(true_group.tolist(), raw_group.tolist())],
+        index=split.index,
+    )
+    dangerous_effective = pd.Series(
+        [is_dangerous_upgrade(t, p) for t, p in zip(true_group.tolist(), effective_group.tolist())],
+        index=split.index,
+    )
+    rows = pd.DataFrame(
+        {
+            "edge_id": split["edge_id"].astype(str),
+            "u": split.get("u"),
+            "v": split.get("v"),
+            "key": split.get("key"),
+            "split": split_name,
+            "true_group": true_group,
+            "pred_group_raw": raw_group,
+            "pred_group_effective": effective_group,
+            "dangerous_upgrade_raw": dangerous_raw,
+            "dangerous_upgrade_effective": dangerous_effective,
+            "dangerous_upgrade_severity": [
+                DANGEROUS_UPGRADE_SEVERITY.get(str(t), 0.0) if bool(e) else 0.0
+                for t, e in zip(true_group.tolist(), dangerous_effective.tolist())
+            ],
+            "length_m": pd.to_numeric(split.get("length_m"), errors="coerce").fillna(0.0),
+            "confidence": conf,
+            "margin": margin,
+            "highway": split.get("highway"),
+            "surface_osm_raw": split.get("surface_osm_raw"),
+            "geometry_wkt": split.get("geometry_wkt"),
+        }
+    )
+    return rows[rows["dangerous_upgrade_raw"] | rows["dangerous_upgrade_effective"]].copy()
+
+
+def write_dangerous_errors_split_csv(predictions: pd.DataFrame, path: Path, *, split_name: str, config: SurfaceAIConfig) -> pd.DataFrame:
+    df = dangerous_errors_for_split(predictions, split_name, config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False, encoding="utf-8")
+    return df
+
+
+def plot_dangerous_errors_split_map(
+    dangerous_df: pd.DataFrame,
+    edges_gdf: gpd.GeoDataFrame,
+    path: Path,
+    *,
+    split_name: str,
+    mode: str,
+    expected_count: int = 0,
+) -> None:
+    flag_col = "dangerous_upgrade_raw" if mode == "raw" else "dangerous_upgrade_effective"
+    rows = dangerous_df[dangerous_df.get(flag_col, pd.Series(False, index=dangerous_df.index)).astype(bool)].copy()
+    if int(expected_count) > 0 and rows.empty:
+        raise RuntimeError(
+            f"Dangerous error map mismatch: metrics count > 0 but map source has 0 rows for {split_name}/{mode}."
+        )
+    gdf = edges_gdf[["edge_id", "geometry"]].merge(rows, on="edge_id", how="inner")
+    plt = _import_pyplot()
+    fig, ax = plt.subplots(figsize=(12, 12))
+    ax.set_axis_off()
+    ax.set_title(f"Dangerous upgrades on {split_name.replace('_', ' ')}, {mode} predictions")
+    colors = {"paved_rough": "#fdae61", "unpaved_soft": "#d73027", "unpaved_hard": "#7f0000", "rough_or_unpaved": "#d73027"}
+    if gdf.empty:
+        ax.text(0.5, 0.5, f"No dangerous upgrades on {split_name}", ha="center", va="center", transform=ax.transAxes)
+    else:
+        for group, color in colors.items():
+            subset = gdf[gdf["true_group"] == group]
+            if subset.empty:
+                continue
+            subset.plot(ax=ax, color=color, linewidth=2.0, alpha=0.9, label=f"{group} -> paved_good")
+        total_len = float(pd.to_numeric(gdf["length_m"], errors="coerce").sum())
+        ax.text(
+            0.01,
+            0.99,
+            f"Dangerous upgrades on {split_name}: {len(gdf)} edges / {total_len:.0f} m",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+        )
+        ax.legend(loc="lower left", fontsize=8)
+    fig.tight_layout(pad=0)
+    fig.savefig(path, dpi=220, bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
 
 
 def _tile_to_lat_lon(x: int, y: int, z: int) -> Tuple[float, float]:
@@ -2971,8 +3539,9 @@ def write_tile_usage_report(
             ]
         ).to_csv(artifacts.tile_usage_csv, index=False, encoding="utf-8")
         plot_tile_usage_map(tiles_gdf, artifacts.tile_usage_map_png)
-        plot_tile_usage_map(tiles_gdf, artifacts.tile_usage_map_train_png, zone="train")
-        plot_tile_usage_map(tiles_gdf, artifacts.tile_usage_map_predict_png, zone="predict")
+        if config is None or save_heavy_artifacts(config):
+            plot_tile_usage_map(tiles_gdf, artifacts.tile_usage_map_train_png, zone="train")
+            plot_tile_usage_map(tiles_gdf, artifacts.tile_usage_map_predict_png, zone="predict")
         return {
             "tiles_total_in_cache": total_cached_tiles,
             "tiles_matching_server_zoom": 0,
@@ -3030,8 +3599,9 @@ def write_tile_usage_report(
     tiles["unused_reason"] = tiles.apply(unused_reason, axis=1)
     tiles.drop(columns="geometry").to_csv(artifacts.tile_usage_csv, index=False, encoding="utf-8")
     plot_tile_usage_map(tiles, artifacts.tile_usage_map_png)
-    plot_tile_usage_map(tiles, artifacts.tile_usage_map_train_png, zone="train")
-    plot_tile_usage_map(tiles, artifacts.tile_usage_map_predict_png, zone="predict")
+    if config is None or save_heavy_artifacts(config):
+        plot_tile_usage_map(tiles, artifacts.tile_usage_map_train_png, zone="train")
+        plot_tile_usage_map(tiles, artifacts.tile_usage_map_predict_png, zone="predict")
     train_inside = int(tiles["inside_train_area"].sum())
     train_used = int((tiles["inside_train_area"] & tiles["sampled_by_train_edge"]).sum())
     predict_inside = int(tiles["inside_predict_area"].sum())
@@ -3558,9 +4128,10 @@ def run_surface_ai_experiment(
                 "tiles_matching_server_zoom": int(len(tiles_gdf)),
             }
         )
-        _write_polygon_geojson(artifacts.train_polygon_geojson, train_polygon, "train_polygon")
-        _write_polygon_geojson(artifacts.predict_polygon_geojson, predict_polygon, "predict_polygon")
-        _write_polygon_geojson(artifacts.tile_coverage_polygon_geojson, tile_coverage_polygon, "tile_coverage_polygon")
+        if save_heavy_artifacts(config):
+            _write_polygon_geojson(artifacts.train_polygon_geojson, train_polygon, "train_polygon")
+            _write_polygon_geojson(artifacts.predict_polygon_geojson, predict_polygon, "predict_polygon")
+            _write_polygon_geojson(artifacts.tile_coverage_polygon_geojson, tile_coverage_polygon, "tile_coverage_polygon")
 
     for _ in progress(range(1), "[2/10] Load train graph", total=1):
         train_raw, train_meta = load_edges_for_surface_ai_polygon(
@@ -3600,8 +4171,9 @@ def run_surface_ai_experiment(
             if col not in predict_edges.columns:
                 predict_edges[col] = None
 
-    write_edges_geojson(train_edges, artifacts.train_edges_geojson)
-    write_edges_geojson(predict_edges, artifacts.predict_edges_geojson)
+    if save_heavy_artifacts(config):
+        write_edges_geojson(train_edges, artifacts.train_edges_geojson)
+        write_edges_geojson(predict_edges, artifacts.predict_edges_geojson)
     edges = combine_train_predict_edges(train_edges, predict_edges, train_polygon, predict_polygon)
     if max_edges is not None:
         edges = limit_edges_for_experiment(
@@ -3623,9 +4195,9 @@ def run_surface_ai_experiment(
     if config.use_neighbor_features:
         dataset = add_neighbor_features(dataset)
     summary = dataset_summary(dataset)
-    if not config.compact_output:
+    if save_heavy_artifacts(config):
         write_dataset_csv(dataset, artifacts.dataset_csv)
-    write_dataset_csv(dataset, artifacts.dataset_all_tile_edges_csv)
+        write_dataset_csv(dataset, artifacts.dataset_all_tile_edges_csv)
 
     concrete_models, concrete_table = train_evaluate_task_models(
         dataset,
@@ -3684,12 +4256,13 @@ def run_surface_ai_experiment(
     predictions = predict_all_edges(dataset, concrete_models, group_models, config, progress=progress)
     predictions_inside = predictions[predictions.get("is_prediction_candidate", pd.Series(False, index=predictions.index)).astype(bool)].copy()
     summary["predictions_produced_inside_polygon"] = int(len(predictions_inside))
-    if not config.compact_output:
+    if save_heavy_artifacts(config):
         write_predictions_csv(predictions, artifacts.predictions_csv)
-    if config.save_full_predictions_geojson:
+    if config.save_full_predictions_geojson and save_heavy_artifacts(config):
         write_predictions_geojson(predictions, edges, artifacts.predictions_geojson)
     write_predictions_csv(predictions_inside, artifacts.predictions_inside_polygon_csv)
-    write_predictions_geojson(predictions_inside, predict_edges, artifacts.predictions_inside_polygon_geojson)
+    if save_heavy_artifacts(config):
+        write_predictions_geojson(predictions_inside, predict_edges, artifacts.predictions_inside_polygon_geojson)
     write_baseline_tables(baseline_table, artifacts)
 
     tile_coverage = (
@@ -3707,24 +4280,23 @@ def run_surface_ai_experiment(
         if config.tile_usage_report
         else {}
     )
-    dangerous_overall = dangerous_upgrade_metrics(
-        predictions.loc[predictions["surface_ai_split"] == "test", "surface_group_direct_label"].astype(str).tolist(),
-        predictions.loc[predictions["surface_ai_split"] == "test", "surface_effective_group_for_routing_raw"].astype(str).tolist(),
-        predictions.loc[predictions["surface_ai_split"] == "test", "surface_effective_group_for_routing_calibrated"].astype(str).tolist(),
-        predictions.loc[predictions["surface_ai_split"] == "test", "length_m"].astype(float).tolist(),
-    )
+    dangerous_overall = dict(group_selected.get("metrics", {}))
     dangerous_flat = {
         "dangerous_upgrade_rate_raw": dangerous_overall.get("dangerous_upgrade_rate_raw", 0.0),
         "dangerous_upgrade_rate_effective": dangerous_overall.get("dangerous_upgrade_rate_effective", 0.0),
         "dangerous_upgrade_length_m_effective": dangerous_overall.get("dangerous_upgrade_length_m_effective", 0.0),
     }
-    spatial_ablation = write_spatial_prior_ablation(artifacts, baseline_table)
-    concrete_calibration = calibration_artifacts_for_selected(
-        dataset,
-        concrete_selected,
-        concrete_models,
-        artifacts,
-        target="concrete_compact",
+    spatial_ablation = write_spatial_prior_ablation(artifacts, baseline_table) if save_heavy_artifacts(config) else {"enabled": bool(config.run_spatial_prior_ablation)}
+    concrete_calibration = (
+        calibration_artifacts_for_selected(
+            dataset,
+            concrete_selected,
+            concrete_models,
+            artifacts,
+            target="concrete_compact",
+        )
+        if save_heavy_artifacts(config)
+        else {}
     )
     group_calibration = calibration_artifacts_for_selected(
         dataset,
@@ -3740,110 +4312,215 @@ def run_surface_ai_experiment(
     if neighbor_importance.empty:
         neighbor_importance = feature_importance.head(30).copy()
     predictions_predict_area = predictions[predictions.get("inside_predict_area", pd.Series(False, index=predictions.index)).astype(bool)].copy()
+    dangerous_global = write_dangerous_errors_split_csv(
+        predictions,
+        artifacts.dangerous_errors_global_test_csv,
+        split_name="test",
+        config=config,
+    )
+    dangerous_holdout = write_dangerous_errors_split_csv(
+        predictions,
+        artifacts.dangerous_errors_predict_holdout_csv,
+        split_name="predict_holdout",
+        config=config,
+    )
     for step in progress(range(6), "[9/10] Visualizations", total=6):
         if step == 0:
             plot_surface_maps(predictions_predict_area, predict_edges, artifacts, config)
         elif step == 1:
             plot_confusion_matrix(
                 concrete_selected["metrics"],
-                artifacts.confusion_matrix_concrete_png,
-                title="Concrete surface confusion matrix",
-            )
-            plot_confusion_matrix(
-                concrete_selected["metrics"],
                 artifacts.confusion_matrix_concrete_compact_png,
                 title="Concrete compact confusion matrix",
             )
-            plot_confusion_matrix(
-                concrete_selected["metrics"],
-                artifacts.confusion_matrix_concrete_legacy_png,
-                title="Concrete legacy comparison matrix",
-            )
+            if save_heavy_artifacts(config):
+                plot_confusion_matrix(
+                    concrete_selected["metrics"],
+                    artifacts.confusion_matrix_concrete_png,
+                    title="Concrete surface confusion matrix",
+                )
+                plot_confusion_matrix(
+                    concrete_selected["metrics"],
+                    artifacts.confusion_matrix_concrete_legacy_png,
+                    title="Concrete legacy comparison matrix",
+                )
         elif step == 2:
-            plot_confusion_matrix(
-                group_selected["metrics"],
-                artifacts.confusion_matrix_group_png,
-                title="Surface group direct confusion matrix",
-            )
             plot_confusion_matrix(
                 group_selected["metrics"],
                 artifacts.confusion_matrix_group_direct_png,
                 title="Surface group direct confusion matrix",
             )
+            if save_heavy_artifacts(config):
+                plot_confusion_matrix(
+                    group_selected["metrics"],
+                    artifacts.confusion_matrix_group_png,
+                    title="Surface group direct confusion matrix",
+                )
         elif step == 3:
             plot_feature_importance(feature_importance, artifacts.feature_importance_png)
-            plot_feature_importance(neighbor_importance, artifacts.neighbor_feature_importance_png)
+            if save_heavy_artifacts(config):
+                plot_feature_importance(neighbor_importance, artifacts.neighbor_feature_importance_png)
         elif step == 4:
-            plot_dangerous_errors_map(predictions, edges, artifacts.dangerous_errors_map_raw_png, mode="raw")
-            plot_dangerous_errors_map(predictions, edges, artifacts.dangerous_errors_map_effective_png, mode="effective")
-            write_dangerous_errors_csv(predictions, artifacts.dangerous_errors_csv)
+            plot_dangerous_errors_split_map(
+                dangerous_global,
+                edges,
+                artifacts.dangerous_errors_global_test_effective_png,
+                split_name="global_test",
+                mode="effective",
+                expected_count=int(dangerous_overall.get("dangerous_upgrade_count_effective", 0)),
+            )
+            plot_dangerous_errors_split_map(
+                dangerous_holdout,
+                edges,
+                artifacts.dangerous_errors_predict_holdout_effective_png,
+                split_name="predict_holdout",
+                mode="effective",
+                expected_count=int((holdout_metrics.get("group_direct") or {}).get("dangerous_upgrade_count_effective", 0)),
+            )
+            if save_heavy_artifacts(config):
+                plot_dangerous_errors_split_map(
+                    dangerous_global,
+                    edges,
+                    artifacts.dangerous_errors_global_test_raw_png,
+                    split_name="global_test",
+                    mode="raw",
+                    expected_count=int(dangerous_overall.get("dangerous_upgrade_count_raw", 0)),
+                )
+                plot_dangerous_errors_split_map(
+                    dangerous_holdout,
+                    edges,
+                    artifacts.dangerous_errors_predict_holdout_raw_png,
+                    split_name="predict_holdout",
+                    mode="raw",
+                    expected_count=int((holdout_metrics.get("group_direct") or {}).get("dangerous_upgrade_count_raw", 0)),
+                )
+                write_dangerous_errors_csv(predictions, artifacts.dangerous_errors_csv)
         else:
             pass
 
     for _ in progress(range(1), "[10/10] Export reports/model", total=1):
-        write_metrics_json(
-            artifacts,
-            selected=concrete_selected,
-            group_selected=group_selected,
-            models=concrete_models,
-            group_models=group_models,
-            baseline_table=baseline_table,
-            summary=summary,
-            label_meta=label_meta,
-            config=config,
-            run_meta=run_meta,
-            tile_coverage=tile_coverage,
-            calibration_metrics={"concrete": concrete_calibration, "group_direct": group_calibration},
-            area_meta=area_meta,
-            holdout_metrics=holdout_metrics,
+        graph_fp = {
+            "train": graph_fingerprint(train_edges),
+            "predict": graph_fingerprint(predict_edges),
+            "tile_coverage_polygon_hash": polygon_hash(tile_coverage_polygon),
+            "precache_polygon_hash": polygon_hash(precache_polygon),
+        }
+        run_config = {
+            "run_id": artifacts.output_dir.name,
+            "git_commit": current_git_commit(),
+            "train_area_mode": config.train_area_mode,
+            "predict_area_mode": config.predict_area_mode,
+            "train_graph_source": run_meta.get("train_graph_source"),
+            "predict_graph_source": run_meta.get("predict_graph_source"),
+            "tile_coverage_area_km2": area_meta.get("tile_coverage_area_km2"),
+            "predict_polygon_area_km2": area_meta.get("predict_polygon_area_km2"),
+            "tiles_total": tile_coverage.get("tiles_total_in_cache"),
+            "tiles_used_train": tile_coverage.get("tiles_sampled_by_train_edges"),
+            "tiles_used_predict": tile_coverage.get("tiles_sampled_by_predict_edges"),
+            "random_state": config.random_state,
+            "model_candidates": ",".join(config.model_candidates),
+            "group_model_candidates": ",".join(config.group_model_candidates),
+            "selected_model": concrete_selected.get("model_key"),
+            "selected_group_model": group_selected.get("model_key"),
+            "feature_sets": {
+                "concrete": concrete_models[concrete_selected["model_key"]]["feature_set"],
+                "group_direct": group_models[group_selected["model_key"]]["feature_set"],
+            },
+            "env_settings": asdict(config),
+            "graph_fingerprint": graph_fp,
+            "neighbor_features_leakage_guard": True,
+            "holdout_labels_masked_for_neighbor_features": bool(config.mask_holdout_labels_for_neighbors),
+            "holdout_neighbor_test_labels_used": False,
+        }
+        initial_file_count = len([p for p in artifacts.output_dir.iterdir() if p.is_file()])
+        warnings = build_warning_flags(
+            config,
+            concrete_selected,
+            group_selected,
+            holdout_metrics,
+            dangerous_global_rows=int(dangerous_global["dangerous_upgrade_effective"].sum()) if not dangerous_global.empty else 0,
+            dangerous_global_expected=int(dangerous_overall.get("dangerous_upgrade_count_effective", 0)),
+            output_file_count=initial_file_count,
         )
-        with open(artifacts.group_direct_metrics_json, "w", encoding="utf-8") as f:
-            json.dump(_json_safe(group_selected), f, ensure_ascii=False, indent=2)
-        write_model_joblib(
-            artifacts,
-            selected=concrete_selected,
-            models=concrete_models,
-            feature_importance=feature_importance,
-            config=config,
-            label_meta=label_meta,
+        safety = safety_decision_summary(config, group_selected, group_calibration, warnings)
+        summary.update(
+            {
+                "selected_concrete_model": concrete_selected.get("model_key"),
+                "selected_group_model": group_selected.get("model_key"),
+                "main_metrics": group_selected.get("metrics"),
+                "safety_decision": safety,
+                "warnings": warnings,
+                "safety_min_bad_surface_recall": config.min_bad_surface_recall,
+                "safety_max_dangerous_upgrade_rate_effective": config.max_dangerous_upgrade_rate_effective,
+                "safety_max_calibration_ece": config.max_calibration_ece,
+                "safety_min_paved_rough_recall": config.min_paved_rough_recall,
+            }
         )
-        write_group_direct_joblib(
-            artifacts,
-            selected=group_selected,
-            models=group_models,
-            config=config,
-        )
-        write_model_card(
-            artifacts,
-            selected=concrete_selected,
-            group_selected=group_selected,
-            config=config,
-            dataset=dataset,
-            dangerous_metrics=dangerous_flat,
-            tile_coverage=tile_coverage,
-            calibration_metrics=concrete_calibration,
-            spatial_ablation=spatial_ablation,
-        )
-        write_group_direct_model_card(
-            artifacts,
-            selected=group_selected,
-            config=config,
-            dataset=dataset,
-            calibration_metrics=group_calibration,
-        )
-        write_report(
-            artifacts,
-            summary=summary,
-            label_meta=label_meta,
-            selected=concrete_selected,
-            group_selected=group_selected,
-            baseline_table=baseline_table,
-            config=config,
-            run_meta=run_meta,
-            tile_coverage=tile_coverage,
-            area_meta=area_meta,
-            holdout_metrics=holdout_metrics,
-        )
+        write_run_summary_csv(artifacts.run_summary_csv, summary)
+        if save_heavy_artifacts(config):
+            write_metrics_json(
+                artifacts,
+                selected=concrete_selected,
+                group_selected=group_selected,
+                models=concrete_models,
+                group_models=group_models,
+                baseline_table=baseline_table,
+                summary=summary,
+                label_meta=label_meta,
+                config=config,
+                run_meta=run_meta,
+                tile_coverage=tile_coverage,
+                calibration_metrics={"concrete": concrete_calibration, "group_direct": group_calibration},
+                area_meta=area_meta,
+                holdout_metrics=holdout_metrics,
+            )
+            with open(artifacts.group_direct_metrics_json, "w", encoding="utf-8") as f:
+                json.dump(_json_safe(group_selected), f, ensure_ascii=False, indent=2)
+            write_model_joblib(
+                artifacts,
+                selected=concrete_selected,
+                models=concrete_models,
+                feature_importance=feature_importance,
+                config=config,
+                label_meta=label_meta,
+            )
+            write_group_direct_joblib(
+                artifacts,
+                selected=group_selected,
+                models=group_models,
+                config=config,
+            )
+            write_model_card(
+                artifacts,
+                selected=concrete_selected,
+                group_selected=group_selected,
+                config=config,
+                dataset=dataset,
+                dangerous_metrics=dangerous_flat,
+                tile_coverage=tile_coverage,
+                calibration_metrics=concrete_calibration,
+                spatial_ablation=spatial_ablation,
+            )
+            write_group_direct_model_card(
+                artifacts,
+                selected=group_selected,
+                config=config,
+                dataset=dataset,
+                calibration_metrics=group_calibration,
+            )
+            write_report(
+                artifacts,
+                summary=summary,
+                label_meta=label_meta,
+                selected=concrete_selected,
+                group_selected=group_selected,
+                baseline_table=baseline_table,
+                config=config,
+                run_meta=run_meta,
+                tile_coverage=tile_coverage,
+                area_meta=area_meta,
+                holdout_metrics=holdout_metrics,
+            )
         write_results_workbook(
             artifacts,
             baseline_table=baseline_table,
@@ -3855,7 +4532,11 @@ def run_surface_ai_experiment(
             holdout_metrics=holdout_metrics,
             calibration_metrics={"concrete": concrete_calibration, "group_direct": group_calibration},
             dangerous_metrics=dangerous_flat,
+            predictions_inside=predictions_inside[prediction_columns(predictions_inside)].head(5000),
+            dangerous_global=dangerous_global,
+            dangerous_holdout=dangerous_holdout,
+            run_config=run_config,
+            artifact_manifest=expected_compact_manifest(artifacts) if is_compact_output(config) else artifact_manifest(artifacts.output_dir),
         )
-        compact_experiment_outputs(artifacts, config)
 
     return artifacts

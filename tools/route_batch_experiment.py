@@ -117,7 +117,26 @@ def main() -> None:
         default=DEFAULT_BATCH_LOG_EVERY,
         metavar="N",
     )
+    parser.add_argument(
+        "--surface-ai-runtime",
+        choices=("off", "on", "both"),
+        default=None,
+        help=(
+            "Если задано: только сравнение одного маршрута (START/END из .env) "
+            "с ML runtime off|on|both (both = off,on подряд); печать JSON в stdout."
+        ),
+    )
     args = parser.parse_args()
+    if args.surface_ai_runtime is not None:
+        _ensure_pkg_path()
+        from bike_router.tools.surface_runtime_route_experiment import run_modes
+
+        modes = "off,on" if args.surface_ai_runtime == "both" else str(args.surface_ai_runtime)
+        import json
+
+        print(json.dumps(run_modes(modes), ensure_ascii=False, indent=2), flush=True)
+        return
+
     n = max(2, int(args.n_points))
     directed = not bool(args.undirected_pairs)
 

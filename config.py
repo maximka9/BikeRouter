@@ -833,6 +833,54 @@ class Settings:
     # Пусто — один из списка выше или дефолт. Обратная совместимость с одним URL.
     osm_overpass_url: str = _env("OSM_OVERPASS_URL", "", str)
 
+    # --- Surface AI: runtime-предсказания в веса графа (без переобучения) ---
+    # default_factory: чтение env при каждом ``Settings()`` (тесты, subprocess смена env).
+    surface_ai_runtime_enabled: bool = field(
+        default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_ENABLED", False)
+    )
+    surface_ai_runtime_predictions_path: str = field(
+        default_factory=lambda: _env(
+            "SURFACE_AI_RUNTIME_PREDICTIONS_PATH",
+            "cache/surface_ai/runtime_predictions.csv",
+            str,
+        )
+    )
+    surface_ai_runtime_strict: bool = field(
+        default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_STRICT", False)
+    )
+    surface_ai_runtime_min_confidence: float = field(
+        default_factory=lambda: _env("SURFACE_AI_RUNTIME_MIN_CONFIDENCE", 0.65, float)
+    )
+    surface_ai_runtime_min_margin: float = field(
+        default_factory=lambda: _env("SURFACE_AI_RUNTIME_MIN_MARGIN", 0.15, float)
+    )
+    surface_ai_runtime_paved_good_min_confidence: float = field(
+        default_factory=lambda: _env(
+            "SURFACE_AI_RUNTIME_PAVED_GOOD_MIN_CONFIDENCE", 0.90, float
+        )
+    )
+    surface_ai_runtime_use_only_safe: bool = field(
+        default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_USE_ONLY_SAFE", True)
+    )
+    surface_ai_runtime_osm_priority: bool = field(
+        default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_OSM_PRIORITY", True)
+    )
+    surface_ai_runtime_fallback_to_heuristic: bool = field(
+        default_factory=lambda: _env_bool(
+            "SURFACE_AI_RUNTIME_FALLBACK_TO_HEURISTIC", True
+        )
+    )
+    surface_ai_runtime_match_by: str = field(
+        default_factory=lambda: _env(
+            "SURFACE_AI_RUNTIME_MATCH_BY",
+            "edge_id,undirected_edge_key,osm_way_id_geometry",
+            str,
+        )
+    )
+    surface_ai_runtime_log_stats: bool = field(
+        default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_LOG_STATS", True)
+    )
+
     # --- Пути ---
     base_dir: str = field(default="")
 
@@ -849,6 +897,15 @@ class Settings:
     @property
     def cache_dir(self) -> str:
         return os.path.join(self.base_dir, "cache")
+
+    @property
+    def surface_ai_runtime_predictions_resolved_path(self) -> Path:
+        """Абсолютный путь к CSV с ML-предсказаниями для маршрутизации."""
+        raw = (self.surface_ai_runtime_predictions_path or "").strip()
+        p = Path(raw) if raw else Path("cache/surface_ai/runtime_predictions.csv")
+        if not p.is_absolute():
+            p = Path(self.base_dir) / p
+        return p.resolve()
 
     @property
     def osmnx_cache_dir(self) -> str:

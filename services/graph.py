@@ -3,7 +3,7 @@
 import logging
 import math
 import os
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
 
 import geopandas as gpd
 import pandas as pd
@@ -40,7 +40,10 @@ from .stress import (
     stress_costs_for_edge,
 )
 from .retry import sleep_backoff
-from .surface_resolve import apply_surface_resolution
+from .surface_resolve import SurfaceResolutionStats, apply_surface_resolution
+
+if TYPE_CHECKING:
+    from .surface_prediction_store import SurfacePredictionStore
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +118,19 @@ class GraphBuilder:
         elevation_service: ElevationService,
         green_analyzer: GreenAnalyzer,
         settings: Settings,
+        surface_prediction_store: Optional["SurfacePredictionStore"] = None,
     ) -> None:
         self._elevation = elevation_service
         self._green = green_analyzer
         self._settings = settings
+        self._surface_prediction_store = surface_prediction_store
+        self._last_surface_resolution_stats: Optional[SurfaceResolutionStats] = None
         self._init_osmnx()
+
+    @property
+    def last_surface_resolution_stats(self) -> Optional[SurfaceResolutionStats]:
+        """Статистика последнего :meth:`apply_surface_resolution` (после ``calculate_weights``)."""
+        return self._last_surface_resolution_stats
 
     def _init_osmnx(self) -> None:
         s = self._settings
@@ -400,7 +411,11 @@ class GraphBuilder:
             n - n_long,
         )
 
-        edges_gdf = apply_surface_resolution(edges_gdf)
+        edges_gdf, self._last_surface_resolution_stats = apply_surface_resolution(
+            edges_gdf,
+            prediction_store=self._surface_prediction_store,
+            settings=self._settings,
+        )
 
         length = edges_gdf["length"].values
         elev = edges_gdf["elevation_diff"].values
@@ -798,6 +813,13 @@ class GraphBuilder:
             "green_percent",
             "surface_osm",
             "surface_effective",
+            "surface_source",
+            "surface_ml_group",
+            "surface_ml_concrete",
+            "surface_ml_confidence",
+            "surface_ml_margin",
+            "surface_ml_reject_reason",
+            "surface_resolution_reason",
             "edge_bearing_deg",
             "thermal_open_sky_share",
             "thermal_vegetation_shade_share",

@@ -1,12 +1,21 @@
-"""Восстановление покрытия рёбер: OSM → эвристика highway/tracktype → unknown."""
+"""Восстановление покрытия рёбер: OSM → ML (опционально) → эвристика highway/tracktype → unknown."""
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+
+from ..config import DEFAULT_COEFFICIENT, Settings
+
+if TYPE_CHECKING:
+    from .surface_prediction_store import SurfacePrediction, SurfacePredictionStore
+
+logger = logging.getLogger(__name__)
 
 _TRACKTYPE_SURFACE = {
     "grade1": "paved",
@@ -16,7 +25,6 @@ _TRACKTYPE_SURFACE = {
     "grade5": "unpaved",
 }
 
-# Типы из OSM_HIGHWAY_FILTER — консервативно для велосипеда
 _HIGHWAY_SURFACE = {
     "construction": "compacted",
     "cycleway": "paved",
@@ -36,6 +44,14 @@ _HIGHWAY_SURFACE = {
     "tertiary_link": "paved",
     "track": "unpaved",
     "unclassified": "compacted",
+}
+
+# Группа Surface AI → строка для ``ModeProfile.surface`` (ключи CYCLIST/PEDESTRIAN).
+_ML_GROUP_TO_PROFILE_SURFACE = {
+    "paved_good": "asphalt",
+    "paved_rough": "compacted",
+    "unpaved_soft": "unpaved",
+    "unknown": "unknown",
 }
 
 
@@ -97,16 +113,240 @@ def build_surface_effective_column(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFr
     return gdf
 
 
-def apply_surface_resolution(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Колонка ``surface_effective`` для весов (без внешних файлов)."""
-    gdf = build_surface_effective_column(edges_gdf)
+def _osm_surface_present(surface_osm: str) -> bool:
+    return bool((surface_osm or "").strip())
 
-    def _row(r: pd.Series) -> str:
-        return resolve_surface_effective(
-            str(r.get("surface_osm") or ""),
-            r.get("highway"),
-            r.get("tracktype"),
+
+def _ensure_edge_id_column(gdf: gpd.GeoDataFrame) -> None:
+    if "edge_id" in gdf.columns and gdf["edge_id"].astype(str).str.len().gt(0).any():
+        return
+    if not all(c in gdf.columns for c in ("u", "v", "key")):
+        return
+    gdf["edge_id"] = (
+        pd.to_numeric(gdf["u"], errors="coerce").fillna(-1).astype(int).astype(str)
+        + "_"
+        + pd.to_numeric(gdf["v"], errors="coerce").fillna(-1).astype(int).astype(str)
+        + "_"
+        + pd.to_numeric(gdf["key"], errors="coerce").fillna(0).astype(int).astype(str)
+    )
+
+
+def _ml_surface_string(pred: "SurfacePrediction") -> str:
+    """Строка surface_effective для весов (ключ словаря profile.surface)."""
+    if pred.surface_effective_ml:
+        s = pred.surface_effective_ml.strip().lower()
+        if s:
+            return s
+    g = pred.surface_group
+    if pred.surface_concrete:
+        c = pred.surface_concrete.strip().lower()
+        if c:
+            return c
+    return _ML_GROUP_TO_PROFILE_SURFACE.get(g, "unknown")
+
+
+@dataclass
+class SurfaceResolutionStats:
+    """Счётчики после :func:`apply_surface_resolution` (граф целиком)."""
+
+    edge_count: int = 0
+    surface_source_osm_count: int = 0
+    surface_source_ml_count: int = 0
+    surface_source_heuristic_count: int = 0
+    surface_source_unknown_count: int = 0
+    ml_predictions_available_count: int = 0
+    ml_predictions_used_count: int = 0
+    ml_predictions_rejected_low_confidence: int = 0
+    ml_predictions_rejected_low_margin: int = 0
+    ml_predictions_rejected_paved_good_conf: int = 0
+    ml_predictions_rejected_unsafe: int = 0
+    ml_predictions_rejected_missing_match: int = 0
+    ml_confidence_sum_used: float = 0.0
+
+    def to_api_summary(self) -> Dict[str, Any]:
+        n = max(1, int(self.edge_count))
+        used = int(self.ml_predictions_used_count)
+        avg_conf = (
+            float(self.ml_confidence_sum_used) / used if used > 0 else 0.0
+        )
+        rejected = (
+            int(self.ml_predictions_rejected_low_confidence)
+            + int(self.ml_predictions_rejected_low_margin)
+            + int(self.ml_predictions_rejected_paved_good_conf)
+            + int(self.ml_predictions_rejected_unsafe)
+            + int(self.ml_predictions_rejected_missing_match)
+        )
+        return {
+            "osm_share": round(self.surface_source_osm_count / n, 4),
+            "ml_share": round(self.surface_source_ml_count / n, 4),
+            "heuristic_share": round(self.surface_source_heuristic_count / n, 4),
+            "unknown_share": round(self.surface_source_unknown_count / n, 4),
+            "ml_avg_confidence": round(avg_conf, 4),
+            "ml_rejected_edges": rejected,
+        }
+
+
+def apply_surface_resolution(
+    edges_gdf: gpd.GeoDataFrame,
+    *,
+    prediction_store: Optional["SurfacePredictionStore"] = None,
+    settings: Optional[Settings] = None,
+) -> tuple[gpd.GeoDataFrame, SurfaceResolutionStats]:
+    """Колонка ``surface_effective`` и диагностика источника покрытия.
+
+    Приоритет: валидный OSM ``surface`` → (опционально) ML → tracktype/highway → unknown.
+    """
+    stats = SurfaceResolutionStats(edge_count=len(edges_gdf))
+    gdf = build_surface_effective_column(edges_gdf)
+    _ensure_edge_id_column(gdf)
+
+    s = settings
+    use_ml = (
+        s is not None
+        and bool(s.surface_ai_runtime_enabled)
+        and prediction_store is not None
+        and prediction_store.loaded
+    )
+
+    n = len(gdf)
+    surf_eff: List[str] = []
+    surf_src: List[str] = []
+    ml_grp: List[str] = []
+    ml_conc: List[str] = []
+    ml_conf: List[float] = []
+    ml_marg: List[float] = []
+    ml_rej: List[str] = []
+    res_reason: List[str] = []
+
+    for idx in range(n):
+        row = gdf.iloc[idx]
+        surface_osm = str(row.get("surface_osm") or "")
+        highway = row.get("highway")
+        tracktype = row.get("tracktype")
+
+        if s and s.surface_ai_runtime_osm_priority and _osm_surface_present(surface_osm):
+            eff = resolve_surface_effective(surface_osm, highway, tracktype)
+            surf_eff.append(eff)
+            surf_src.append("osm")
+            ml_grp.append("")
+            ml_conc.append("")
+            ml_conf.append(float("nan"))
+            ml_marg.append(float("nan"))
+            ml_rej.append("")
+            res_reason.append("osm")
+            stats.surface_source_osm_count += 1
+            continue
+
+        pred: Optional["SurfacePrediction"] = None
+        if use_ml:
+            assert prediction_store is not None
+            pred = prediction_store.get_for_edge(row)
+            if pred is not None:
+                stats.ml_predictions_available_count += 1
+
+        ml_accepted = False
+        reject_reason: Optional[str] = None
+
+        if use_ml and pred is not None:
+            if float(pred.confidence) < float(s.surface_ai_runtime_min_confidence):
+                reject_reason = "low_confidence"
+                stats.ml_predictions_rejected_low_confidence += 1
+            elif float(pred.margin) < float(s.surface_ai_runtime_min_margin):
+                reject_reason = "low_margin"
+                stats.ml_predictions_rejected_low_margin += 1
+            elif s.surface_ai_runtime_use_only_safe and not pred.is_safe:
+                reject_reason = "unsafe"
+                stats.ml_predictions_rejected_unsafe += 1
+            elif (
+                pred.surface_group == "paved_good"
+                and float(pred.confidence)
+                < float(s.surface_ai_runtime_paved_good_min_confidence)
+            ):
+                reject_reason = "paved_good_low_confidence"
+                stats.ml_predictions_rejected_paved_good_conf += 1
+            else:
+                ml_accepted = True
+
+        if ml_accepted and pred is not None:
+            eff = _ml_surface_string(pred)
+            surf_eff.append(eff)
+            surf_src.append("ml")
+            ml_grp.append(pred.surface_group)
+            ml_conc.append(pred.surface_concrete or "")
+            ml_conf.append(float(pred.confidence))
+            ml_marg.append(float(pred.margin))
+            ml_rej.append(pred.reject_reason or "")
+            res_reason.append("ml_accepted")
+            stats.surface_source_ml_count += 1
+            stats.ml_predictions_used_count += 1
+            stats.ml_confidence_sum_used += float(pred.confidence)
+            continue
+
+        if use_ml and pred is None:
+            stats.ml_predictions_rejected_missing_match += 1
+
+        ml_grp.append(pred.surface_group if pred is not None else "")
+        ml_conc.append((pred.surface_concrete or "") if pred is not None else "")
+        ml_conf.append(float(pred.confidence) if pred is not None else float("nan"))
+        ml_marg.append(float(pred.margin) if pred is not None else float("nan"))
+        if reject_reason:
+            ml_rej.append(reject_reason)
+        elif pred is not None and pred.reject_reason:
+            ml_rej.append(str(pred.reject_reason))
+        elif use_ml and pred is None:
+            ml_rej.append("no_ml_row")
+        else:
+            ml_rej.append("")
+
+        if (
+            s is not None
+            and s.surface_ai_runtime_fallback_to_heuristic
+            and not _osm_surface_present(surface_osm)
+        ):
+            inf = infer_surface_from_tracktype_highway(highway, tracktype)
+            if inf:
+                surf_eff.append(inf)
+                surf_src.append("heuristic")
+                res_reason.append(
+                    f"heuristic_after_ml_reject:{reject_reason}"
+                    if reject_reason
+                    else "heuristic"
+                )
+                stats.surface_source_heuristic_count += 1
+                continue
+
+        surf_eff.append("unknown")
+        surf_src.append("unknown")
+        res_reason.append(
+            f"unknown_after_ml_reject:{reject_reason}" if reject_reason else "unknown"
+        )
+        stats.surface_source_unknown_count += 1
+
+    gdf["surface_effective"] = surf_eff
+    gdf["surface_source"] = surf_src
+    gdf["surface_ml_group"] = ml_grp
+    gdf["surface_ml_concrete"] = ml_conc
+    gdf["surface_ml_confidence"] = ml_conf
+    gdf["surface_ml_margin"] = ml_marg
+    gdf["surface_ml_reject_reason"] = ml_rej
+    gdf["surface_resolution_reason"] = res_reason
+
+    if s and s.surface_ai_runtime_log_stats:
+        n2 = max(1, n)
+        logger.info(
+            "surface_resolution: osm=%.1f%% ml=%.1f%% heur=%.1f%% unk=%.1f%% | "
+            "ml_used=%d ml_avail=%d rej(conf/margin/pgood/unsafe/miss)=%d/%d/%d/%d/%d",
+            100 * stats.surface_source_osm_count / n2,
+            100 * stats.surface_source_ml_count / n2,
+            100 * stats.surface_source_heuristic_count / n2,
+            100 * stats.surface_source_unknown_count / n2,
+            stats.ml_predictions_used_count,
+            stats.ml_predictions_available_count,
+            stats.ml_predictions_rejected_low_confidence,
+            stats.ml_predictions_rejected_low_margin,
+            stats.ml_predictions_rejected_paved_good_conf,
+            stats.ml_predictions_rejected_unsafe,
+            stats.ml_predictions_rejected_missing_match,
         )
 
-    gdf["surface_effective"] = gdf.apply(_row, axis=1)
-    return gdf
+    return gdf, stats

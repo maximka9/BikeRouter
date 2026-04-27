@@ -8,7 +8,7 @@
 CLI вроде ``precache_area`` не зависал без вывода на минуты при холодном старте.
 """
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from .config import Settings
 from .services.cache import CacheService
@@ -19,6 +19,7 @@ from .services.tiles import TileService
 if TYPE_CHECKING:
     from .services.graph import GraphBuilder
     from .services.green import GreenAnalyzer
+    from .services.surface_prediction_store import SurfacePredictionStore
 
 
 class Application:
@@ -37,6 +38,7 @@ class Application:
         )
         self._green: Optional["GreenAnalyzer"] = None
         self._graph_builder: Optional["GraphBuilder"] = None
+        self._surface_prediction_store: Optional[Any] = None
         self.router = RouteService()
 
     @property
@@ -48,11 +50,27 @@ class Application:
         return self._green
 
     @property
+    def surface_prediction_store(self) -> Any:
+        """Runtime CSV Surface AI; ``None`` если выключено в настройках."""
+        if not self.settings.surface_ai_runtime_enabled:
+            return None
+        if self._surface_prediction_store is None:
+            from .services.surface_prediction_store import SurfacePredictionStore
+
+            st = SurfacePredictionStore(self.settings)
+            st.load()
+            self._surface_prediction_store = st
+        return self._surface_prediction_store
+
+    @property
     def graph_builder(self) -> "GraphBuilder":
         if self._graph_builder is None:
             from .services.graph import GraphBuilder
 
             self._graph_builder = GraphBuilder(
-                self.elevation, self.green, self.settings
+                self.elevation,
+                self.green,
+                self.settings,
+                surface_prediction_store=self.surface_prediction_store,
             )
         return self._graph_builder

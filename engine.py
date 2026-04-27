@@ -1255,6 +1255,10 @@ class RouteEngine:
 
         hm = heat_stress_metrics
         rc = routing_context
+        gb_stats = self._app.graph_builder.last_surface_resolution_stats
+        surface_res_summary = (
+            gb_stats.to_api_summary() if gb_stats is not None else None
+        )
         return RouteResponse(
             profile=profile.key,
             mode=mode,
@@ -1328,6 +1332,7 @@ class RouteEngine:
             elevation_profile=elev_points,
             map_layers=map_layers,
             quality_hints=quality_hints,
+            surface_resolution=surface_res_summary,
             heat_stress=heat_stress_metrics,
         )
 

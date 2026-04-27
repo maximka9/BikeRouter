@@ -692,6 +692,13 @@ class RouteResponse(BaseModel):
         default=None,
         description="Предупреждения о качестве данных OSM и fallback-коэффициентах",
     )
+    surface_resolution: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Сводка источников покрытия по графу после последнего расчёта весов "
+            "(osm_share, ml_share, heuristic_share, unknown_share, ml_avg_confidence, ml_rejected_edges)"
+        ),
+    )
     heat_stress: Optional[HeatStressMetrics] = Field(
         default=None,
         description="Заполняется для критериев heat, stress, heat_stress",

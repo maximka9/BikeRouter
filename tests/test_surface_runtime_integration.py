@@ -14,7 +14,6 @@ from bike_router.config import Settings
 from bike_router.services.graph import GraphBuilder
 from bike_router.services.surface_prediction_store import (
     SurfacePredictionStore,
-    compute_runtime_routing_graph_hash,
     parse_runtime_artifact_graph_hash,
 )
 from bike_router.services.surface_resolve import apply_surface_resolution
@@ -80,6 +79,28 @@ def test_osm_surface_has_priority_over_ml(tmp_path, monkeypatch) -> None:
     assert out["surface_source"].iloc[0] == "osm"
     assert out["surface_effective"].iloc[0] == "asphalt"
     assert stats.surface_source_osm_count == 1
+
+
+def test_ml_surface_effective_maps_to_different_profile_coefficient(
+    tmp_path, monkeypatch
+) -> None:
+    """Группа paved_rough → compacted в профиле; коэффициент отличается от unknown."""
+    from bike_router.config import CYCLIST, DEFAULT_COEFFICIENT
+
+    csv_path = tmp_path / "p.csv"
+    _write_runtime_csv(csv_path)
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
+    s = Settings()
+    store = SurfacePredictionStore(s)
+    store.load()
+    gdf = _minimal_edges_gdf()
+    out, _ = apply_surface_resolution(gdf, prediction_store=store, settings=s)
+    eff = str(out["surface_effective"].iloc[0])
+    assert eff == "compacted"
+    c_eff = float(CYCLIST.surface.get(eff, DEFAULT_COEFFICIENT))
+    c_unk = float(CYCLIST.surface.get("unknown", DEFAULT_COEFFICIENT))
+    assert c_eff != c_unk
 
 
 def test_ml_used_only_when_surface_missing(tmp_path, monkeypatch) -> None:
@@ -158,11 +179,13 @@ def test_ml_fallback_to_heuristic_when_prediction_missing(tmp_path, monkeypatch)
 
 
 def test_ml_fallback_to_unknown_when_no_heuristic(tmp_path, monkeypatch) -> None:
+    from bike_router.services import surface_resolve as sr
+
     csv_path = tmp_path / "p.csv"
     _write_runtime_csv(csv_path, edge_id="999_888_0", u=999, v=888, key=0)
     monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
     monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
-    monkeypatch.setenv("SURFACE_AI_RUNTIME_FALLBACK_TO_HEURISTIC", "false")
+    monkeypatch.setattr(sr, "SURFACE_AI_RUNTIME_FALLBACK_TO_HEURISTIC", False)
     s = Settings()
     store = SurfacePredictionStore(s)
     store.load()
@@ -199,11 +222,13 @@ def test_prediction_store_rejects_duplicate_edge_ids(tmp_path, monkeypatch) -> N
 
 
 def test_prediction_store_supports_undirected_edge_match(tmp_path, monkeypatch) -> None:
+    from bike_router.services import surface_prediction_store as sps
+
     p = tmp_path / "u.csv"
     _write_runtime_csv(p, edge_id="x", u=2, v=1, key=0)
     monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
     monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(p))
-    monkeypatch.setenv("SURFACE_AI_RUNTIME_MATCH_BY", "undirected_edge_key")
+    monkeypatch.setattr(sps, "SURFACE_AI_RUNTIME_MATCH_BY", "undirected_edge_key")
     s = Settings()
     st = SurfacePredictionStore(s)
     st.load()
@@ -246,7 +271,6 @@ def test_osm_unknown_tag_allows_ml(tmp_path, monkeypatch) -> None:
     _write_runtime_csv(csv_path)
     monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
     monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
-    monkeypatch.setenv("SURFACE_AI_RUNTIME_OSM_PRIORITY", "true")
     s = Settings()
     store = SurfacePredictionStore(s)
     store.load()
@@ -261,7 +285,6 @@ def test_osm_priority_env_does_not_allow_ml_over_osm(tmp_path, monkeypatch) -> N
     _write_runtime_csv(csv_path, surface_pred_group="unpaved_soft")
     monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
     monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
-    monkeypatch.setenv("SURFACE_AI_RUNTIME_OSM_PRIORITY", "false")
     s = Settings()
     store = SurfacePredictionStore(s)
     store.load()
@@ -291,24 +314,3 @@ def test_parse_runtime_json_graph_fingerprint() -> None:
     assert parse_runtime_artifact_graph_hash(blob) == "abc123def4567890"
 
 
-def test_graph_fingerprint_match_allows_ml(tmp_path, monkeypatch) -> None:
-    csv_path = tmp_path / "p.csv"
-    gdf = _minimal_edges_gdf()
-    gh = compute_runtime_routing_graph_hash(gdf)
-    _write_runtime_csv(csv_path, graph_fingerprint=gh)
-    monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
-    monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
-    s = Settings()
-    store = SurfacePredictionStore(s)
-    store.load()
-    out, _stats = apply_surface_resolution(gdf, prediction_store=store, settings=s)
-    assert out["surface_source"].iloc[0] == "ml"
-
-
-def test_ml_paved_rough_maps_to_profile_surface_string() -> None:
-    """compacted (paved_rough) даёт иной множитель, чем unknown — см. CYCLIST.surface."""
-    from bike_router.config import CYCLIST, DEFAULT_COEFFICIENT
-
-    assert CYCLIST.surface.get("compacted") != CYCLIST.surface.get(
-        "unknown", DEFAULT_COEFFICIENT
-    )

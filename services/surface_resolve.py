@@ -11,6 +11,14 @@ import numpy as np
 import pandas as pd
 
 from ..config import DEFAULT_COEFFICIENT, Settings
+from .surface_runtime_constants import (
+    SURFACE_AI_RUNTIME_FALLBACK_TO_HEURISTIC,
+    SURFACE_AI_RUNTIME_LOG_STATS,
+    SURFACE_AI_RUNTIME_MIN_CONFIDENCE,
+    SURFACE_AI_RUNTIME_MIN_MARGIN,
+    SURFACE_AI_RUNTIME_PAVED_GOOD_MIN_CONFIDENCE,
+    SURFACE_AI_RUNTIME_USE_ONLY_SAFE,
+)
 
 if TYPE_CHECKING:
     from .surface_prediction_store import SurfacePrediction, SurfacePredictionStore
@@ -265,19 +273,19 @@ def apply_surface_resolution(
         reject_reason: Optional[str] = None
 
         if use_ml and pred is not None:
-            if float(pred.confidence) < float(s.surface_ai_runtime_min_confidence):
+            if float(pred.confidence) < float(SURFACE_AI_RUNTIME_MIN_CONFIDENCE):
                 reject_reason = "low_confidence"
                 stats.ml_predictions_rejected_low_confidence += 1
-            elif float(pred.margin) < float(s.surface_ai_runtime_min_margin):
+            elif float(pred.margin) < float(SURFACE_AI_RUNTIME_MIN_MARGIN):
                 reject_reason = "low_margin"
                 stats.ml_predictions_rejected_low_margin += 1
-            elif s.surface_ai_runtime_use_only_safe and not pred.is_safe:
+            elif SURFACE_AI_RUNTIME_USE_ONLY_SAFE and not pred.is_safe:
                 reject_reason = "unsafe"
                 stats.ml_predictions_rejected_unsafe += 1
             elif (
                 pred.surface_group == "paved_good"
                 and float(pred.confidence)
-                < float(s.surface_ai_runtime_paved_good_min_confidence)
+                < float(SURFACE_AI_RUNTIME_PAVED_GOOD_MIN_CONFIDENCE)
             ):
                 reject_reason = "paved_good_low_confidence"
                 stats.ml_predictions_rejected_paved_good_conf += 1
@@ -317,7 +325,7 @@ def apply_surface_resolution(
 
         if (
             s is not None
-            and s.surface_ai_runtime_fallback_to_heuristic
+            and SURFACE_AI_RUNTIME_FALLBACK_TO_HEURISTIC
             and not _osm_surface_blocks_ml(surface_osm)
         ):
             inf = infer_surface_from_tracktype_highway(highway, tracktype)
@@ -348,7 +356,7 @@ def apply_surface_resolution(
     gdf["surface_ml_reject_reason"] = ml_rej
     gdf["surface_resolution_reason"] = res_reason
 
-    if s and s.surface_ai_runtime_log_stats:
+    if s and SURFACE_AI_RUNTIME_LOG_STATS:
         n2 = max(1, n)
         logger.info(
             "surface_resolution: osm=%.1f%% ml=%.1f%% heur=%.1f%% unk=%.1f%% | "

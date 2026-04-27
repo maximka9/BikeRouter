@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 import pandas as pd
 
 from ..config import Settings
+from .surface_runtime_constants import SURFACE_AI_RUNTIME_MATCH_BY
 
 logger = logging.getLogger(__name__)
 
@@ -348,7 +349,7 @@ class SurfacePredictionStore:
             return None
         modes = [
             m.strip().lower().replace(" ", "_")
-            for m in (self._settings.surface_ai_runtime_match_by or "").split(",")
+            for m in (SURFACE_AI_RUNTIME_MATCH_BY or "").split(",")
             if m.strip()
         ]
         for mode in modes:

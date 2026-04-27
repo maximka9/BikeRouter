@@ -4,7 +4,7 @@
 # Кэш (OSM, area_precache, тайлы): каталог ./data на хосте → /data в контейнере (bind mount).
 # Area precache по полигону собирайте офлайн: ``python -m bike_router.tools.precache_area`` (тот же ./data).
 #
-# Скопируйте .env.example → .env и при необходимости поправьте AREA_* и порты.
+# Настройте bike_router/.env (и при необходимости .env.local) под хост: AREA_*, порты, DISABLE_*.
 #
 services:
   bike-router:
@@ -17,7 +17,7 @@ services:
     environment:
       PYTHONPATH: /app
       BIKE_ROUTER_BASE_DIR: /data
-      # Зелень и тайлы управляются через .env (см. .env.example: компактный AREA_*, SATELLITE_ZOOM, DISABLE_*).
+      # Зелень и тайлы — через .env (AREA_*, SATELLITE_ZOOM, DISABLE_*).
       # Для «быстрого Docker без тайлов» раскомментируйте:
       # DISABLE_SATELLITE_GREEN: "true"
     volumes:

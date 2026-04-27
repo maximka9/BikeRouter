@@ -42,8 +42,8 @@
 | `bike_router/docker-compose.yml` | Сервис, bind mount `./data` → `/data`, healthcheck |
 | `bike_router/docker-entrypoint.sh` | Только `exec` Gunicorn/Uvicorn; предсборка полигона — офлайн (`precache_area`) |
 | `bike_router/.dockerignore` | Исключения при сборке образа |
-| `bike_router/.env.example` | Шаблон переменных окружения (копировать в `.env`) |
-| `bike_router/.env` | Локальные секреты/настройки (не коммитить) |
+| `bike_router/.env` | Рабочий конфиг (пути, полигон, corridor, Overpass, runtime ML); коэффициенты моделей — в Python |
+| `bike_router/.env.local` | Опциональный локальный override (не коммитить) |
 
 ### `bike_router/middleware/`
 
@@ -93,6 +93,18 @@
 | Путь | Назначение |
 |------|------------|
 | `bike_router/tests/test_smoke.py` | Дымовые тесты без загрузки OSM |
+| `bike_router/tests/test_surface_runtime_integration.py` | Инварианты runtime Surface AI (OSM приоритетнее ML и т.д.) |
+| `bike_router/tests/test_surface_ai_fast.py` | Короткие unit-тесты Surface AI без обучения |
+| `bike_router/tests/test_heat_weather_fast.py` | Тепло/погода/сезон без сети |
+| `bike_router/tests/test_retry.py` | Backoff/retry без HTTP |
+| `bike_router/tests/test_experiment_scripts.py` | Импорт CLI экспериментов (без запуска `--mode all`) |
+
+**Тяжёлые проверки** (полный граф, тайлы, обучение ML, батчи) не входят в `pytest`: запускайте вручную, например:
+
+- `python -m bike_router.tools.surface_ai_experiment --mode all`
+- `python -m bike_router.tools.route_batch_experiment`
+- `python -m bike_router.tools.surface_runtime_route_experiment`
+- `python -m bike_router.tools.precache_area`
 
 ### Дерево каталогов (кратко)
 
@@ -110,7 +122,8 @@ bike_router/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .dockerignore
-├── .env.example
+├── .env
+├── .env.local
 ├── middleware/
 │   ├── __init__.py
 │   └── request_log.py
@@ -193,7 +206,7 @@ python -m bike_router
 
 Перейдите в каталог **`bike_router/`** (где лежит `docker-compose.yml`).
 
-**Первый раз:** скопируйте `.env.example` → `.env` и при необходимости отредактируйте `AREA_*` и порт.
+**Первый раз:** отредактируйте `bike_router/.env` (при необходимости создайте `bike_router/.env.local` для личных override).
 
 ### Два официальных режима кэша
 
@@ -288,7 +301,7 @@ ingress:
 
 ## Конфигурация и переменные окружения
 
-Подробные комментарии — в **`.env.example`**.
+Численные коэффициенты heat/weather/snow и Surface AI experiment задаются в коде (`services/weather_params.py`, `services/seasonal_params.py`, `services/surface_ai.py`), а не в `.env`.
 
 | Тема | Переменные |
 |------|------------|
@@ -390,7 +403,7 @@ python -m unittest discover -s bike_router/tests -p "test*.py" -v
 
 ## Архитектура (кратко)
 
-HTTP и статика — `bike_router/api.py`; доменная логика — `bike_router/engine.py` и модули в `bike_router/services/`. Полный перечень файлов и каталогов кэша — в разделе **«Структура проекта»** выше. **`GRAPH_CORRIDOR_MODE`** в коде по умолчанию выключен; пример с коридором в **`bike_router/.env.example`** ориентирован на демо/разработку.
+HTTP и статика — `bike_router/api.py`; доменная логика — `bike_router/engine.py` и модули в `bike_router/services/`. Полный перечень файлов и каталогов кэша — в разделе **«Структура проекта»** выше. **`GRAPH_CORRIDOR_MODE`** в коде по умолчанию выключен; в **`bike_router/.env`** можно включить коридор и precache для демо/разработки.
 
 **Параллелизм и блокировка графа:** тяжёлая сборка коридора (OSM, расчёт весов, спутник) выполняется **вне** короткой блокировки `threading.Lock` в `RouteEngine`: под lock остаются проверка «текущий коридор уже покрывает запрос?» и атомарная замена активного графа. Запросы с разными ключами коридора могут перекрываться по CPU; для одного и того же bbox по-прежнему действует отдельный **gate** (один строитель на ключ). Это снимает глобальную сериализацию «всех POST на один lock» на время Dijkstra и построения ответа.
 

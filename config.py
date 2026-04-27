@@ -14,18 +14,21 @@ import math
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
+
+from .services.seasonal_params import DEFAULT_SEASONAL_SNOW_PARAMS, SeasonalSnowParams
+from .services.weather_params import DEFAULT_HEAT_WEATHER_PARAMS, HeatWeatherParams
 
 try:
     from dotenv import load_dotenv
 
-    _PACKAGE_ENV = Path(__file__).resolve().parent / ".env"
-    # Сначала `.env` в cwd (без перезаписи уже заданных в ОС переменных).
-    load_dotenv()
-    # Затем `bike_router/.env` с override=True: иначе BIKE_ROUTER_BASE_DIR из
-    # пользовательских/системных переменных Windows (например R:\\data) перебивает
-    # проектный .env, и тайлы уезжают не в каталог репозитория.
-    load_dotenv(_PACKAGE_ENV, override=True)
+    _PACKAGE_DIR = Path(__file__).resolve().parent
+    _PROJECT_ENV = _PACKAGE_DIR / ".env"
+    _LOCAL_ENV = _PACKAGE_DIR / ".env.local"
+    # Проектный .env с override=True: иначе BIKE_ROUTER_BASE_DIR из переменных
+    # Windows перебивает репозиторий. Локальный override — только .env.local.
+    load_dotenv(_PROJECT_ENV, override=True)
+    load_dotenv(_LOCAL_ENV, override=True)
 except ImportError:
     pass
 
@@ -368,14 +371,14 @@ def time_slot_key_for_hour(hour: int) -> str:
 
 
 # Масштабы безразмерных тепло/стресс штрафов относительно типичного physical weight
-HEAT_COST_SCALE: float = _env("HEAT_COST_SCALE", 0.35, float)
-STRESS_COST_SCALE: float = _env("STRESS_COST_SCALE", 2.5, float)
+HEAT_COST_SCALE: float = 0.35
+STRESS_COST_SCALE: float = 2.5
 # Базовый штраф за поворот (масштабируется delta из RoutingPreferenceProfile)
-TURN_PENALTY_BASE: float = _env("TURN_PENALTY_BASE", 8.0, float)
-TURN_ANGLE_THRESHOLD_DEG: float = _env("TURN_ANGLE_THRESHOLD_DEG", 40.0, float)
+TURN_PENALTY_BASE: float = 8.0
+TURN_ANGLE_THRESHOLD_DEG: float = 40.0
 
 # Версия тепло/стресс слоя для инвалидации кэша графа
-HEAT_STRESS_MODEL_VERSION: str = _env("HEAT_STRESS_MODEL_VERSION", "1", str)
+HEAT_STRESS_MODEL_VERSION: str = "1"
 
 # Верхняя граница **отображаемого** уклона (доля 0–1). На рёбрах графа ``gradient``
 # клипуется до ``max(p.max_gradient) == 0.50``, из‑за чего «макс. уклон» в UI часто
@@ -442,317 +445,10 @@ class Settings:
     # --- Лимиты маршрутизации ---
     max_route_km: float = _env("MAX_ROUTE_KM", 50.0, float)
     max_snap_distance_m: float = _env("MAX_SNAP_DISTANCE_M", 500.0, float)
-    # Макс. относительное удлинение vs маршрут «Оптимальный по энергии» (full) для thermal/stress режимов.
-    heat_max_detour_ratio: float = _env("HEAT_MAX_DETOUR_RATIO", 0.42, float)
-    stress_max_detour_ratio: float = _env("STRESS_MAX_DETOUR_RATIO", 0.55, float)
 
-    # --- Тепловая маршрутизация: погода × микроклимат рёбер (см. services/routing.effective_edge_components) ---
-    heat_hot_tree_bonus_scale: float = _env("HEAT_HOT_TREE_BONUS_SCALE", 1.45, float)
-    heat_hot_open_sky_penalty_scale: float = _env(
-        "HEAT_HOT_OPEN_SKY_PENALTY_SCALE", 1.55, float
-    )
-    heat_cold_building_canyon_bonus_scale: float = _env(
-        "HEAT_COLD_BUILDING_CANYON_BONUS_SCALE", 1.4, float
-    )
-    # 0..1: насколько гасить выгоду тени деревьев в «холодном» режиме (выше — сильнее гашение).
-    heat_cold_tree_bonus_damping: float = _env(
-        "HEAT_COLD_TREE_BONUS_DAMPING", 0.65, float
-    )
-    # Общий усилитель чувствительности погодных множителей и тепловых поправок по рёбрам.
-    heat_weather_response_scale: float = _env("HEAT_WEATHER_RESPONSE_SCALE", 1.35, float)
-
-    # --- Непрерывная тепло-микроклиматическая модель (рёбра, без hot/cold/neutral) ---
-    heat_continuous_enable: bool = _env_bool("HEAT_CONTINUOUS_ENABLE", True)
-    heat_temp_ref_max: float = _env("HEAT_TEMP_REF_MAX", 30.0, float)
-    heat_temp_cool_ref: float = _env("HEAT_TEMP_COOL_REF", 14.0, float)
-    heat_temp_cool_range: float = _env("HEAT_TEMP_COOL_RANGE", 10.0, float)
-    heat_rain_ref_max: float = _env("HEAT_RAIN_REF_MAX", 3.0, float)
-    heat_wind_ref_max: float = _env("HEAT_WIND_REF_MAX", 12.0, float)
-    heat_gust_delta_ref_max: float = _env("HEAT_GUST_DELTA_REF_MAX", 10.0, float)
-
-    heat_tree_shade_temp_gain: float = _env("HEAT_TREE_SHADE_TEMP_GAIN", 0.42, float)
-    heat_tree_shade_rain_damp: float = _env("HEAT_TREE_SHADE_RAIN_DAMP", 0.35, float)
-    heat_tree_shade_cold_damp: float = _env("HEAT_TREE_SHADE_COLD_DAMP", 0.58, float)
-
-    heat_open_sky_temp_gain: float = _env("HEAT_OPEN_SKY_TEMP_GAIN", 0.52, float)
-    heat_open_sky_wind_gain: float = _env("HEAT_OPEN_SKY_WIND_GAIN", 0.28, float)
-    heat_open_sky_gust_gain: float = _env("HEAT_OPEN_SKY_GUST_GAIN", 0.22, float)
-    heat_open_sky_humid_gain: float = _env("HEAT_OPEN_SKY_HUMID_GAIN", 0.18, float)
-    heat_apparent_temp_enable: bool = _env_bool("HEAT_APPARENT_TEMP_ENABLE", True)
-    heat_apparent_temp_ref: float = _env("HEAT_APPARENT_TEMP_REF", 25.0, float)
-    heat_apparent_temp_hot_ref: float = _env("HEAT_APPARENT_TEMP_HOT_REF", 32.0, float)
-    heat_apparent_temp_extreme_ref: float = _env(
-        "HEAT_APPARENT_TEMP_EXTREME_REF", 38.0, float
-    )
-    heat_open_sky_apparent_gain: float = _env(
-        "HEAT_OPEN_SKY_APPARENT_GAIN", 0.30, float
-    )
-    heat_open_sky_radiation_gain: float = _env(
-        "HEAT_OPEN_SKY_RADIATION_GAIN", 0.25, float
-    )
-    heat_open_sky_hot_extra_gain: float = _env(
-        "HEAT_OPEN_SKY_HOT_EXTRA_GAIN", 0.15, float
-    )
-    heat_extreme_apparent_threshold: float = _env(
-        "HEAT_EXTREME_APPARENT_THRESHOLD", 35.0, float
-    )
-    heat_extreme_route_beta_gain: float = _env(
-        "HEAT_EXTREME_ROUTE_BETA_GAIN", 0.30, float
-    )
-    heat_extreme_open_route_gain: float = _env(
-        "HEAT_EXTREME_OPEN_ROUTE_GAIN", 0.22, float
-    )
-    heat_extreme_tree_route_gain: float = _env(
-        "HEAT_EXTREME_TREE_ROUTE_GAIN", 0.18, float
-    )
-    heat_tree_shade_apparent_gain: float = _env(
-        "HEAT_TREE_SHADE_APPARENT_GAIN", 0.38, float
-    )
-    heat_tree_shade_radiation_gain: float = _env(
-        "HEAT_TREE_SHADE_RADIATION_GAIN", 0.30, float
-    )
-    heat_tree_shade_extreme_gain: float = _env(
-        "HEAT_TREE_SHADE_EXTREME_GAIN", 0.20, float
-    )
-    heat_building_shade_radiation_gain: float = _env(
-        "HEAT_BUILDING_SHADE_RADIATION_GAIN", 0.14, float
-    )
-
-    heat_building_shade_wind_gain: float = _env(
-        "HEAT_BUILDING_SHADE_WIND_GAIN", 0.32, float
-    )
-    heat_building_shade_rain_gain: float = _env(
-        "HEAT_BUILDING_SHADE_RAIN_GAIN", 0.30, float
-    )
-    heat_building_shade_humid_gain: float = _env(
-        "HEAT_BUILDING_SHADE_HUMID_GAIN", 0.14, float
-    )
-    heat_building_shade_gust_gain: float = _env(
-        "HEAT_BUILDING_SHADE_GUST_GAIN", 0.22, float
-    )
-
-    heat_covered_rain_gain: float = _env("HEAT_COVERED_RAIN_GAIN", 0.28, float)
-    heat_covered_wind_gain: float = _env("HEAT_COVERED_WIND_GAIN", 0.14, float)
-    heat_covered_gust_gain: float = _env("HEAT_COVERED_GUST_GAIN", 0.12, float)
-
-    heat_wet_surface_rain_gain: float = _env("HEAT_WET_SURFACE_RAIN_GAIN", 0.38, float)
-    heat_wet_surface_humid_gain: float = _env("HEAT_WET_SURFACE_HUMID_GAIN", 0.22, float)
-
-    heat_edge_k_open: float = _env("HEAT_EDGE_K_OPEN", 0.66, float)
-    heat_edge_k_tree: float = _env("HEAT_EDGE_K_TREE", 0.54, float)
-    heat_edge_k_building: float = _env("HEAT_EDGE_K_BUILDING", 0.50, float)
-    heat_edge_k_covered: float = _env("HEAT_EDGE_K_COVERED", 0.16, float)
-    heat_edge_k_wet: float = _env("HEAT_EDGE_K_WET", 0.34, float)
-    heat_edge_k_wind: float = _env("HEAT_EDGE_K_WIND", 0.36, float)
-    # Усиление дождевого отклика на рёбрах через O/B (rain_norm), без опоры на covered.
-    heat_edge_rain_open_mult: float = _env("HEAT_EDGE_RAIN_OPEN_MULT", 0.48, float)
-    heat_edge_rain_building_mult: float = _env(
-        "HEAT_EDGE_RAIN_BUILDING_MULT", 0.56, float
-    )
-    heat_edge_rain_wind_exp_mult: float = _env(
-        "HEAT_EDGE_RAIN_WIND_EXP_MULT", 0.22, float
-    )
-
-    heat_wind_exp_w1: float = _env("HEAT_WIND_EXP_W1", 0.45, float)
-    heat_wind_exp_w2: float = _env("HEAT_WIND_EXP_W2", 0.35, float)
-    heat_wind_exp_w3: float = _env("HEAT_WIND_EXP_W3", 0.35, float)
-
-    heat_wet_surface_edge_bad_max: float = _env(
-        "HEAT_WET_SURFACE_EDGE_BAD_MAX", 0.85, float
-    )
-    heat_open_wet_synergy: float = _env("HEAT_OPEN_WET_SYNERGY", 0.14, float)
-
-    heat_wind_open_penalty_gain: float = _env("HEAT_WIND_OPEN_GAIN", 0.34, float)
-    heat_wind_open_gust_gain: float = _env("HEAT_WIND_OPEN_GUST_EXTRA", 0.24, float)
-    # Ветер с направлением (метео ° — откуда дует): вдоль улицы / поперёк и экран зданий.
-    heat_wind_along_open_amp: float = _env("HEAT_WIND_ALONG_OPEN_AMP", 0.28, float)
-    heat_wind_cross_build_amp: float = _env("HEAT_WIND_CROSS_BUILD_AMP", 0.35, float)
-    heat_wind_along_build_damp: float = _env("HEAT_WIND_ALONG_BUILD_DAMP", 0.24, float)
-    stress_wind_along_open_amp: float = _env("STRESS_WIND_ALONG_OPEN_AMP", 0.32, float)
-    stress_wind_cross_shelter_amp: float = _env(
-        "STRESS_WIND_CROSS_SHELTER_AMP", 0.40, float
-    )
-
-    heat_edge_factor_min: float = _env("HEAT_EDGE_FACTOR_MIN", 0.65, float)
-    heat_edge_factor_max: float = _env("HEAT_EDGE_FACTOR_MAX", 1.75, float)
-
-    heat_coeff_clamp_lo: float = _env("HEAT_COEFF_CLAMP_LO", 0.72, float)
-    heat_coeff_clamp_hi: float = _env("HEAT_COEFF_CLAMP_HI", 1.60, float)
-    heat_coeff_soft_overflow_gain: float = _env(
-        "HEAT_COEFF_SOFT_OVERFLOW_GAIN", 0.18, float
-    )
-    heat_coeff_hard_hi: float = _env("HEAT_COEFF_HARD_HI", 1.85, float)
-
-    # Погодный stress: доля глобального wm.stress (остальное — edge-specific в routing).
-    weather_stress_global_blend: float = _env("WEATHER_STRESS_GLOBAL_BLEND", 0.28, float)
-    weather_stress_edge_rain_slip: float = _env("WEATHER_STRESS_EDGE_RAIN_SLIP", 0.22, float)
-    weather_stress_edge_wind_open: float = _env("WEATHER_STRESS_EDGE_WIND_OPEN", 0.20, float)
-    weather_stress_edge_lts_fast: float = _env("WEATHER_STRESS_EDGE_LTS_FAST", 0.17, float)
-    weather_stress_edge_building_shelter: float = _env(
-        "WEATHER_STRESS_EDGE_BUILDING_SHELTER", 0.11, float
-    )
-    weather_stress_edge_factor_min: float = _env(
-        "WEATHER_STRESS_EDGE_FACTOR_MIN", 0.82, float
-    )
-    weather_stress_edge_factor_max: float = _env(
-        "WEATHER_STRESS_EDGE_FACTOR_MAX", 1.48, float
-    )
-    # Физика: дождевой штраф по покрытию на ребре (хорошие покрытия ~1.0).
-    weather_phys_wet_penalty_tier0_cap: float = _env(
-        "WEATHER_PHYS_WET_PENALTY_TIER0_CAP", 0.016, float
-    )
-    weather_phys_wet_penalty_tier1_coef: float = _env(
-        "WEATHER_PHYS_WET_PENALTY_TIER1_COEF", 0.048, float
-    )
-    weather_phys_wet_penalty_tier2_coef: float = _env(
-        "WEATHER_PHYS_WET_PENALTY_TIER2_COEF", 0.12, float
-    )
-
-    # --- Сезон маршрутизации (зелень / тень / снег): календарь и коэффициенты ---
-    season_green_ramp_start_day: int = int(
-        max(1, round(_env("SEASON_GREEN_RAMP_START_DAY", 10.0, float)))
-    )
-    season_green_ramp_end_day: int = int(
-        max(1, round(_env("SEASON_GREEN_RAMP_END_DAY", 20.0, float)))
-    )
-    season_early_spring_end_day: int = int(
-        max(1, round(_env("SEASON_EARLY_SPRING_END_DAY", 9.0, float)))
-    )
-    season_green_ramp_start_mult: float = _env(
-        "SEASON_GREEN_RAMP_START_MULT", 0.18, float
-    )
-    season_green_ramp_end_mult: float = _env("SEASON_GREEN_RAMP_END_MULT", 1.0, float)
-    season_green_mult_winter: float = _env("SEASON_GREEN_MULT_WINTER", 0.08, float)
-    season_green_mult_early_spring: float = _env(
-        "SEASON_GREEN_MULT_EARLY_SPRING", 0.18, float
-    )
-    season_green_mult_green: float = _env("SEASON_GREEN_MULT_GREEN", 1.0, float)
-    season_green_mult_late_autumn: float = _env(
-        "SEASON_GREEN_MULT_LATE_AUTUMN", 0.42, float
-    )
-    season_tree_heat_mult_winter: float = _env(
-        "SEASON_TREE_HEAT_MULT_WINTER", 0.12, float
-    )
-    season_tree_heat_mult_early_spring: float = _env(
-        "SEASON_TREE_HEAT_MULT_EARLY_SPRING", 0.28, float
-    )
-    season_tree_heat_mult_spring_ramp: float = _env(
-        "SEASON_TREE_HEAT_MULT_SPRING_RAMP", 0.55, float
-    )
-    season_tree_heat_mult_green: float = _env(
-        "SEASON_TREE_HEAT_MULT_GREEN", 1.0, float
-    )
-    season_tree_heat_mult_late_autumn: float = _env(
-        "SEASON_TREE_HEAT_MULT_LATE_AUTUMN", 0.45, float
-    )
-    snow_spring_ramp_strength: float = _env("SNOW_SPRING_RAMP_STRENGTH", 0.88, float)
-    snow_default_strength: float = _env("SNOW_DEFAULT_STRENGTH", 0.9, float)
-    snow_green_season_strength_floor: float = _env(
-        "SNOW_GREEN_SEASON_STRENGTH_FLOOR", 0.06, float
-    )
-    snow_green_season_depth_on_m: float = _env(
-        "SNOW_GREEN_SEASON_DEPTH_ON_M", 0.02, float
-    )
-    snow_green_season_fresh_on_cm_h: float = _env(
-        "SNOW_GREEN_SEASON_FRESH_ON_CM_H", 0.25, float
-    )
-    snow_depth_tier0_max_m: float = _env("SNOW_DEPTH_TIER0_MAX_M", 0.02, float)
-    snow_depth_tier1_max_m: float = _env("SNOW_DEPTH_TIER1_MAX_M", 0.05, float)
-    snow_depth_tier2_max_m: float = _env("SNOW_DEPTH_TIER2_MAX_M", 0.10, float)
-    snow_depth_mult_tier0: float = _env("SNOW_DEPTH_MULT_TIER0", 1.0, float)
-    snow_depth_mult_tier1: float = _env("SNOW_DEPTH_MULT_TIER1", 1.06, float)
-    snow_depth_mult_tier2: float = _env("SNOW_DEPTH_MULT_TIER2", 1.14, float)
-    snow_depth_mult_tier3: float = _env("SNOW_DEPTH_MULT_TIER3", 1.28, float)
-    snow_fresh_tier0_max_cm_h: float = _env("SNOW_FRESH_TIER0_MAX_CM_H", 0.2, float)
-    snow_fresh_tier1_max_cm_h: float = _env("SNOW_FRESH_TIER1_MAX_CM_H", 1.0, float)
-    snow_fresh_tier2_max_cm_h: float = _env("SNOW_FRESH_TIER2_MAX_CM_H", 3.0, float)
-    snow_fresh_mult_tier0: float = _env("SNOW_FRESH_MULT_TIER0", 1.0, float)
-    snow_fresh_mult_tier1: float = _env("SNOW_FRESH_MULT_TIER1", 1.04, float)
-    snow_fresh_mult_tier2: float = _env("SNOW_FRESH_MULT_TIER2", 1.12, float)
-    snow_fresh_mult_tier3: float = _env("SNOW_FRESH_MULT_TIER3", 1.22, float)
-    snow_depth_norm_ref_m: float = _env("SNOW_DEPTH_NORM_REF_M", 0.25, float)
-    snow_fresh_norm_ref_cm_h: float = _env("SNOW_FRESH_NORM_REF_CM_H", 4.0, float)
-    snow_stress_global_add_winter: float = _env(
-        "SNOW_STRESS_GLOBAL_ADD_WINTER", 0.035, float
-    )
-    snow_stress_phys_coupling: float = _env("SNOW_STRESS_PHYS_COUPLING", 0.45, float)
-    winter_heat_open_scale_winter: float = _env(
-        "WINTER_HEAT_OPEN_SCALE_WINTER", 1.18, float
-    )
-    winter_heat_open_scale_transition: float = _env(
-        "WINTER_HEAT_OPEN_SCALE_TRANSITION", 1.08, float
-    )
-    winter_heat_wind_scale_winter: float = _env(
-        "WINTER_HEAT_WIND_SCALE_WINTER", 1.22, float
-    )
-    winter_heat_wind_scale_transition: float = _env(
-        "WINTER_HEAT_WIND_SCALE_TRANSITION", 1.12, float
-    )
-    winter_heat_tree_damp_snow_depth: float = _env(
-        "WINTER_HEAT_TREE_DAMP_SNOW_DEPTH", 0.38, float
-    )
-    winter_heat_tree_damp_snow_fresh: float = _env(
-        "WINTER_HEAT_TREE_DAMP_SNOW_FRESH", 0.22, float
-    )
-    weather_stress_edge_snow_open: float = _env(
-        "WEATHER_STRESS_EDGE_SNOW_OPEN", 0.18, float
-    )
-    weather_stress_edge_snow_surface: float = _env(
-        "WEATHER_STRESS_EDGE_SNOW_SURFACE", 0.22, float
-    )
-    weather_stress_edge_snow_stairs: float = _env(
-        "WEATHER_STRESS_EDGE_SNOW_STAIRS", 0.16, float
-    )
-    snow_surface_tier0_amp: float = _env("SNOW_SURFACE_TIER0_AMP", 0.012, float)
-    snow_surface_tier1_amp: float = _env("SNOW_SURFACE_TIER1_AMP", 0.055, float)
-    snow_surface_tier2_amp: float = _env("SNOW_SURFACE_TIER2_AMP", 0.14, float)
-    snow_stairs_ped_base: float = _env("SNOW_STAIRS_PED_BASE", 1.08, float)
-    snow_stairs_ped_frozen_boost: float = _env("SNOW_STAIRS_PED_FROZEN_BOOST", 1.12, float)
-    snow_stairs_cyclist_base: float = _env("SNOW_STAIRS_CYCLIST_BASE", 1.18, float)
-    snow_stairs_cyclist_frozen_boost: float = _env(
-        "SNOW_STAIRS_CYCLIST_FROZEN_BOOST", 1.22, float
-    )
-    snow_phys_cyclist_mult_boost: float = _env(
-        "SNOW_PHYS_CYCLIST_MULT_BOOST", 0.12, float
-    )
-    winter_clearance_high_mitigate: float = _env(
-        "WINTER_CLEARANCE_HIGH_MITIGATE", 0.22, float
-    )
-    # Сезон: calendar_only | adaptive_if_possible (см. services.seasonal.resolve_season_routing_context).
-    season_adaptive_mode: str = _env("SEASON_ADAPTIVE_MODE", "calendar_only", str)
-    season_adaptive_warm_anomaly_temp_c: float = _env(
-        "SEASON_ADAPTIVE_WARM_ANOMALY_TEMP_C", 9.0, float
-    )
-    season_adaptive_winter_snow_depth_max_m: float = _env(
-        "SEASON_ADAPTIVE_WINTER_SNOW_DEPTH_MAX_M", 0.018, float
-    )
-    season_adaptive_winter_fresh_max_cm_h: float = _env(
-        "SEASON_ADAPTIVE_WINTER_FRESH_MAX_CM_H", 0.35, float
-    )
-    season_adaptive_snow_depth_on_green_m: float = _env(
-        "SEASON_ADAPTIVE_SNOW_DEPTH_ON_GREEN_M", 0.04, float
-    )
-    season_adaptive_fresh_on_green_cm_h: float = _env(
-        "SEASON_ADAPTIVE_FRESH_ON_GREEN_CM_H", 0.45, float
-    )
-    season_adaptive_cold_on_green_c: float = _env(
-        "SEASON_ADAPTIVE_COLD_ON_GREEN_C", 1.5, float
-    )
-    season_adaptive_early_april_warm_c: float = _env(
-        "SEASON_ADAPTIVE_EARLY_APRIL_WARM_C", 11.0, float
-    )
-    # WMO weather_code — маршрутизация (см. services.weather.wmo_weather_code_profile).
-    wc_snow_model_strength_amp: float = _env("WC_SNOW_MODEL_STRENGTH_AMP", 0.22, float)
-    wc_wet_slip_physical_amp: float = _env("WC_WET_SLIP_PHYSICAL_AMP", 0.08, float)
-    wc_mixed_precip_stress_amp: float = _env("WC_MIXED_PRECIP_STRESS_AMP", 0.12, float)
-    wc_wet_slip_surface_amp: float = _env("WC_WET_SLIP_SURFACE_AMP", 0.26, float)
-    wc_mixed_surface_amp: float = _env("WC_MIXED_SURFACE_AMP", 0.18, float)
-    wc_wet_stairs_amp: float = _env("WC_WET_STAIRS_AMP", 0.14, float)
-    wc_mixed_snow_stress_amp: float = _env("WC_MIXED_SNOW_STRESS_AMP", 0.16, float)
-    winter_clearance_low_amp: float = _env("WINTER_CLEARANCE_LOW_AMP", 0.32, float)
-    winter_clearance_low_amp_cyclist: float = _env(
-        "WINTER_CLEARANCE_LOW_AMP_CYCLIST", 0.22, float
-    )
+    # --- Тепло/погода и сезон: константы в Python (services/weather_params, seasonal_params) ---
+    heat_weather_params: HeatWeatherParams = field(default_factory=HeatWeatherParams)
+    seasonal_snow_params: SeasonalSnowParams = field(default_factory=SeasonalSnowParams)
 
     # --- Кэш ---
     cache_satellite: bool = _env_bool("CACHE_SATELLITE", True)
@@ -848,42 +544,21 @@ class Settings:
     surface_ai_runtime_strict: bool = field(
         default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_STRICT", False)
     )
-    surface_ai_runtime_min_confidence: float = field(
-        default_factory=lambda: _env("SURFACE_AI_RUNTIME_MIN_CONFIDENCE", 0.65, float)
-    )
-    surface_ai_runtime_min_margin: float = field(
-        default_factory=lambda: _env("SURFACE_AI_RUNTIME_MIN_MARGIN", 0.15, float)
-    )
-    surface_ai_runtime_paved_good_min_confidence: float = field(
-        default_factory=lambda: _env(
-            "SURFACE_AI_RUNTIME_PAVED_GOOD_MIN_CONFIDENCE", 0.90, float
-        )
-    )
-    surface_ai_runtime_use_only_safe: bool = field(
-        default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_USE_ONLY_SAFE", True)
-    )
-    # OSM приоритетнее ML зашито в коде; SURFACE_AI_RUNTIME_OSM_PRIORITY — legacy .env.
-    surface_ai_runtime_osm_priority: bool = field(
-        default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_OSM_PRIORITY", True)
-    )
-    surface_ai_runtime_fallback_to_heuristic: bool = field(
-        default_factory=lambda: _env_bool(
-            "SURFACE_AI_RUNTIME_FALLBACK_TO_HEURISTIC", True
-        )
-    )
-    surface_ai_runtime_match_by: str = field(
-        default_factory=lambda: _env(
-            "SURFACE_AI_RUNTIME_MATCH_BY",
-            "edge_id,undirected_edge_key,osm_way_id_geometry",
-            str,
-        )
-    )
-    surface_ai_runtime_log_stats: bool = field(
-        default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_LOG_STATS", True)
-    )
 
     # --- Пути ---
     base_dir: str = field(default="")
+
+    def __getattr__(self, name: str) -> Any:
+        """Доступ к heat/weather/season/snow как раньше: делегирование в nested dataclass."""
+        hw = object.__getattribute__(self, "heat_weather_params")
+        ss = object.__getattribute__(self, "seasonal_snow_params")
+        if hasattr(hw, name):
+            return getattr(hw, name)
+        if hasattr(ss, name):
+            return getattr(ss, name)
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
 
     @property
     def start_coords(self) -> Tuple[float, float]:
@@ -1035,7 +710,7 @@ OSM_HIGHWAY_FILTER: str = (
 
 # Увеличивайте при изменении формул весов в ``graph.calculate_weights``,
 # ``apply_weights``, подсегментов высот, клипа озеленения и т.п.
-ROUTING_ALGO_VERSION: str = _env("ROUTING_ALGO_VERSION", "3", str)
+ROUTING_ALGO_VERSION: str = "3"
 
 
 def routing_engine_cache_fingerprint() -> str:
@@ -1067,113 +742,8 @@ def routing_engine_cache_fingerprint() -> str:
         "algo_ver": ROUTING_ALGO_VERSION,
         "default_coefficient": DEFAULT_COEFFICIENT,
         "heat_cost_scale": HEAT_COST_SCALE,
-        "heat_hot_tree_bonus_scale": _env("HEAT_HOT_TREE_BONUS_SCALE", 1.45, float),
-        "heat_hot_open_sky_penalty_scale": _env(
-            "HEAT_HOT_OPEN_SKY_PENALTY_SCALE", 1.55, float
-        ),
-        "heat_cold_building_canyon_bonus_scale": _env(
-            "HEAT_COLD_BUILDING_CANYON_BONUS_SCALE", 1.4, float
-        ),
-        "heat_cold_tree_bonus_damping": _env(
-            "HEAT_COLD_TREE_BONUS_DAMPING", 0.65, float
-        ),
-        "heat_weather_response_scale": _env(
-            "HEAT_WEATHER_RESPONSE_SCALE", 1.35, float
-        ),
-        "heat_continuous_enable": _env_bool("HEAT_CONTINUOUS_ENABLE", True),
-        "heat_temp_ref_max": _env("HEAT_TEMP_REF_MAX", 30.0, float),
-        "heat_rain_ref_max": _env("HEAT_RAIN_REF_MAX", 3.0, float),
-        "heat_wind_ref_max": _env("HEAT_WIND_REF_MAX", 12.0, float),
-        "heat_gust_delta_ref_max": _env("HEAT_GUST_DELTA_REF_MAX", 10.0, float),
-        "heat_wind_along_open_amp": _env("HEAT_WIND_ALONG_OPEN_AMP", 0.28, float),
-        "heat_wind_cross_build_amp": _env("HEAT_WIND_CROSS_BUILD_AMP", 0.35, float),
-        "heat_wind_along_build_damp": _env("HEAT_WIND_ALONG_BUILD_DAMP", 0.24, float),
-        "stress_wind_along_open_amp": _env("STRESS_WIND_ALONG_OPEN_AMP", 0.32, float),
-        "stress_wind_cross_shelter_amp": _env(
-            "STRESS_WIND_CROSS_SHELTER_AMP", 0.40, float
-        ),
-        "heat_edge_factor_min": _env("HEAT_EDGE_FACTOR_MIN", 0.65, float),
-        "heat_edge_factor_max": _env("HEAT_EDGE_FACTOR_MAX", 1.75, float),
-        "heat_edge_k_open": _env("HEAT_EDGE_K_OPEN", 0.66, float),
-        "heat_edge_k_tree": _env("HEAT_EDGE_K_TREE", 0.54, float),
-        "heat_edge_k_building": _env("HEAT_EDGE_K_BUILDING", 0.50, float),
-        "heat_edge_k_covered": _env("HEAT_EDGE_K_COVERED", 0.16, float),
-        "heat_edge_rain_open_mult": _env("HEAT_EDGE_RAIN_OPEN_MULT", 0.48, float),
-        "heat_edge_rain_building_mult": _env(
-            "HEAT_EDGE_RAIN_BUILDING_MULT", 0.56, float
-        ),
-        "heat_edge_rain_wind_exp_mult": _env(
-            "HEAT_EDGE_RAIN_WIND_EXP_MULT", 0.22, float
-        ),
-        "heat_building_shade_rain_gain": _env(
-            "HEAT_BUILDING_SHADE_RAIN_GAIN", 0.30, float
-        ),
-        "heat_tree_shade_temp_gain": _env("HEAT_TREE_SHADE_TEMP_GAIN", 0.42, float),
-        "heat_open_sky_temp_gain": _env("HEAT_OPEN_SKY_TEMP_GAIN", 0.52, float),
-        "heat_apparent_temp_enable": _env_bool("HEAT_APPARENT_TEMP_ENABLE", True),
-        "heat_apparent_temp_ref": _env("HEAT_APPARENT_TEMP_REF", 25.0, float),
-        "heat_apparent_temp_hot_ref": _env("HEAT_APPARENT_TEMP_HOT_REF", 32.0, float),
-        "heat_apparent_temp_extreme_ref": _env(
-            "HEAT_APPARENT_TEMP_EXTREME_REF", 38.0, float
-        ),
-        "heat_open_sky_apparent_gain": _env(
-            "HEAT_OPEN_SKY_APPARENT_GAIN", 0.30, float
-        ),
-        "heat_open_sky_radiation_gain": _env(
-            "HEAT_OPEN_SKY_RADIATION_GAIN", 0.25, float
-        ),
-        "heat_open_sky_hot_extra_gain": _env(
-            "HEAT_OPEN_SKY_HOT_EXTRA_GAIN", 0.15, float
-        ),
-        "heat_extreme_apparent_threshold": _env(
-            "HEAT_EXTREME_APPARENT_THRESHOLD", 35.0, float
-        ),
-        "heat_extreme_route_beta_gain": _env(
-            "HEAT_EXTREME_ROUTE_BETA_GAIN", 0.30, float
-        ),
-        "heat_extreme_open_route_gain": _env(
-            "HEAT_EXTREME_OPEN_ROUTE_GAIN", 0.22, float
-        ),
-        "heat_extreme_tree_route_gain": _env(
-            "HEAT_EXTREME_TREE_ROUTE_GAIN", 0.18, float
-        ),
-        "heat_tree_shade_apparent_gain": _env(
-            "HEAT_TREE_SHADE_APPARENT_GAIN", 0.38, float
-        ),
-        "heat_tree_shade_radiation_gain": _env(
-            "HEAT_TREE_SHADE_RADIATION_GAIN", 0.30, float
-        ),
-        "heat_tree_shade_extreme_gain": _env(
-            "HEAT_TREE_SHADE_EXTREME_GAIN", 0.20, float
-        ),
-        "heat_building_shade_radiation_gain": _env(
-            "HEAT_BUILDING_SHADE_RADIATION_GAIN", 0.14, float
-        ),
-        "heat_coeff_clamp_lo": _env("HEAT_COEFF_CLAMP_LO", 0.72, float),
-        "heat_coeff_clamp_hi": _env("HEAT_COEFF_CLAMP_HI", 1.60, float),
-        "heat_coeff_soft_overflow_gain": _env(
-            "HEAT_COEFF_SOFT_OVERFLOW_GAIN", 0.18, float
-        ),
-        "heat_coeff_hard_hi": _env("HEAT_COEFF_HARD_HI", 1.85, float),
-        "heat_temp_cool_ref": _env("HEAT_TEMP_COOL_REF", 14.0, float),
-        "heat_temp_cool_range": _env("HEAT_TEMP_COOL_RANGE", 10.0, float),
-        "heat_tree_shade_cold_damp": _env("HEAT_TREE_SHADE_COLD_DAMP", 0.58, float),
-        "weather_stress_global_blend": _env("WEATHER_STRESS_GLOBAL_BLEND", 0.28, float),
-        "season_green_mult_winter": _env("SEASON_GREEN_MULT_WINTER", 0.08, float),
-        "season_green_ramp_end_day": _env("SEASON_GREEN_RAMP_END_DAY", 20.0, float),
-        "snow_depth_mult_tier3": _env("SNOW_DEPTH_MULT_TIER3", 1.28, float),
-        "snow_fresh_mult_tier3": _env("SNOW_FRESH_MULT_TIER3", 1.22, float),
-        "season_adaptive_mode": _env("SEASON_ADAPTIVE_MODE", "calendar_only", str),
-        "wc_snow_model_strength_amp": _env("WC_SNOW_MODEL_STRENGTH_AMP", 0.22, float),
-        "wc_wet_slip_surface_amp": _env("WC_WET_SLIP_SURFACE_AMP", 0.26, float),
-        "wc_mixed_surface_amp": _env("WC_MIXED_SURFACE_AMP", 0.18, float),
-        "winter_clearance_low_amp": _env("WINTER_CLEARANCE_LOW_AMP", 0.32, float),
-        "winter_clearance_low_amp_cyclist": _env(
-            "WINTER_CLEARANCE_LOW_AMP_CYCLIST", 0.22, float
-        ),
-        "winter_clearance_high_mitigate": _env(
-            "WINTER_CLEARANCE_HIGH_MITIGATE", 0.22, float
-        ),
+        "heat_weather_params": asdict(DEFAULT_HEAT_WEATHER_PARAMS),
+        "seasonal_snow_params": asdict(DEFAULT_SEASONAL_SNOW_PARAMS),
         "heat_stress_model_version": HEAT_STRESS_MODEL_VERSION,
         "osm_highway_filter": OSM_HIGHWAY_FILTER,
         "preference_profiles": pref_profiles,

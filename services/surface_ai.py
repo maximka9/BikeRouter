@@ -362,6 +362,9 @@ class SurfaceAIConfig:
     holdout_predict_polygon_known_share: float = 0.20
     tile_edge_match_mode: str = "samples_and_buffer"
     edge_tile_buffer_m: float = 10.0
+    compact_output: bool = True
+    max_output_files: int = 20
+    save_full_predictions_geojson: bool = False
     use_satellite_features: bool = True
     sample_step_m: float = 7.0
     pixel_window: int = 5
@@ -455,6 +458,9 @@ class SurfaceAIConfig:
             holdout_predict_polygon_known_share=_env_float("SURFACE_AI_HOLDOUT_PREDICT_POLYGON_KNOWN_SHARE", 0.20),
             tile_edge_match_mode=_env_str("SURFACE_AI_TILE_EDGE_MATCH_MODE", "samples_and_buffer"),
             edge_tile_buffer_m=_env_float("SURFACE_AI_EDGE_TILE_BUFFER_M", 10.0),
+            compact_output=_env_bool("SURFACE_AI_COMPACT_OUTPUT", True),
+            max_output_files=_env_int("SURFACE_AI_MAX_OUTPUT_FILES", 20),
+            save_full_predictions_geojson=_env_bool("SURFACE_AI_SAVE_FULL_PREDICTIONS_GEOJSON", False),
             use_satellite_features=_env_bool("SURFACE_AI_USE_SATELLITE_FEATURES", True),
             sample_step_m=_env_float("SURFACE_AI_SAMPLE_STEP_M", 7.0),
             pixel_window=_env_int("SURFACE_AI_PIXEL_WINDOW", 5),
@@ -2167,7 +2173,7 @@ def artifact_paths(output_dir: Path) -> SurfaceAIArtifacts:
         predictions_csv=output_dir / "surface_ai_predictions.csv",
         predictions_geojson=output_dir / "surface_ai_predictions.geojson",
         baseline_csv=output_dir / "surface_ai_baseline_table.csv",
-        baseline_xlsx=output_dir / "surface_ai_baseline_table.xlsx",
+        baseline_xlsx=output_dir / "surface_ai_results.xlsx",
         baseline_png=output_dir / "surface_ai_baseline_table.png",
         metrics_json=output_dir / "surface_ai_metrics.json",
         model_joblib=output_dir / "surface_ai_model.joblib",
@@ -2325,7 +2331,6 @@ def write_edges_geojson(edges_gdf: gpd.GeoDataFrame, path: Path) -> None:
 
 
 def write_baseline_tables(baseline_table: pd.DataFrame, artifacts: SurfaceAIArtifacts) -> None:
-    baseline_table.to_csv(artifacts.baseline_csv, index=False, encoding="utf-8")
     with pd.ExcelWriter(artifacts.baseline_xlsx, engine="openpyxl") as writer:
         baseline_table.to_excel(writer, sheet_name="all", index=False)
         baseline_table[baseline_table["target"].astype(str).str.contains("concrete")].to_excel(
@@ -2334,7 +2339,50 @@ def write_baseline_tables(baseline_table: pd.DataFrame, artifacts: SurfaceAIArti
         baseline_table[baseline_table["target"].astype(str).str.contains("group")].to_excel(
             writer, sheet_name="groups", index=False
         )
-    plot_baseline_table_png(baseline_table, artifacts.baseline_png)
+
+
+def _flat_dict_frame(data: Dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for key, value in (data or {}).items():
+        if isinstance(value, (dict, list, tuple)):
+            value = json.dumps(_json_safe(value), ensure_ascii=False)
+        rows.append({"key": key, "value": value})
+    return pd.DataFrame(rows)
+
+
+def write_results_workbook(
+    artifacts: SurfaceAIArtifacts,
+    *,
+    baseline_table: pd.DataFrame,
+    summary: Dict[str, Any],
+    area_meta: Dict[str, Any],
+    tile_coverage: Dict[str, Any],
+    selected: Dict[str, Any],
+    group_selected: Dict[str, Any],
+    holdout_metrics: Dict[str, Any],
+    calibration_metrics: Dict[str, Any],
+    dangerous_metrics: Dict[str, Any],
+) -> None:
+    with pd.ExcelWriter(artifacts.baseline_xlsx, engine="openpyxl") as writer:
+        baseline_table.to_excel(writer, sheet_name="models_all", index=False)
+        baseline_table[baseline_table["target"].astype(str).str.contains("concrete")].to_excel(
+            writer, sheet_name="models_concrete", index=False
+        )
+        baseline_table[baseline_table["target"].astype(str).str.contains("group")].to_excel(
+            writer, sheet_name="models_group", index=False
+        )
+        _flat_dict_frame(summary).to_excel(writer, sheet_name="dataset_summary", index=False)
+        _flat_dict_frame(area_meta).to_excel(writer, sheet_name="areas", index=False)
+        _flat_dict_frame(tile_coverage).to_excel(writer, sheet_name="tile_usage", index=False)
+        _flat_dict_frame(dangerous_metrics).to_excel(writer, sheet_name="dangerous_errors", index=False)
+        _flat_dict_frame(calibration_metrics).to_excel(writer, sheet_name="calibration", index=False)
+        _flat_dict_frame(holdout_metrics).to_excel(writer, sheet_name="holdout", index=False)
+        _flat_dict_frame(
+            {
+                "selected_model": selected,
+                "selected_group_direct_model": group_selected,
+            }
+        ).to_excel(writer, sheet_name="selected_models", index=False)
 
 
 def plot_baseline_table_png(baseline_table: pd.DataFrame, path: Path) -> None:
@@ -2364,6 +2412,44 @@ def plot_baseline_table_png(baseline_table: pd.DataFrame, path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
+
+
+def compact_experiment_outputs(artifacts: SurfaceAIArtifacts, config: SurfaceAIConfig) -> None:
+    if not config.compact_output:
+        return
+    ordered_keep = [
+        artifacts.dataset_all_tile_edges_csv.name,
+        artifacts.predictions_inside_polygon_csv.name,
+        artifacts.predictions_inside_polygon_geojson.name,
+        artifacts.baseline_xlsx.name,
+        artifacts.metrics_json.name,
+        artifacts.model_joblib.name,
+        artifacts.group_direct_model_joblib.name,
+        artifacts.model_card_json.name,
+        artifacts.report_txt.name,
+        artifacts.surface_map_png.name,
+        artifacts.confidence_map_png.name,
+        artifacts.unknown_predictions_map_png.name,
+        artifacts.errors_map_png.name,
+        artifacts.dangerous_errors_map_raw_png.name,
+        artifacts.dangerous_errors_map_effective_png.name,
+        artifacts.tile_usage_csv.name,
+        artifacts.tile_usage_map_png.name,
+        artifacts.train_polygon_geojson.name,
+        artifacts.predict_polygon_geojson.name,
+        artifacts.tile_coverage_polygon_geojson.name,
+    ]
+    # If the limit is reduced later, prefer keeping machine-readable core files.
+    if int(config.max_output_files) > 0 and len(ordered_keep) > int(config.max_output_files):
+        keep = set(ordered_keep[: int(config.max_output_files)])
+    else:
+        keep = set(ordered_keep)
+    for path in artifacts.output_dir.iterdir():
+        if path.is_file() and path.name not in keep:
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 def _plot_lines_by_column(
@@ -3263,6 +3349,9 @@ def write_report(
         f"Area metrics: {area_meta or {}}",
         "",
         "Dataset:",
+        f"  Compact output: {config.compact_output}",
+        f"  Max output files: {config.max_output_files}",
+        f"  Save full predictions GeoJSON: {config.save_full_predictions_geojson}",
         f"  Total edges: {summary.get('total_edges')}",
         f"  Known surface edges: {summary.get('known_surface_edges')}",
         f"  Unknown surface edges: {summary.get('unknown_surface_edges')}",
@@ -3534,7 +3623,8 @@ def run_surface_ai_experiment(
     if config.use_neighbor_features:
         dataset = add_neighbor_features(dataset)
     summary = dataset_summary(dataset)
-    write_dataset_csv(dataset, artifacts.dataset_csv)
+    if not config.compact_output:
+        write_dataset_csv(dataset, artifacts.dataset_csv)
     write_dataset_csv(dataset, artifacts.dataset_all_tile_edges_csv)
 
     concrete_models, concrete_table = train_evaluate_task_models(
@@ -3594,8 +3684,10 @@ def run_surface_ai_experiment(
     predictions = predict_all_edges(dataset, concrete_models, group_models, config, progress=progress)
     predictions_inside = predictions[predictions.get("is_prediction_candidate", pd.Series(False, index=predictions.index)).astype(bool)].copy()
     summary["predictions_produced_inside_polygon"] = int(len(predictions_inside))
-    write_predictions_csv(predictions, artifacts.predictions_csv)
-    write_predictions_geojson(predictions, edges, artifacts.predictions_geojson)
+    if not config.compact_output:
+        write_predictions_csv(predictions, artifacts.predictions_csv)
+    if config.save_full_predictions_geojson:
+        write_predictions_geojson(predictions, edges, artifacts.predictions_geojson)
     write_predictions_csv(predictions_inside, artifacts.predictions_inside_polygon_csv)
     write_predictions_geojson(predictions_inside, predict_edges, artifacts.predictions_inside_polygon_geojson)
     write_baseline_tables(baseline_table, artifacts)
@@ -3752,5 +3844,18 @@ def run_surface_ai_experiment(
             area_meta=area_meta,
             holdout_metrics=holdout_metrics,
         )
+        write_results_workbook(
+            artifacts,
+            baseline_table=baseline_table,
+            summary=summary,
+            area_meta=area_meta,
+            tile_coverage=tile_coverage,
+            selected=concrete_selected,
+            group_selected=group_selected,
+            holdout_metrics=holdout_metrics,
+            calibration_metrics={"concrete": concrete_calibration, "group_direct": group_calibration},
+            dangerous_metrics=dangerous_flat,
+        )
+        compact_experiment_outputs(artifacts, config)
 
     return artifacts

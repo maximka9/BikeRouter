@@ -42,13 +42,34 @@ def test_rare_class_train_labels() -> None:
                 "mud",
                 "paving_stones",
             ],
+            "surface_true_group": [
+                "paved_good",
+                "paved_good",
+                "unpaved_soft",
+                "unpaved_soft",
+                "paved_rough",
+            ],
         }
     )
-    out, meta = add_train_labels(df, min_class_count=2)
+    out, meta = add_train_labels(
+        df,
+        min_class_count=2,
+        concrete_target_mode="legacy_full",
+    )
     assert out.loc[0, "surface_train_label"] == "asphalt"
     assert out.loc[2, "surface_train_label"] == "rare_other_unpaved_soft"
     assert bool(out.loc[3, "surface_is_rare_class"]) is True
     assert meta["frequent_surface_classes"] == ["asphalt"]
+
+    compact, compact_meta = add_train_labels(
+        df,
+        min_class_count=2,
+        concrete_target_mode="compact",
+    )
+    assert compact.loc[2, "surface_train_label"] == "ground"
+    assert compact.loc[3, "surface_train_label"] == "other_unpaved"
+    assert compact.loc[4, "surface_train_label"] == "paving_stones"
+    assert compact_meta["concrete_target_mode"] == "compact"
 
 
 def test_safety_policy_ambiguous_and_known_osm() -> None:

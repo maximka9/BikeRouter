@@ -61,13 +61,22 @@ from .surface_ml import (
     _import_pyplot,
     _json_safe,
     _utm_crs_for,
+    dedupe_dataframe_by_edge_id,
     extract_tile_features_for_edges,
     filter_edges_to_polygon,
     limit_edges_for_experiment,
     no_progress,
     progress_iter,
 )
-from .area_graph_cache import graph_base_path, graph_green_path, load_graphml_path, parse_precache_polygon
+from .area_graph_cache import (
+    area_precache_content_fingerprint,
+    area_precache_directory_id,
+    graph_base_path,
+    graph_green_path,
+    load_graphml_path,
+    parse_precache_polygon,
+    precache_area_dir,
+)
 from .graph import GraphBuilder
 
 
@@ -423,6 +432,12 @@ class SurfaceAIConfig:
     out_dir: str = "./data/experiments/surface_ai"
     min_known_edges: int = 100
     max_tile_cache_items: int = 512
+    # Повторный пропуск шагов [2–5] при совпадении отпечатка (см. ``surface_ai_edges_cache_*``).
+    reuse_edges_cache: bool = False
+    # Явная запись parquet-кэша рёбер (по умолчанию выкл.: не трогаем ``data/cache/*``).
+    edges_cache_write: bool = False
+    # Доп. корень **только для чтения** (первым в списке). Пусто → см. ``surface_ai_edges_cache_read_roots``.
+    edges_cache_dir: str = ""
     # Авто-параллелизм без CLI: тайлы по процессам; кандидаты моделей при |candidates| >= порога.
     auto_parallel: bool = True
     model_outer_parallel_min_candidates: int = 3
@@ -430,7 +445,12 @@ class SurfaceAIConfig:
     @classmethod
     def from_env(cls) -> "SurfaceAIConfig":
         """Дефолты Surface AI — в полях dataclass; из окружения только SURFACE_AI_ENABLED."""
-        return cls(enabled=_env_bool("SURFACE_AI_ENABLED", False))
+        return cls(
+            enabled=_env_bool("SURFACE_AI_ENABLED", False),
+            reuse_edges_cache=_env_bool("SURFACE_AI_REUSE_EDGES_CACHE", False),
+            edges_cache_write=_env_bool("SURFACE_AI_EDGES_CACHE_WRITE", False),
+            edges_cache_dir=os.getenv("SURFACE_AI_EDGES_CACHE_DIR", "").strip(),
+        )
 
 
 @dataclass
@@ -820,6 +840,17 @@ def build_surface_ai_dataset(
             item["sampled_pixel_count"] = 0
             rows.append(item)
         tile_df = pd.DataFrame(rows)
+    # GeoJSON/JSON round-trip и read_json могут дать edge_id как float — merge требует один тип.
+    osm_df = osm_df.copy()
+    tile_df = tile_df.copy()
+    osm_df["edge_id"] = osm_df["edge_id"].map(
+        lambda x: "" if pd.isna(x) else str(x).strip()
+    )
+    tile_df["edge_id"] = tile_df["edge_id"].map(
+        lambda x: "" if pd.isna(x) else str(x).strip()
+    )
+    osm_df = dedupe_dataframe_by_edge_id(osm_df, keep="first", name="osm_df (surface_ai)")
+    tile_df = dedupe_dataframe_by_edge_id(tile_df, keep="last", name="tile_df (surface_ai)")
     dataset = osm_df.merge(tile_df, on="edge_id", how="left", validate="one_to_one")
     for col in AI_SATELLITE_FEATURES:
         if col not in dataset.columns:
@@ -1037,7 +1068,12 @@ def spatial_train_cal_test_split(
     return spatial_train_test_split(dataset, edges_gdf, config)
 
 
-def _features_for_model(dataset: pd.DataFrame, feature_set: str) -> Tuple[pd.DataFrame, List[str], List[str]]:
+def _features_for_model(
+    dataset: pd.DataFrame,
+    feature_set: str,
+    *,
+    config: Optional[SurfaceAIConfig] = None,
+) -> Tuple[pd.DataFrame, List[str], List[str]]:
     geometry_cols = list(AI_GEOMETRY_FEATURES)
     if feature_set.endswith("_without_spatial_prior") or feature_set == "combined_without_spatial_prior":
         geometry_cols = [c for c in geometry_cols if c not in SPATIAL_PRIOR_FEATURES]
@@ -1059,6 +1095,9 @@ def _features_for_model(dataset: pd.DataFrame, feature_set: str) -> Tuple[pd.Dat
     else:
         cat_cols = []
         num_cols = []
+    if config is not None and not config.use_satellite_features:
+        drop_sat = set(AI_SATELLITE_FEATURES)
+        num_cols = [c for c in num_cols if c not in drop_sat]
     cols = cat_cols + num_cols
     X = dataset.reindex(columns=cols).copy()
     for col in cat_cols:
@@ -1066,6 +1105,19 @@ def _features_for_model(dataset: pd.DataFrame, feature_set: str) -> Tuple[pd.Dat
     for col in num_cols:
         X[col] = pd.to_numeric(X[col], errors="coerce")
     return X, cat_cols, num_cols
+
+
+def _numeric_columns_with_signal(X: pd.DataFrame, num_cols: Sequence[str]) -> List[str]:
+    """Числовые признаки, в которых есть хотя бы одно не-NaN значение (иначе median-imputer шумит предупреждениями)."""
+    if X.empty or len(X) == 0:
+        return list(num_cols)
+    out: List[str] = []
+    for c in num_cols:
+        if c not in X.columns:
+            continue
+        if pd.to_numeric(X[c], errors="coerce").notna().any():
+            out.append(c)
+    return out
 
 
 def _build_preprocessor(cat_cols: Sequence[str], num_cols: Sequence[str]) -> ColumnTransformer:
@@ -1134,8 +1186,13 @@ def _build_pipeline(
     config: SurfaceAIConfig,
     *,
     sklearn_n_jobs: int = -1,
+    fit_frame: Optional[pd.DataFrame] = None,
 ) -> Pipeline:
-    _, cat_cols, num_cols = _features_for_model(pd.DataFrame(), feature_set)
+    if fit_frame is not None and len(fit_frame):
+        X_schema, cat_cols, num_cols = _features_for_model(fit_frame, feature_set, config=config)
+        num_cols = _numeric_columns_with_signal(X_schema, num_cols)
+    else:
+        _, cat_cols, num_cols = _features_for_model(pd.DataFrame(), feature_set, config=config)
     preprocessor = _build_preprocessor(cat_cols, num_cols)
     nj = int(sklearn_n_jobs)
     if candidate == "combined_hist_gradient_boosting":
@@ -1453,12 +1510,12 @@ def train_evaluate_models(
             X_test = pd.DataFrame({"constant": np.ones(len(test))})
         elif candidate == "highway_heuristic":
             model = HighwayHeuristicClassifier(labels, frequent)
-            X_train, _, _ = _features_for_model(train, "osm")
-            X_test, _, _ = _features_for_model(test, "osm")
+            X_train, _, _ = _features_for_model(train, "osm", config=config)
+            X_test, _, _ = _features_for_model(test, "osm", config=config)
         else:
-            model = _build_pipeline(candidate, feature_set, config)
-            X_train, _, _ = _features_for_model(train, feature_set)
-            X_test, _, _ = _features_for_model(test, feature_set)
+            model = _build_pipeline(candidate, feature_set, config, fit_frame=train)
+            X_train, _, _ = _features_for_model(train, feature_set, config=config)
+            X_test, _, _ = _features_for_model(test, feature_set, config=config)
         model.fit(X_train, y_train)
         pred = model.predict(X_test)
         pred = [str(x) for x in pred]
@@ -1590,7 +1647,7 @@ def _fit_candidate_model(
             model = GroupHighwayHeuristicClassifier(config.group_target_mode)
         else:
             model = HighwayHeuristicClassifier(labels, label_meta.get("frequent_surface_classes", []))
-        X_train_fit, _, _ = _features_for_model(train_fit, "osm")
+        X_train_fit, _, _ = _features_for_model(train_fit, "osm", config=config)
         model.fit(X_train_fit, y_train_fit)
         return model, X_train_fit
 
@@ -1600,11 +1657,12 @@ def _fit_candidate_model(
         feature_set,
         config,
         sklearn_n_jobs=sklearn_n_jobs,
+        fit_frame=train_fit,
     )
     if calibrate:
-        X_train, _, _ = _features_for_model(train, feature_set)
+        X_train, _, _ = _features_for_model(train, feature_set, config=config)
         base.fit(X_train, y_train)
-        X_cal, _, _ = _features_for_model(calibration, feature_set)
+        X_cal, _, _ = _features_for_model(calibration, feature_set, config=config)
         y_cal = calibration["surface_group_direct_label" if target == "group_direct" else "surface_train_label"].astype(str)
         if y_cal.nunique() >= 2 and len(y_cal) >= int(config.calibration_min_class_count):
             try:
@@ -1618,7 +1676,7 @@ def _fit_candidate_model(
             except Exception:
                 pass
         return base, X_train
-    X_train_fit, _, _ = _features_for_model(train_fit, feature_set)
+    X_train_fit, _, _ = _features_for_model(train_fit, feature_set, config=config)
     base.fit(X_train_fit, y_train_fit)
     return base, X_train_fit
 
@@ -1694,7 +1752,11 @@ def evaluate_task_model(
     if _task_candidate_kind(candidate) == "always_majority":
         X_test = pd.DataFrame({"constant": np.ones(len(test))}, index=test.index)
     else:
-        X_test, _, _ = _features_for_model(test, feature_set if feature_set != "none" else "osm")
+        X_test, _, _ = _features_for_model(
+            test,
+            feature_set if feature_set != "none" else "osm",
+            config=config,
+        )
     proba = _predict_model_proba(model, X_test, labels)
     if target == "group_direct":
         pred, conf, _, _, margin = _tuned_group_top_fields(proba, config, candidate=candidate)
@@ -2035,6 +2097,7 @@ def calibration_artifacts_for_selected(
     selected: Dict[str, Any],
     models: Dict[str, Any],
     artifacts: SurfaceAIArtifacts,
+    config: SurfaceAIConfig,
     *,
     target: str,
 ) -> Dict[str, Any]:
@@ -2045,7 +2108,11 @@ def calibration_artifacts_for_selected(
     if _task_candidate_kind(key) == "always_majority":
         X = pd.DataFrame({"constant": np.ones(len(test))}, index=test.index)
     else:
-        X, _, _ = _features_for_model(test, entry["feature_set"] if entry["feature_set"] != "none" else "osm")
+        X, _, _ = _features_for_model(
+            test,
+            entry["feature_set"] if entry["feature_set"] != "none" else "osm",
+            config=config,
+        )
     proba_model = entry.get("calibrated_model") or entry["model"]
     proba = _predict_model_proba(proba_model, X, entry["labels"])
     table, metrics = reliability_table_from_proba(test[target_col].astype(str).tolist(), proba)
@@ -2126,9 +2193,9 @@ def apply_posthoc_calibration_to_selected(
 
     feature_set = entry["feature_set"]
     base_key = key.replace("_calibrated", "")
-    base = _build_pipeline(base_key, feature_set, config)
-    X_train, _, _ = _features_for_model(train, feature_set)
-    X_cal, _, _ = _features_for_model(calibration, feature_set)
+    base = _build_pipeline(base_key, feature_set, config, fit_frame=train)
+    X_train, _, _ = _features_for_model(train, feature_set, config=config)
+    X_cal, _, _ = _features_for_model(calibration, feature_set, config=config)
     try:
         base.fit(X_train, y_train)
         calibrated = CalibratedClassifierCV(
@@ -2165,8 +2232,8 @@ def _predict_model_proba(model: Any, X: pd.DataFrame, classes: Sequence[str]) ->
     return out
 
 
-def _has_features(row: pd.Series, feature_set: str) -> bool:
-    _, cat_cols, num_cols = _features_for_model(pd.DataFrame(), feature_set)
+def _has_features(row: pd.Series, feature_set: str, *, config: Optional[SurfaceAIConfig] = None) -> bool:
+    _, cat_cols, num_cols = _features_for_model(pd.DataFrame(), feature_set, config=config)
     for col in cat_cols:
         if _norm_feature(row.get(col)):
             return True
@@ -2214,13 +2281,18 @@ def _predict_entry_proba_for_all(
     dataset: pd.DataFrame,
     entry: Dict[str, Any],
     model_key: str,
+    config: SurfaceAIConfig,
     *,
     calibrated: bool = False,
 ) -> pd.DataFrame:
     if _task_candidate_kind(model_key) == "always_majority":
         X = pd.DataFrame({"constant": np.ones(len(dataset))}, index=dataset.index)
     else:
-        X, _, _ = _features_for_model(dataset, entry["feature_set"] if entry["feature_set"] != "none" else "osm")
+        X, _, _ = _features_for_model(
+            dataset,
+            entry["feature_set"] if entry["feature_set"] != "none" else "osm",
+            config=config,
+        )
     model = entry.get("calibrated_model") if calibrated and entry.get("calibrated_model") is not None else entry["model"]
     return _predict_model_proba(model, X, entry["labels"])
 
@@ -2249,10 +2321,12 @@ def predict_all_edges(
     group_entry = group_models[group_key]
 
     for _ in progress(range(1), "[6/8] Predict surfaces/groups", total=1):
-        concrete_proba_raw = _predict_entry_proba_for_all(dataset, concrete_entry, concrete_key)
-        concrete_proba = _predict_entry_proba_for_all(dataset, concrete_entry, concrete_key, calibrated=True)
-        group_proba_raw = _predict_entry_proba_for_all(dataset, group_entry, group_key)
-        group_proba = _predict_entry_proba_for_all(dataset, group_entry, group_key, calibrated=True)
+        concrete_proba_raw = _predict_entry_proba_for_all(dataset, concrete_entry, concrete_key, config)
+        concrete_proba = _predict_entry_proba_for_all(
+            dataset, concrete_entry, concrete_key, config, calibrated=True
+        )
+        group_proba_raw = _predict_entry_proba_for_all(dataset, group_entry, group_key, config)
+        group_proba = _predict_entry_proba_for_all(dataset, group_entry, group_key, config, calibrated=True)
 
     concrete_pred_raw, concrete_conf_raw, _, _, concrete_margin_raw = _proba_top_fields(concrete_proba_raw)
     concrete_pred, concrete_conf, concrete_top2, concrete_top2_conf, concrete_margin = _proba_top_fields(concrete_proba)
@@ -2304,7 +2378,7 @@ def predict_all_edges(
         pred_group = str(row.get("surface_pred_group_direct") or "unknown")
         conf = float(row.get("surface_pred_group_direct_confidence_calibrated") or 0.0)
         margin = float(row.get("surface_pred_group_direct_margin_calibrated") or 0.0)
-        has_features = _has_features(row, group_entry["feature_set"])
+        has_features = _has_features(row, group_entry["feature_set"], config=config)
         if known:
             eff_group = true_group
             source = "osm"
@@ -3627,6 +3701,232 @@ def combine_train_predict_edges(
     return gpd.GeoDataFrame(combined, geometry="geometry", crs="EPSG:4326")
 
 
+_SURFACE_AI_EDGES_CACHE_SCHEMA = "surface_ai_edges_cache_v1"
+
+
+def _geometry_wkt_for_edges_cache(geom: Any) -> str:
+    if geom is None:
+        return ""
+    try:
+        return str(geom.wkt)
+    except Exception:
+        return str(geom)
+
+
+def _precache_graphml_stat_fingerprint(settings: Settings) -> str:
+    if not settings.has_precache_area_polygon:
+        return "no_precache_polygon"
+    parts: List[str] = []
+    for label, path in (("graph_base", graph_base_path(settings)), ("graph_green", graph_green_path(settings))):
+        if path.is_file():
+            st = path.stat()
+            parts.append(f"{label}:{path.resolve()}:{st.st_size}:{st.st_mtime_ns}")
+        else:
+            parts.append(f"{label}:missing")
+    return "|".join(parts)
+
+
+def _tiles_gdf_tile_ids_digest(tiles_gdf: gpd.GeoDataFrame) -> str:
+    if tiles_gdf is None or tiles_gdf.empty or "tile_id" not in tiles_gdf.columns:
+        return "no_tiles"
+    ids = sorted(str(x) for x in tiles_gdf["tile_id"].tolist())
+    return hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()[:32]
+
+
+def surface_ai_edges_cache_payload(
+    *,
+    settings: Settings,
+    config: SurfaceAIConfig,
+    train_polygon: Any,
+    predict_polygon: Any,
+    tile_coverage_polygon: Any,
+    tiles_gdf: gpd.GeoDataFrame,
+    tiles_dir: Path,
+    tms_server: str,
+    tile_zoom: int,
+) -> Dict[str, Any]:
+    precache = parse_precache_polygon(settings) if settings.has_precache_area_polygon else None
+    area_id = ""
+    if settings.has_precache_area_polygon:
+        try:
+            wkt = settings.precache_area_polygon_wkt_stripped
+            cfp = area_precache_content_fingerprint(settings)
+            area_id = area_precache_directory_id(wkt, settings.precache_area_name, cfp)
+        except Exception:
+            area_id = ""
+    return {
+        "schema": _SURFACE_AI_EDGES_CACHE_SCHEMA,
+        "area_precache_directory_id": area_id,
+        "train_poly_wkt": _geometry_wkt_for_edges_cache(train_polygon),
+        "predict_poly_wkt": _geometry_wkt_for_edges_cache(predict_polygon),
+        "tile_coverage_wkt": _geometry_wkt_for_edges_cache(tile_coverage_polygon),
+        "precache_poly_wkt": _geometry_wkt_for_edges_cache(precache) if precache is not None else "",
+        "train_area_mode": str(config.train_area_mode),
+        "predict_area_mode": str(config.predict_area_mode),
+        "train_graph_source_priority": list(config.train_graph_source_priority),
+        "predict_graph_source_priority": list(config.predict_graph_source_priority),
+        "osmnx_simplify": bool(config.osmnx_simplify),
+        "osmnx_retain_all": bool(config.osmnx_retain_all),
+        "osmnx_truncate_by_edge": bool(config.osmnx_truncate_by_edge),
+        "osmnx_network_type": str(config.osmnx_network_type or "all"),
+        "osmnx_custom_filter": (config.osmnx_custom_filter or "").strip(),
+        "tiles_dir_resolved": str(Path(tiles_dir).resolve()),
+        "tms_server": str(tms_server),
+        "tile_zoom": int(tile_zoom),
+        "tiles_tile_id_digest": _tiles_gdf_tile_ids_digest(tiles_gdf),
+        "precache_graph_files": _precache_graphml_stat_fingerprint(settings),
+        "osmnx_cache_dir": str(Path(settings.osmnx_cache_dir).resolve()),
+    }
+
+
+def surface_ai_edges_cache_fingerprint(
+    *,
+    settings: Settings,
+    config: SurfaceAIConfig,
+    train_polygon: Any,
+    predict_polygon: Any,
+    tile_coverage_polygon: Any,
+    tiles_gdf: gpd.GeoDataFrame,
+    tiles_dir: Path,
+    tms_server: str,
+    tile_zoom: int,
+) -> str:
+    payload = surface_ai_edges_cache_payload(
+        settings=settings,
+        config=config,
+        train_polygon=train_polygon,
+        predict_polygon=predict_polygon,
+        tile_coverage_polygon=tile_coverage_polygon,
+        tiles_gdf=tiles_gdf,
+        tiles_dir=tiles_dir,
+        tms_server=tms_server,
+        tile_zoom=tile_zoom,
+    )
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:40]
+
+
+def _surface_ai_edges_cache_resolved_dir(raw: str) -> Path:
+    p = Path(raw).expanduser()
+    return p if p.is_absolute() else (Path.cwd() / p)
+
+
+def surface_ai_edges_cache_read_roots(settings: Settings, config: SurfaceAIConfig) -> List[Path]:
+    """Каталоги только для **чтения** ``{fingerprint}/train_edges.parquet`` (без записи в area_precache и т.д.).
+
+    Порядок: явный ``edges_cache_dir`` → ``cache/area_precache/<arena_id>/surface_ai_edges``
+    (тот же ``arena_id``, что у ``area_green_edges/<arena_id>/``) → ``<base_dir>/experiments/.surface_ai_edges_cache``.
+    """
+    roots: List[Path] = []
+    raw = (config.edges_cache_dir or "").strip()
+    if raw:
+        roots.append(_surface_ai_edges_cache_resolved_dir(raw))
+    if settings.has_precache_area_polygon:
+        try:
+            # Тот же arena_id, что у ``cache/area_green_edges/<id>/`` и ``cache/area_precache/<id>/`` — только чтение.
+            roots.append(precache_area_dir(settings) / "surface_ai_edges")
+        except Exception:
+            pass
+    roots.append(Path(settings.cache_dir) / "surface_ai" / "edges")
+    roots.append(Path(settings.base_dir) / "experiments" / ".surface_ai_edges_cache")
+    return roots
+
+
+def surface_ai_edges_cache_write_root(settings: Settings, config: SurfaceAIConfig) -> Path:
+    """Каталог для записи parquet-кэша (не под ``settings.cache_dir``)."""
+    raw = (config.edges_cache_dir or "").strip()
+    if raw:
+        return _surface_ai_edges_cache_resolved_dir(raw)
+    return Path(settings.base_dir) / "experiments" / ".surface_ai_edges_cache"
+
+
+def _surface_ai_edges_cache_path_under_data_cache(settings: Settings, target: Path) -> bool:
+    """True, если путь лежит внутри ``cache_dir`` (tiles, area_precache, …) — туда не пишем."""
+    try:
+        cache_root = Path(settings.cache_dir).resolve()
+        t = target.resolve()
+        return t == cache_root or cache_root in t.parents
+    except (OSError, ValueError):
+        return False
+
+
+def _try_load_surface_ai_edges_cache(
+    cache_roots: Sequence[Path],
+    fp: str,
+) -> Optional[Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, Dict[str, Any], Path]]:
+    for cache_root in cache_roots:
+        d = cache_root / fp
+        meta_path = d / "meta.json"
+        train_pq = d / "train_edges.parquet"
+        predict_pq = d / "predict_edges.parquet"
+        if not meta_path.is_file() or not train_pq.is_file() or not predict_pq.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(meta.get("fingerprint") or "") != fp or meta.get("schema") != _SURFACE_AI_EDGES_CACHE_SCHEMA:
+            continue
+        try:
+            train_edges = gpd.read_parquet(train_pq)
+            predict_edges = gpd.read_parquet(predict_pq)
+        except Exception:
+            continue
+        if not isinstance(train_edges, gpd.GeoDataFrame):
+            train_edges = gpd.GeoDataFrame(
+                train_edges, geometry="geometry", crs=getattr(train_edges, "crs", None) or "EPSG:4326"
+            )
+        if not isinstance(predict_edges, gpd.GeoDataFrame):
+            predict_edges = gpd.GeoDataFrame(
+                predict_edges, geometry="geometry", crs=getattr(predict_edges, "crs", None) or "EPSG:4326"
+            )
+        run_meta = meta.get("run_meta") if isinstance(meta.get("run_meta"), dict) else {}
+        return train_edges, predict_edges, run_meta, d
+    return None
+
+
+def _write_surface_ai_edges_cache(
+    settings: Settings,
+    config: SurfaceAIConfig,
+    cache_root: Path,
+    fp: str,
+    train_edges: gpd.GeoDataFrame,
+    predict_edges: gpd.GeoDataFrame,
+    *,
+    run_meta: Dict[str, Any],
+) -> None:
+    if not config.edges_cache_write:
+        return
+    if _surface_ai_edges_cache_path_under_data_cache(settings, cache_root):
+        _log_surface_ai.warning(
+            "Surface AI: запись кэша рёбер отклонена — каталог внутри data/cache (%s). "
+            "Используйте base_dir/experiments/.surface_ai_edges_cache или SURFACE_AI_EDGES_CACHE_DIR вне cache.",
+            cache_root,
+        )
+        return
+    d = cache_root / fp
+    d.mkdir(parents=True, exist_ok=True)
+    train_edges.to_parquet(d / "train_edges.parquet", index=False)
+    predict_edges.to_parquet(d / "predict_edges.parquet", index=False)
+    keys = (
+        "train_graph_source",
+        "train_graph_path",
+        "train_graph_fallback_reasons",
+        "graph_source",
+        "graph_path",
+        "predict_graph_source",
+        "predict_graph_path",
+        "predict_graph_fallback_reasons",
+    )
+    slim = {k: run_meta[k] for k in keys if k in run_meta}
+    meta = {
+        "schema": _SURFACE_AI_EDGES_CACHE_SCHEMA,
+        "fingerprint": fp,
+        "run_meta": slim,
+    }
+    (d / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def mark_dataset_area_flags(dataset: pd.DataFrame, config: SurfaceAIConfig) -> pd.DataFrame:
     df = dataset.copy()
     for col in ("inside_train_area", "inside_predict_area"):
@@ -4285,43 +4585,93 @@ def run_surface_ai_experiment(
             _write_polygon_geojson(artifacts.predict_polygon_geojson, predict_polygon, "predict_polygon")
             _write_polygon_geojson(artifacts.tile_coverage_polygon_geojson, tile_coverage_polygon, "tile_coverage_polygon")
 
-    for _ in progress(range(1), "[2/10] Load train graph", total=1):
-        train_raw, train_meta = load_edges_for_surface_ai_polygon(
-            settings,
-            config,
-            train_polygon,
-            priority=config.train_graph_source_priority,
-            scope="train",
-        )
-        run_meta["train_graph_source"] = train_meta.get("graph_source")
-        run_meta["train_graph_path"] = train_meta.get("graph_path")
-        run_meta["train_graph_fallback_reasons"] = train_meta.get("graph_fallback_reasons", [])
-        run_meta["graph_source"] = run_meta["train_graph_source"]
-        run_meta["graph_path"] = run_meta["train_graph_path"]
+    edges_cache_fp = surface_ai_edges_cache_fingerprint(
+        settings=settings,
+        config=config,
+        train_polygon=train_polygon,
+        predict_polygon=predict_polygon,
+        tile_coverage_polygon=tile_coverage_polygon,
+        tiles_gdf=tiles_gdf,
+        tiles_dir=tiles_dir,
+        tms_server=str(run_meta["tms_server"]),
+        tile_zoom=int(run_meta["tile_zoom"]),
+    )
+    edges_cache_read_roots = surface_ai_edges_cache_read_roots(settings, config)
+    edges_cache_write_root = surface_ai_edges_cache_write_root(settings, config)
+    train_edges: Optional[gpd.GeoDataFrame] = None
+    predict_edges: Optional[gpd.GeoDataFrame] = None
+    if config.reuse_edges_cache:
+        loaded = _try_load_surface_ai_edges_cache(edges_cache_read_roots, edges_cache_fp)
+        if loaded is not None:
+            train_edges, predict_edges, cached_rm, cache_hit_dir = loaded
+            run_meta.update(cached_rm)
+            _log_surface_ai.info(
+                "Surface AI: рёбра из кэша (fingerprint=%s, path=%s)",
+                edges_cache_fp,
+                cache_hit_dir,
+            )
+        else:
+            roots_fmt = ", ".join(str(p) for p in edges_cache_read_roots)
+            _log_surface_ai.info(
+                "Surface AI: кэш рёбер не найден (fingerprint=%s); искали под: %s — полная загрузка графа",
+                edges_cache_fp,
+                roots_fmt,
+            )
 
-    for _ in progress(range(1), "[3/10] Filter train graph", total=1):
-        train_edges = filter_edges_to_polygon(train_raw, train_polygon)
-        for col in AI_OSM_FEATURES:
-            if col not in train_edges.columns:
-                train_edges[col] = None
+    if train_edges is None or predict_edges is None:
+        for _ in progress(range(1), "[2/10] Load train graph", total=1):
+            train_raw, train_meta = load_edges_for_surface_ai_polygon(
+                settings,
+                config,
+                train_polygon,
+                priority=config.train_graph_source_priority,
+                scope="train",
+            )
+            run_meta["train_graph_source"] = train_meta.get("graph_source")
+            run_meta["train_graph_path"] = train_meta.get("graph_path")
+            run_meta["train_graph_fallback_reasons"] = train_meta.get("graph_fallback_reasons", [])
+            run_meta["graph_source"] = run_meta["train_graph_source"]
+            run_meta["graph_path"] = run_meta["train_graph_path"]
 
-    for _ in progress(range(1), "[4/10] Load predict graph", total=1):
-        predict_raw, predict_meta = load_edges_for_surface_ai_polygon(
-            settings,
-            config,
-            predict_polygon,
-            priority=config.predict_graph_source_priority,
-            scope="predict",
-        )
-        run_meta["predict_graph_source"] = predict_meta.get("graph_source")
-        run_meta["predict_graph_path"] = predict_meta.get("graph_path")
-        run_meta["predict_graph_fallback_reasons"] = predict_meta.get("graph_fallback_reasons", [])
+        for _ in progress(range(1), "[3/10] Filter train graph", total=1):
+            train_edges = filter_edges_to_polygon(train_raw, train_polygon)
+            for col in AI_OSM_FEATURES:
+                if col not in train_edges.columns:
+                    train_edges[col] = None
 
-    for _ in progress(range(1), "[5/10] Filter predict graph", total=1):
-        predict_edges = filter_edges_to_polygon(predict_raw, predict_polygon)
-        for col in AI_OSM_FEATURES:
-            if col not in predict_edges.columns:
-                predict_edges[col] = None
+        for _ in progress(range(1), "[4/10] Load predict graph", total=1):
+            predict_raw, predict_meta = load_edges_for_surface_ai_polygon(
+                settings,
+                config,
+                predict_polygon,
+                priority=config.predict_graph_source_priority,
+                scope="predict",
+            )
+            run_meta["predict_graph_source"] = predict_meta.get("graph_source")
+            run_meta["predict_graph_path"] = predict_meta.get("graph_path")
+            run_meta["predict_graph_fallback_reasons"] = predict_meta.get("graph_fallback_reasons", [])
+
+        for _ in progress(range(1), "[5/10] Filter predict graph", total=1):
+            predict_edges = filter_edges_to_polygon(predict_raw, predict_polygon)
+            for col in AI_OSM_FEATURES:
+                if col not in predict_edges.columns:
+                    predict_edges[col] = None
+
+        try:
+            _write_surface_ai_edges_cache(
+                settings,
+                config,
+                edges_cache_write_root,
+                edges_cache_fp,
+                train_edges,
+                predict_edges,
+                run_meta=run_meta,
+            )
+        except Exception as exc:
+            _log_surface_ai.warning("Surface AI: не удалось записать кэш рёбер: %s", exc)
+    else:
+        for _ in progress(range(1), "[2–5/10] Edges from disk cache", total=1):
+            pass
 
     if save_heavy_artifacts(config):
         write_edges_geojson(train_edges, artifacts.train_edges_geojson)
@@ -4453,6 +4803,7 @@ def run_surface_ai_experiment(
             concrete_selected,
             concrete_models,
             artifacts,
+            config,
             target="concrete_compact",
         )
         if save_heavy_artifacts(config)
@@ -4463,6 +4814,7 @@ def run_surface_ai_experiment(
         group_selected,
         group_models,
         artifacts,
+        config,
         target="group_direct",
     )
     feature_importance = feature_importance_df(concrete_models[concrete_selected["model_key"]]["model"])

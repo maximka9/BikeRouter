@@ -871,6 +871,28 @@ def extract_tile_features_for_edges(
     return pd.DataFrame(rows)
 
 
+def dedupe_dataframe_by_edge_id(
+    df: pd.DataFrame,
+    *,
+    keep: str = "last",
+    name: str = "df",
+) -> pd.DataFrame:
+    """Оставить одну строку на edge_id (например после concat тайловых чанков)."""
+    if df.empty or "edge_id" not in df.columns:
+        return df
+    dup = df["edge_id"].duplicated(keep=False)
+    if dup.any():
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "%s: %d строк с дублирующимся edge_id перед merge, keep=%s",
+            name,
+            int(dup.sum()),
+            keep,
+        )
+    return df.drop_duplicates(subset=["edge_id"], keep=keep)
+
+
 def build_dataset(
     edges_gdf: gpd.GeoDataFrame,
     settings: Settings,
@@ -885,6 +907,12 @@ def build_dataset(
         config,
         progress=progress,
     )
+    osm_df = osm_df.copy()
+    tile_df = tile_df.copy()
+    osm_df["edge_id"] = osm_df["edge_id"].map(lambda x: "" if pd.isna(x) else str(x).strip())
+    tile_df["edge_id"] = tile_df["edge_id"].map(lambda x: "" if pd.isna(x) else str(x).strip())
+    osm_df = dedupe_dataframe_by_edge_id(osm_df, keep="first", name="osm_df (surface_ml)")
+    tile_df = dedupe_dataframe_by_edge_id(tile_df, keep="last", name="tile_df (surface_ml)")
     dataset = osm_df.merge(tile_df, on="edge_id", how="left", validate="one_to_one")
     for name in SATELLITE_FEATURES:
         if name not in dataset.columns:

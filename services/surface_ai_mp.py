@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from io import StringIO
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,13 +125,20 @@ def parallel_extract_tile_features_for_edges(
     frames: List[pd.DataFrame] = []
     if workers <= 1:
         for p in payloads:
-            frames.append(pd.read_json(extract_tile_features_chunk_worker(p)))
+            frames.append(
+                pd.read_json(StringIO(extract_tile_features_chunk_worker(p)))
+            )
     else:
         with ProcessPoolExecutor(max_workers=workers) as ex:
             for js in ex.map(extract_tile_features_chunk_worker, payloads):
-                frames.append(pd.read_json(js))
+                frames.append(pd.read_json(StringIO(js)))
 
     out = pd.concat(frames, axis=0, ignore_index=True)
+    out["edge_id"] = out["edge_id"].map(lambda x: "" if pd.isna(x) else str(x).strip())
+    before = len(out)
+    out = out.drop_duplicates(subset=["edge_id"], keep="last")
+    if len(out) < before:
+        _log.warning("Surface AI tile features: снято %d дублирующихся edge_id после concat", before - len(out))
     order = {eid: i for i, eid in enumerate(edges_gdf["edge_id"].astype(str))}
     out["_ord"] = out["edge_id"].astype(str).map(lambda x: order.get(x, 10**9))
     out = out.sort_values("_ord").drop(columns=["_ord"], errors="ignore").reset_index(drop=True)

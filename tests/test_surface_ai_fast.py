@@ -6,7 +6,12 @@ from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
+import pytest
+from dataclasses import replace
+
 from shapely.geometry import LineString, box
+
+from bike_router.config import Settings
 
 from bike_router.services.surface_prediction_store import (
     REQUIRED_RUNTIME_COLUMNS,
@@ -21,6 +26,15 @@ def test_normalize_surface_value() -> None:
     assert normalize_surface_value("asphalt;concrete") == "asphalt"
     assert normalize_surface_value("yes") == "paved"
     assert normalize_surface_value("no") is None
+
+
+def test_dedupe_dataframe_by_edge_id() -> None:
+    from bike_router.services.surface_ml import dedupe_dataframe_by_edge_id
+
+    df = pd.DataFrame({"edge_id": ["a", "a", "b"], "v": [1, 2, 3]})
+    out = dedupe_dataframe_by_edge_id(df, keep="last", name="t")
+    assert list(out["edge_id"]) == ["a", "b"]
+    assert int(out.loc[out["edge_id"] == "a", "v"].iloc[0]) == 2
 
 
 def test_ml_group_maps_to_profile_surface() -> None:
@@ -121,3 +135,144 @@ def test_tile_usage_report_writes_csv_and_png(tmp_path: Path) -> None:
     assert artifacts.tile_usage_csv.exists()
     assert artifacts.tile_usage_map_png.exists()
     assert "tiles_total_in_cache" in summary
+
+
+def test_surface_ai_edges_cache_fingerprint_stable(tmp_path: Path) -> None:
+    from bike_router.services.surface_ai import (
+        SurfaceAIConfig,
+        surface_ai_edges_cache_fingerprint,
+    )
+
+    settings = replace(Settings(), base_dir=str(tmp_path))
+    cfg = SurfaceAIConfig()
+    train_poly = box(0, 0, 0.1, 0.1)
+    predict_poly = box(0, 0, 0.2, 0.2)
+    tile_cov = box(0, 0, 0.15, 0.15)
+    tiles_gdf = gpd.GeoDataFrame(
+        {"tile_id": ["srv_20_1_2"], "geometry": [box(-0.01, -0.01, 0.01, 0.01)]},
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+    tiles_dir = tmp_path / "tiles"
+    tiles_dir.mkdir()
+    fp1 = surface_ai_edges_cache_fingerprint(
+        settings=settings,
+        config=cfg,
+        train_polygon=train_poly,
+        predict_polygon=predict_poly,
+        tile_coverage_polygon=tile_cov,
+        tiles_gdf=tiles_gdf,
+        tiles_dir=tiles_dir,
+        tms_server="google",
+        tile_zoom=20,
+    )
+    fp2 = surface_ai_edges_cache_fingerprint(
+        settings=settings,
+        config=cfg,
+        train_polygon=train_poly,
+        predict_polygon=predict_poly,
+        tile_coverage_polygon=tile_cov,
+        tiles_gdf=tiles_gdf,
+        tiles_dir=tiles_dir,
+        tms_server="google",
+        tile_zoom=20,
+    )
+    assert fp1 == fp2
+    assert len(fp1) == 40
+
+
+def test_surface_ai_edges_cache_parquet_roundtrip(tmp_path: Path) -> None:
+    pytest.importorskip("pyarrow")
+
+    from bike_router.services.surface_ai import (
+        SurfaceAIConfig,
+        _try_load_surface_ai_edges_cache,
+        _write_surface_ai_edges_cache,
+        surface_ai_edges_cache_fingerprint,
+        surface_ai_edges_cache_read_roots,
+        surface_ai_edges_cache_write_root,
+    )
+
+    settings = replace(Settings(), base_dir=str(tmp_path))
+    cfg = SurfaceAIConfig(
+        edges_cache_write=True,
+        edges_cache_dir=str(tmp_path / "edge_cache_sub"),
+    )
+    train_poly = box(0, 0, 0.1, 0.1)
+    predict_poly = box(0, 0, 0.2, 0.2)
+    tile_cov = box(0, 0, 0.15, 0.15)
+    tiles_gdf = gpd.GeoDataFrame(
+        {"tile_id": ["srv_20_5_5"], "geometry": [box(0, 0, 0.02, 0.02)]},
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+    tiles_dir = tmp_path / "tiles2"
+    tiles_dir.mkdir()
+    fp = surface_ai_edges_cache_fingerprint(
+        settings=settings,
+        config=cfg,
+        train_polygon=train_poly,
+        predict_polygon=predict_poly,
+        tile_coverage_polygon=tile_cov,
+        tiles_gdf=tiles_gdf,
+        tiles_dir=tiles_dir,
+        tms_server="google",
+        tile_zoom=20,
+    )
+    root = surface_ai_edges_cache_write_root(settings, cfg)
+    train_edges = gpd.GeoDataFrame(
+        {"edge_id": ["a"], "geometry": [LineString([(0, 0), (0.01, 0)])]},
+        crs="EPSG:4326",
+    )
+    predict_edges = gpd.GeoDataFrame(
+        {"edge_id": ["b"], "geometry": [LineString([(0.1, 0.1), (0.11, 0.1)])]},
+        crs="EPSG:4326",
+    )
+    _write_surface_ai_edges_cache(
+        settings,
+        cfg,
+        root,
+        fp,
+        train_edges,
+        predict_edges,
+        run_meta={"train_graph_source": "unit"},
+    )
+    loaded = _try_load_surface_ai_edges_cache(surface_ai_edges_cache_read_roots(settings, cfg), fp)
+    assert loaded is not None
+    t1, p1, rm, hit = loaded
+    assert rm.get("train_graph_source") == "unit"
+    assert list(t1["edge_id"]) == ["a"]
+    assert list(p1["edge_id"]) == ["b"]
+    assert "edge_cache_sub" in str(hit)
+
+
+def test_surface_ai_edges_cache_refuses_write_inside_data_cache(tmp_path: Path) -> None:
+    pytest.importorskip("pyarrow")
+    from bike_router.services.surface_ai import (
+        SurfaceAIConfig,
+        _write_surface_ai_edges_cache,
+        surface_ai_edges_cache_write_root,
+    )
+
+    settings = replace(Settings(), base_dir=str(tmp_path))
+    bad_root = Path(settings.cache_dir) / "surface_ai_edges_should_not_appear"
+    cfg = SurfaceAIConfig(edges_cache_write=True, edges_cache_dir=str(bad_root))
+    root = surface_ai_edges_cache_write_root(settings, cfg)
+    train_edges = gpd.GeoDataFrame(
+        {"edge_id": ["a"], "geometry": [LineString([(0, 0), (0.01, 0)])]},
+        crs="EPSG:4326",
+    )
+    predict_edges = gpd.GeoDataFrame(
+        {"edge_id": ["b"], "geometry": [LineString([(0.1, 0.1), (0.11, 0.1)])]},
+        crs="EPSG:4326",
+    )
+    _write_surface_ai_edges_cache(
+        settings,
+        cfg,
+        root,
+        "deadbeef",
+        train_edges,
+        predict_edges,
+        run_meta={},
+    )
+    assert not (bad_root / "deadbeef" / "train_edges.parquet").is_file()

@@ -41,6 +41,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random-state", type=int, default=None)
     parser.add_argument("--n-estimators", type=int, default=None)
     parser.add_argument("--no-satellite", action="store_true")
+    parser.add_argument(
+        "--reuse-edges-cache",
+        action="store_true",
+        help="Читать train/predict edges из кэша (см. surface_ai_edges_cache_read_roots): без записи в data/cache.",
+    )
+    parser.add_argument(
+        "--write-edges-cache",
+        action="store_true",
+        help="После полной загрузки записать parquet вне data/cache (по умолчанию data/experiments/.surface_ai_edges_cache).",
+    )
+    parser.add_argument(
+        "--edges-cache-dir",
+        type=Path,
+        default=None,
+        help="Доп. корень для чтения; для записи при --write-edges-cache — цель (не внутри data/cache).",
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -67,6 +83,12 @@ def _override_config(config, args):
         updates["rf_n_estimators"] = int(args.n_estimators)
     if args.no_satellite:
         updates["use_satellite_features"] = False
+    if args.reuse_edges_cache:
+        updates["reuse_edges_cache"] = True
+    if args.write_edges_cache:
+        updates["edges_cache_write"] = True
+    if args.edges_cache_dir is not None:
+        updates["edges_cache_dir"] = str(args.edges_cache_dir)
     return replace(config, **updates) if updates else config
 
 

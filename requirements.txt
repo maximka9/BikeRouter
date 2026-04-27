@@ -10,6 +10,8 @@ networkx==3.5
 osmnx==2.0.7
 # Нужен osmnx.distance.nearest_nodes для графа в WGS84 (иначе ImportError в Docker/проде)
 scikit-learn==1.6.1
+# Parquet в surface_ai / multiprocessing-обучении (train.to_parquet / pd.read_parquet)
+pyarrow==20.0.0
 SRTM.py==0.3.7
 shapely==2.1.2
 requests==2.32.5

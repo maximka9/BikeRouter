@@ -133,7 +133,6 @@ def run_variants_over_weather_cases(
     n_ok = n_fail = n_skip = 0
     route_id_counter = 1
 
-    mw = mp_resolve_pool_workers(int(max_workers))
     ch = max(1, int(chunk_size))
     wchunk = max(1, int(mp_weather_chunk_size))
 
@@ -144,6 +143,16 @@ def run_variants_over_weather_cases(
         wg_label = "synthetic_grid"
         expected_routes = len(route_tasks) * len(grid) * len(EXPECTED_VARIANTS)
         total_steps = len(route_tasks) * len(grid)
+        _gchunks_for_mw = mp_split_weather_grid_chunks(grid, wchunk)
+        mw = mp_resolve_pool_workers(
+            int(max_workers),
+            task_count=max(1, len(route_tasks) * len(_gchunks_for_mw)),
+        )
+        _log.info(
+            "Пакет маршрутов: главный warmup завершён; workers=%d (synthetic-задач≈%d)",
+            mw,
+            len(route_tasks) * len(_gchunks_for_mw),
+        )
 
         if mw > 1:
             from bike_router.tools._batch_experiment_mp import init_worker as _mp_init
@@ -152,7 +161,7 @@ def run_variants_over_weather_cases(
             )
 
             pls = [(float(p.lat), float(p.lon)) for p in points]
-            gchunks = mp_split_weather_grid_chunks(grid, wchunk)
+            gchunks = _gchunks_for_mw
             task_list = [
                 (experiment_id, seed, i, j, prof, list(chunk))
                 for i, j, prof in route_tasks
@@ -352,6 +361,15 @@ def run_variants_over_weather_cases(
         dep_iso = str(fk.get("weather_time") or "")
         expected_routes = len(route_tasks) * len(EXPECTED_VARIANTS)
         pbar_total = len(route_tasks)
+        mw = mp_resolve_pool_workers(
+            int(max_workers),
+            task_count=max(1, len(route_tasks)),
+        )
+        _log.info(
+            "Пакет маршрутов: главный warmup завершён; workers=%d (fixed O-D задач=%d)",
+            mw,
+            len(route_tasks),
+        )
 
         if mw > 1:
             from bike_router.tools._batch_experiment_mp import init_worker as _mp_init

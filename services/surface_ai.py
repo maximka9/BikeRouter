@@ -423,6 +423,9 @@ class SurfaceAIConfig:
     out_dir: str = "./data/experiments/surface_ai"
     min_known_edges: int = 100
     max_tile_cache_items: int = 512
+    # Авто-параллелизм без CLI: тайлы по процессам; кандидаты моделей при |candidates| >= порога.
+    auto_parallel: bool = True
+    model_outer_parallel_min_candidates: int = 3
 
     @classmethod
     def from_env(cls) -> "SurfaceAIConfig":
@@ -539,6 +542,10 @@ class SurfaceAIConfig:
             bad_surface_min_confidence=_env_float("SURFACE_AI_BAD_SURFACE_MIN_CONFIDENCE", 0.60),
             min_margin=_env_float("SURFACE_AI_MIN_MARGIN", 0.15),
             out_dir=_env_str("SURFACE_AI_OUT_DIR", "./data/experiments/surface_ai"),
+            auto_parallel=_env_bool("SURFACE_AI_AUTO_PARALLEL", True),
+            model_outer_parallel_min_candidates=_env_int(
+                "SURFACE_AI_MODEL_OUTER_PARALLEL_MIN_CANDIDATES", 3
+            ),
         )
 
 
@@ -909,18 +916,13 @@ def build_surface_ai_dataset(
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     osm_df = build_osm_geometry_dataset(edges_gdf, polygon, progress=progress)
     if config.use_satellite_features:
-        cache_dir = Path(settings.cache_dir)
-        if config.tiles_dir:
-            cache_dir = Path(config.tiles_dir).expanduser().resolve().parent
-        tile_settings = SimpleNamespace(
-            cache_dir=str(cache_dir),
-            tms_server=config.tms_server or settings.tms_server,
-            satellite_zoom=int(config.tile_zoom or settings.satellite_zoom),
-        )
         ml_config = _surface_ml_config_from_ai(config)
-        tile_df = extract_tile_features_for_edges(
+        from .surface_ai_mp import parallel_extract_tile_features_for_edges
+
+        tile_df = parallel_extract_tile_features_for_edges(
             edges_gdf,
-            tile_settings,
+            settings,
+            config,
             ml_config,
             progress=progress,
         )
@@ -1208,12 +1210,17 @@ def _build_preprocessor(cat_cols: Sequence[str], num_cols: Sequence[str]) -> Col
     return ColumnTransformer(transformers=transformers, remainder="drop", verbose_feature_names_out=True)
 
 
-def _rf(config: SurfaceAIConfig, *, class_weight: Optional[str]) -> RandomForestClassifier:
+def _rf(
+    config: SurfaceAIConfig,
+    *,
+    class_weight: Optional[str],
+    n_jobs: int = -1,
+) -> RandomForestClassifier:
     return RandomForestClassifier(
         n_estimators=int(config.rf_n_estimators),
         random_state=int(config.random_state),
         class_weight=class_weight,
-        n_jobs=-1,
+        n_jobs=int(n_jobs),
         min_samples_leaf=2,
     )
 
@@ -1237,13 +1244,20 @@ def _manual_group_class_weight(config: SurfaceAIConfig) -> Dict[str, float]:
     return out
 
 
-def _build_pipeline(candidate: str, feature_set: str, config: SurfaceAIConfig) -> Pipeline:
+def _build_pipeline(
+    candidate: str,
+    feature_set: str,
+    config: SurfaceAIConfig,
+    *,
+    sklearn_n_jobs: int = -1,
+) -> Pipeline:
     _, cat_cols, num_cols = _features_for_model(pd.DataFrame(), feature_set)
     preprocessor = _build_preprocessor(cat_cols, num_cols)
+    nj = int(sklearn_n_jobs)
     if candidate == "combined_hist_gradient_boosting":
         model: Any = HistGradientBoostingClassifier(random_state=int(config.random_state))
     elif candidate == "combined_logistic_regression":
-        model = LogisticRegression(max_iter=1000, class_weight="balanced", n_jobs=-1)
+        model = LogisticRegression(max_iter=1000, class_weight="balanced", n_jobs=nj)
     else:
         cw: Any = None
         if candidate in {
@@ -1260,7 +1274,7 @@ def _build_pipeline(candidate: str, feature_set: str, config: SurfaceAIConfig) -
             "group_direct_combined_rf_threshold_tuned",
         }:
             cw = _manual_group_class_weight(config)
-        model = _rf(config, class_weight=cw)
+        model = _rf(config, class_weight=cw, n_jobs=nj)
     return Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
 
@@ -1675,6 +1689,8 @@ def _fit_candidate_model(
     config: SurfaceAIConfig,
     labels: Sequence[str],
     label_meta: Dict[str, Any],
+    *,
+    sklearn_n_jobs: int = -1,
 ) -> Tuple[Any, pd.DataFrame]:
     train_fit = pd.concat([train, calibration], axis=0) if not calibration.empty else train
     y_train = train["surface_group_direct_label" if target == "group_direct" else "surface_train_label"].astype(str)
@@ -1695,7 +1711,12 @@ def _fit_candidate_model(
         return model, X_train_fit
 
     calibrate = "calibrated" in candidate and config.calibration_enabled and config.calibration_method != "none" and not calibration.empty
-    base = _build_pipeline(candidate.replace("_calibrated", ""), feature_set, config)
+    base = _build_pipeline(
+        candidate.replace("_calibrated", ""),
+        feature_set,
+        config,
+        sklearn_n_jobs=sklearn_n_jobs,
+    )
     if calibrate:
         X_train, _, _ = _features_for_model(train, feature_set)
         base.fit(X_train, y_train)
@@ -1864,67 +1885,148 @@ def train_evaluate_task_models(
     labels = sorted(set(train[target_col].astype(str)) | set(test[target_col].astype(str)))
     models: Dict[str, Any] = {}
     rows: List[Dict[str, Any]] = []
-    for candidate in progress(list(dict.fromkeys(candidates)), f"[5/8] Train/evaluate {target}", total=len(list(dict.fromkeys(candidates)))):
-        display, features_label = _candidate_display(candidate)
-        feature_set = _candidate_feature_set(candidate)
-        model, _ = _fit_candidate_model(
-            candidate,
-            feature_set,
-            target,
-            train,
-            calibration,
-            config,
-            labels,
-            label_meta,
+    cand_list = list(dict.fromkeys(candidates))
+    workers = 1
+    if (
+        bool(config.auto_parallel)
+        and len(cand_list) >= int(config.model_outer_parallel_min_candidates)
+    ):
+        from bike_router.tools._parallel_utils import auto_worker_count
+
+        workers = max(
+            1,
+            min(auto_worker_count(len(cand_list), memory_heavy=False), len(cand_list)),
         )
-        metrics, details = evaluate_task_model(
-            candidate=candidate,
-            model=model,
-            feature_set=feature_set,
-            target=target,
-            test=test,
-            labels=labels,
-            config=config,
-        )
-        rows.append(
-            {
-                "model_key": candidate,
-                "model": display,
+    use_outer_mp = workers > 1
+    if use_outer_mp:
+        from concurrent.futures import ProcessPoolExecutor
+        import shutil
+        import tempfile
+        import time as _time
+
+        from .surface_ai_mp import train_surface_ai_candidate_worker
+
+        tmpdir = tempfile.mkdtemp(prefix="surface_ai_cand_")
+        try:
+            cfg_path = Path(tmpdir) / "cfg.joblib"
+            lm_path = Path(tmpdir) / "lm.joblib"
+            tr_path = Path(tmpdir) / "train.parquet"
+            cal_path = Path(tmpdir) / "cal.parquet"
+            te_path = Path(tmpdir) / "test.parquet"
+            models_dir = Path(tmpdir) / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            joblib.dump(config, cfg_path)
+            joblib.dump(label_meta, lm_path)
+            train.to_parquet(tr_path, index=False)
+            cal_df = calibration.reindex(columns=train.columns)
+            cal_df.to_parquet(cal_path, index=False)
+            test.to_parquet(te_path, index=False)
+            payloads = [
+                {
+                    "config_path": str(cfg_path),
+                    "label_meta_path": str(lm_path),
+                    "train_path": str(tr_path),
+                    "calibration_path": str(cal_path),
+                    "test_path": str(te_path),
+                    "candidate": c,
+                    "target": target,
+                    "sklearn_n_jobs": 1,
+                    "models_dir": str(models_dir),
+                }
+                for c in cand_list
+            ]
+            t0 = _time.perf_counter()
+            _log_surface_ai.info(
+                "Surface AI %s: параллельное обучение кандидатов=%d workers=%d",
+                target,
+                len(cand_list),
+                workers,
+            )
+            with ProcessPoolExecutor(max_workers=workers) as ex:
+                outs = list(ex.map(train_surface_ai_candidate_worker, payloads))
+            for item in outs:
+                c = str(item["candidate"])
+                models[c] = {
+                    "model": joblib.load(item["model_path"]),
+                    "feature_set": item["feature_set"],
+                    "metrics": item["metrics"],
+                    "details": pd.read_parquet(item["details_path"]),
+                    "labels": item["labels"],
+                    "target": item["target"],
+                }
+                rows.append(item["row"])
+            _log_surface_ai.info(
+                "Surface AI %s: кандидаты готовы за %.1fs",
+                target,
+                _time.perf_counter() - t0,
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    else:
+        for candidate in progress(cand_list, f"[5/8] Train/evaluate {target}", total=len(cand_list)):
+            display, features_label = _candidate_display(candidate)
+            feature_set = _candidate_feature_set(candidate)
+            model, _ = _fit_candidate_model(
+                candidate,
+                feature_set,
+                target,
+                train,
+                calibration,
+                config,
+                labels,
+                label_meta,
+                sklearn_n_jobs=-1,
+            )
+            metrics, details = evaluate_task_model(
+                candidate=candidate,
+                model=model,
+                feature_set=feature_set,
+                target=target,
+                test=test,
+                labels=labels,
+                config=config,
+            )
+            rows.append(
+                {
+                    "model_key": candidate,
+                    "model": display,
+                    "target": target,
+                    "features": features_label,
+                    "accuracy": metrics.get("accuracy", 0.0),
+                    "balanced_accuracy": metrics.get("balanced_accuracy", 0.0),
+                    "macro_f1": metrics.get("macro_f1", 0.0),
+                    "weighted_f1": metrics.get("weighted_f1", 0.0),
+                    "macro_f1_safe": metrics.get("macro_f1_safe", 0.0),
+                    "macro_f1_safe_rough_aware": metrics.get("macro_f1_safe_rough_aware", 0.0),
+                    "recall_bad_surface": metrics.get("recall_bad_surface", 0.0),
+                    "recall_unpaved_soft": metrics.get("recall_unpaved_soft", 0.0),
+                    "recall_paved_rough": metrics.get("recall_paved_rough", np.nan),
+                    "precision_paved_rough": metrics.get("precision_paved_rough", np.nan),
+                    "f1_paved_rough": metrics.get("f1_paved_rough", np.nan),
+                    "paved_rough_to_paved_good_count": metrics.get("paved_rough_to_paved_good_count", 0),
+                    "paved_rough_to_paved_good_rate": metrics.get("paved_rough_to_paved_good_rate", 0.0),
+                    "rough_upgrade_rate_effective": metrics.get("rough_upgrade_rate_effective", 0.0),
+                    "rough_upgrade_length_m_effective": metrics.get("rough_upgrade_length_m_effective", 0.0),
+                    "recall_asphalt": metrics.get("recall_asphalt", np.nan),
+                    "recall_concrete": metrics.get("recall_concrete", np.nan),
+                    "recall_paving_stones": metrics.get("recall_paving_stones", np.nan),
+                    "dangerous_upgrade_rate_raw": metrics.get("dangerous_upgrade_rate_raw", 0.0),
+                    "dangerous_upgrade_rate_effective": metrics.get("dangerous_upgrade_rate_effective", 0.0),
+                    "dangerous_upgrade_count_raw": metrics.get("dangerous_upgrade_count_raw", 0),
+                    "dangerous_upgrade_count_effective": metrics.get("dangerous_upgrade_count_effective", 0),
+                    "dangerous_upgrade_length_m_effective": metrics.get(
+                        "dangerous_upgrade_length_m_effective", 0.0
+                    ),
+                }
+            )
+            models[candidate] = {
+                "model": model,
+                "feature_set": feature_set,
+                "metrics": metrics,
+                "details": details,
+                "labels": labels,
                 "target": target,
-                "features": features_label,
-                "accuracy": metrics.get("accuracy", 0.0),
-                "balanced_accuracy": metrics.get("balanced_accuracy", 0.0),
-                "macro_f1": metrics.get("macro_f1", 0.0),
-                "weighted_f1": metrics.get("weighted_f1", 0.0),
-                "macro_f1_safe": metrics.get("macro_f1_safe", 0.0),
-                "macro_f1_safe_rough_aware": metrics.get("macro_f1_safe_rough_aware", 0.0),
-                "recall_bad_surface": metrics.get("recall_bad_surface", 0.0),
-                "recall_unpaved_soft": metrics.get("recall_unpaved_soft", 0.0),
-                "recall_paved_rough": metrics.get("recall_paved_rough", np.nan),
-                "precision_paved_rough": metrics.get("precision_paved_rough", np.nan),
-                "f1_paved_rough": metrics.get("f1_paved_rough", np.nan),
-                "paved_rough_to_paved_good_count": metrics.get("paved_rough_to_paved_good_count", 0),
-                "paved_rough_to_paved_good_rate": metrics.get("paved_rough_to_paved_good_rate", 0.0),
-                "rough_upgrade_rate_effective": metrics.get("rough_upgrade_rate_effective", 0.0),
-                "rough_upgrade_length_m_effective": metrics.get("rough_upgrade_length_m_effective", 0.0),
-                "recall_asphalt": metrics.get("recall_asphalt", np.nan),
-                "recall_concrete": metrics.get("recall_concrete", np.nan),
-                "recall_paving_stones": metrics.get("recall_paving_stones", np.nan),
-                "dangerous_upgrade_rate_raw": metrics.get("dangerous_upgrade_rate_raw", 0.0),
-                "dangerous_upgrade_rate_effective": metrics.get("dangerous_upgrade_rate_effective", 0.0),
-                "dangerous_upgrade_count_raw": metrics.get("dangerous_upgrade_count_raw", 0),
-                "dangerous_upgrade_count_effective": metrics.get("dangerous_upgrade_count_effective", 0),
-                "dangerous_upgrade_length_m_effective": metrics.get("dangerous_upgrade_length_m_effective", 0.0),
             }
-        )
-        models[candidate] = {
-            "model": model,
-            "feature_set": feature_set,
-            "metrics": metrics,
-            "details": details,
-            "labels": labels,
-            "target": target,
-        }
     table = pd.DataFrame(rows)
     return models, table
 

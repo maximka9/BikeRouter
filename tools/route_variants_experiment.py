@@ -3,7 +3,7 @@
 Один запрос погоды в центре полигона на момент запуска. Выход:
 ``bike_router/experiment_outputs/route_variants_experiment_YYYYMMDD_HHMMSS.xlsx`` (UTC в имени).
 
-Параллель по умолчанию: ``min(6, CPU-1)`` процессов (как авто-режим в батчах).
+Параллель по умолчанию: авто (как в ``route_batch_experiment``; главный warmup до пула).
 
 Запуск::
 

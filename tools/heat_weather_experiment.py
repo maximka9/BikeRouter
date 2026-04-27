@@ -17,8 +17,8 @@ apparent temperature (T vs AT).
 
 Вершины маршрутов в ``.csv.gz`` **не** пишутся (ускорение и объём).
 
-При ``--max-workers`` > 1 прогресс идёт по **чанкам погоды** (см. ``--mp-weather-chunk``), иначе
-долгое «молчание» на первой паре (сотни маршрутов подряд в одном воркере).
+По умолчанию ``--max-workers 0`` — авто-пул (несколько процессов). При ``--max-workers 1`` —
+последовательно. При пуле > 1 прогресс идёт по **чанкам погоды** (см. ``--mp-weather-chunk``).
 
 Устаревшее ``summer_wind`` = ``summer``.
 
@@ -63,7 +63,7 @@ def run_heat_weather_experiment(
     log_every: int,
     weather_grid: str = "summer",
     directed_pairs: bool = False,
-    max_workers: int = 1,
+    max_workers: int = 0,
     chunk_size: int = 1,
     mp_weather_chunk_size: int = 25,
 ) -> str:
@@ -177,9 +177,21 @@ def run_heat_weather_experiment(
     _set_quiet_mode_for_batch(verbose)
     total_steps = len(route_tasks) * len(grid)
 
-    mw = mp_resolve_pool_workers(int(max_workers))
     ch = max(1, int(chunk_size))
     wchunk = max(1, int(mp_weather_chunk_size))
+
+    gchunks = mp_split_weather_grid_chunks(grid, wchunk)
+    task_list = [
+        (experiment_id, seed, i, j, prof, list(chunk))
+        for i, j, prof in route_tasks
+        for chunk in gchunks
+    ]
+    mw = mp_resolve_pool_workers(int(max_workers), task_count=max(1, len(task_list)))
+    _log.info(
+        "Heat batch: главный warmup завершён; workers=%d задач_в_пуле=%d",
+        mw,
+        len(task_list),
+    )
 
     if mw > 1:
         from bike_router.tools._batch_experiment_mp import init_worker as _heat_mp_init
@@ -188,12 +200,6 @@ def run_heat_weather_experiment(
         )
 
         pls = [(float(p.lat), float(p.lon)) for p in points]
-        gchunks = mp_split_weather_grid_chunks(grid, wchunk)
-        task_list = [
-            (experiment_id, seed, i, j, prof, list(chunk))
-            for i, j, prof in route_tasks
-            for chunk in gchunks
-        ]
         del eng
         gc.collect()
         _log.info(
@@ -475,9 +481,9 @@ def main() -> None:
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=1,
+        default=0,
         metavar="N",
-        help="Параллель: 1=выкл, 0=авто (min(6, CPU−1)).",
+        help="Параллель: 0=авто (4–6 воркеров), N>0 — явное число процессов, 1=последовательно.",
     )
     parser.add_argument(
         "--chunk-size",

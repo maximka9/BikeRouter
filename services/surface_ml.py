@@ -826,38 +826,48 @@ def extract_tile_features_for_edges(
     rows: List[Dict[str, Any]] = []
     iterator = zip(edges_gdf.itertuples(index=False), projected.geometry.values)
     for row, projected_geom in progress(iterator, "[4/7] Tile features", total=len(edges_gdf)):
-        pixels: List[np.ndarray] = []
-        sample_points = _sample_projected_points(projected_geom, config.sample_step_m)
-        missing = 0
-        for point in sample_points:
-            try:
-                lon, lat = transformer.transform(point.x, point.y)
-                x, y, px, py = _tile_fraction(lat, lon, settings.satellite_zoom)
-            except Exception:
-                missing += 1
-                continue
-            tile = reader.read(x, y)
-            if tile is None:
-                missing += 1
-                continue
-            y0 = max(0, py - half)
-            y1 = min(tile.shape[0], py + half + 1)
-            x0 = max(0, px - half)
-            x1 = min(tile.shape[1], px + half + 1)
-            window = tile[y0:y1, x0:x1, :]
-            if window.size == 0:
-                missing += 1
-                continue
-            pixels.append(window.reshape(-1, 3))
-        item = {"edge_id": row.edge_id}
-        item.update(
-            _tile_features_from_pixels(
-                pixels,
-                samples_count=len(sample_points),
-                missing_count=missing,
+        try:
+            pixels: List[np.ndarray] = []
+            sample_points = _sample_projected_points(projected_geom, config.sample_step_m)
+            missing = 0
+            for point in sample_points:
+                try:
+                    lon, lat = transformer.transform(point.x, point.y)
+                    x, y, px, py = _tile_fraction(lat, lon, settings.satellite_zoom)
+                except Exception:
+                    missing += 1
+                    continue
+                tile = reader.read(x, y)
+                if tile is None:
+                    missing += 1
+                    continue
+                y0 = max(0, py - half)
+                y1 = min(tile.shape[0], py + half + 1)
+                x0 = max(0, px - half)
+                x1 = min(tile.shape[1], px + half + 1)
+                window = tile[y0:y1, x0:x1, :]
+                if window.size == 0:
+                    missing += 1
+                    continue
+                pixels.append(window.reshape(-1, 3))
+            item = {"edge_id": row.edge_id}
+            item.update(
+                _tile_features_from_pixels(
+                    pixels,
+                    samples_count=len(sample_points),
+                    missing_count=missing,
+                )
             )
-        )
-        rows.append(item)
+            rows.append(item)
+        except Exception:
+            item = {"edge_id": getattr(row, "edge_id", None)}
+            item.update(
+                _nan_tile_features(
+                    samples_count=0,
+                    missing_share=1.0,
+                )
+            )
+            rows.append(item)
     return pd.DataFrame(rows)
 
 

@@ -1429,13 +1429,15 @@ def build_pair_comparison(
     return out
 
 
-def mp_resolve_pool_workers(max_workers: int) -> int:
-    """Число процессов пула: 0 → auto ``min(6, CPU−1)``, иначе ``max(1, N)``."""
-    from multiprocessing import cpu_count
+def mp_resolve_pool_workers(max_workers: int, *, task_count: int = 10**9) -> int:
+    """Число процессов пула: ``max_workers<=0`` → авто (стабильный пул для route batch).
 
-    c = int(cpu_count() or 4)
+    ``task_count`` — ожидаемое число задач в пуле (не больше воркеров, чем задач).
+    """
     if int(max_workers) <= 0:
-        return max(1, min(6, c - 1))
+        from bike_router.tools._parallel_utils import auto_worker_count
+
+        return auto_worker_count(int(task_count), memory_heavy=True)
     return max(1, int(max_workers))
 
 

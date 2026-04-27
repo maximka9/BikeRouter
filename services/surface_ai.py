@@ -32,7 +32,7 @@ from shapely.geometry import box
 from shapely.ops import unary_union
 
 _log_surface_ai = logging.getLogger(__name__)
-from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyClassifier
@@ -1268,7 +1268,20 @@ def _numeric_columns_with_signal(X: pd.DataFrame, num_cols: Sequence[str]) -> Li
     return out
 
 
-def _build_preprocessor(cat_cols: Sequence[str], num_cols: Sequence[str]) -> ColumnTransformer:
+class ConstantFeatureTransformer(BaseEstimator, TransformerMixin):
+    """Single constant feature for candidates whose requested feature set is empty."""
+
+    def fit(self, X: Any, y: Any = None) -> "ConstantFeatureTransformer":
+        return self
+
+    def transform(self, X: Any) -> np.ndarray:
+        return np.ones((len(X), 1), dtype=float)
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        return np.array(["constant_no_available_features"], dtype=object)
+
+
+def _build_preprocessor(cat_cols: Sequence[str], num_cols: Sequence[str]) -> Any:
     transformers = []
     if cat_cols:
         transformers.append(
@@ -1291,6 +1304,8 @@ def _build_preprocessor(cat_cols: Sequence[str], num_cols: Sequence[str]) -> Col
                 list(num_cols),
             )
         )
+    if not transformers:
+        return ConstantFeatureTransformer()
     return ColumnTransformer(transformers=transformers, remainder="drop", verbose_feature_names_out=True)
 
 

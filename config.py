@@ -862,6 +862,7 @@ class Settings:
     surface_ai_runtime_use_only_safe: bool = field(
         default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_USE_ONLY_SAFE", True)
     )
+    # OSM приоритетнее ML зашито в коде; SURFACE_AI_RUNTIME_OSM_PRIORITY — legacy .env.
     surface_ai_runtime_osm_priority: bool = field(
         default_factory=lambda: _env_bool("SURFACE_AI_RUNTIME_OSM_PRIORITY", True)
     )

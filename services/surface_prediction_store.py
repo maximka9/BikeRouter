@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,43 @@ REQUIRED_RUNTIME_COLUMNS: Tuple[str, ...] = (
 )
 
 ROUTING_GROUPS = frozenset({"paved_good", "paved_rough", "unpaved_soft", "unknown"})
+
+
+def _short_hash(value: str) -> str:
+    return hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def compute_runtime_routing_graph_hash(edges: Any) -> str:
+    """Совпадает с ``graph_hash`` из ``surface_ai.graph_fingerprint`` для того же набора рёбер."""
+    if edges is None or getattr(edges, "empty", True):
+        return "empty"
+    try:
+        u = edges.get("u", pd.Series([], dtype=object)).astype(str)
+        v = edges.get("v", pd.Series([], dtype=object)).astype(str)
+        eids = edges.get("edge_id", pd.Series([], dtype=object)).astype(str)
+        payload = "|".join(sorted(eids.head(10000).tolist()))
+        return _short_hash(payload)
+    except Exception:
+        return "empty"
+
+
+def parse_runtime_artifact_graph_hash(raw: Any) -> str:
+    """Из ячейки CSV: короткий hash или JSON с вложенным ``predict.graph_hash``."""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    if s.startswith("{"):
+        try:
+            d = json.loads(s)
+            if isinstance(d, dict):
+                pred = d.get("predict")
+                if isinstance(pred, dict) and pred.get("graph_hash") is not None:
+                    return str(pred["graph_hash"]).strip()
+                if d.get("graph_hash") is not None and d.get("edges_count") is not None:
+                    return str(d["graph_hash"]).strip()
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return s
+    return s
 
 
 def _norm_group(g: Any) -> str:
@@ -100,6 +138,8 @@ class SurfacePredictionStore:
         self._settings = settings
         self._loaded = False
         self._failure_reason: Optional[str] = None
+        self._artifact_graph_hash: str = ""
+        self._ml_graph_ok: bool = True
         self._by_edge_id: Dict[str, SurfacePrediction] = {}
         self._by_undirected: Dict[str, SurfacePrediction] = {}
         self._by_way_geom: Dict[str, SurfacePrediction] = {}
@@ -115,6 +155,8 @@ class SurfacePredictionStore:
     def load(self) -> None:
         self._loaded = False
         self._failure_reason = None
+        self._artifact_graph_hash = ""
+        self._ml_graph_ok = True
         self._by_edge_id.clear()
         self._by_undirected.clear()
         self._by_way_geom.clear()
@@ -184,9 +226,20 @@ class SurfacePredictionStore:
         area_fp = ""
         if "area_fingerprint" in df.columns and len(df):
             area_fp = str(df["area_fingerprint"].iloc[0] or "").strip()
-        graph_fp = ""
+        self._artifact_graph_hash = ""
         if "graph_fingerprint" in df.columns and len(df):
-            graph_fp = str(df["graph_fingerprint"].iloc[0] or "").strip()
+            gvals = df["graph_fingerprint"].astype(str).str.strip()
+            gvals = gvals[gvals != ""]
+            if not gvals.empty:
+                uniq = gvals.unique()
+                if len(uniq) > 1:
+                    msg = "inconsistent graph_fingerprint values across CSV rows"
+                    self._failure_reason = msg
+                    if self._settings.surface_ai_runtime_strict:
+                        raise ValueError(msg)
+                    logger.warning("%s — отключаем ML", msg)
+                    return
+                self._artifact_graph_hash = parse_runtime_artifact_graph_hash(uniq[0])
 
         # Опциональная проверка отпечатков (если заданы и в Settings есть WKT полигона precache).
         if area_fp and self._settings.has_precache_area_polygon:
@@ -211,10 +264,6 @@ class SurfacePredictionStore:
                 logger.warning("%s", msg)
                 return
 
-        if graph_fp:
-            # Мягкая проверка: только лог, если strict — можно расширить позже.
-            pass
-
         for _, row in df.iterrows():
             pred = self._row_to_prediction(row)
             eid = str(row["edge_id"]).strip()
@@ -236,11 +285,29 @@ class SurfacePredictionStore:
                 self._by_way_geom[wgk] = pred
 
         self._loaded = True
+        self._ml_graph_ok = True
         logger.info(
             "Surface AI runtime: загружено %d предсказаний из %s",
             len(self._by_edge_id),
             path,
         )
+
+    def begin_graph_session(self, edges_gdf: Any) -> None:
+        """Сверка ``graph_fingerprint`` артефакта с текущим графом (вызывать перед выборкой ML по рёбрам)."""
+        self._ml_graph_ok = True
+        if not self._loaded:
+            return
+        exp = (self._artifact_graph_hash or "").strip()
+        if not exp:
+            return
+        cur = compute_runtime_routing_graph_hash(edges_gdf)
+        if cur == exp:
+            return
+        self._ml_graph_ok = False
+        msg = f"graph_fingerprint mismatch (artifact={exp!r} current_graph={cur!r})"
+        if self._settings.surface_ai_runtime_strict:
+            raise ValueError(msg)
+        logger.warning("%s — ML-предсказания отключены для этого графа", msg)
 
     @staticmethod
     def _undirected_key(u: Any, v: Any, key: Any) -> str:
@@ -277,7 +344,7 @@ class SurfacePredictionStore:
         )
 
     def get_for_edge(self, row: pd.Series) -> Optional[SurfacePrediction]:
-        if not self._loaded:
+        if not self._loaded or not self._ml_graph_ok:
             return None
         modes = [
             m.strip().lower().replace(" ", "_")

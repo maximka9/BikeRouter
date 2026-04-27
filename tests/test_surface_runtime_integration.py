@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import geopandas as gpd
@@ -11,7 +12,11 @@ from shapely.geometry import LineString
 
 from bike_router.config import Settings
 from bike_router.services.graph import GraphBuilder
-from bike_router.services.surface_prediction_store import SurfacePredictionStore
+from bike_router.services.surface_prediction_store import (
+    SurfacePredictionStore,
+    compute_runtime_routing_graph_hash,
+    parse_runtime_artifact_graph_hash,
+)
 from bike_router.services.surface_resolve import apply_surface_resolution
 
 
@@ -22,6 +27,7 @@ def _minimal_edges_gdf() -> gpd.GeoDataFrame:
             "u": [1],
             "v": [2],
             "key": [0],
+            "edge_id": ["1_2_0"],
             "highway": ["residential"],
             "tracktype": [None],
             "surface": [None],
@@ -233,6 +239,70 @@ def test_runtime_disabled_preserves_old_behavior(monkeypatch) -> None:
     out, stats = apply_surface_resolution(gdf, prediction_store=None, settings=s)
     assert out["surface_source"].iloc[0] == "heuristic"
     assert stats.surface_source_ml_count == 0
+
+
+def test_osm_unknown_tag_allows_ml(tmp_path, monkeypatch) -> None:
+    csv_path = tmp_path / "p.csv"
+    _write_runtime_csv(csv_path)
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_OSM_PRIORITY", "true")
+    s = Settings()
+    store = SurfacePredictionStore(s)
+    store.load()
+    gdf = _minimal_edges_gdf()
+    gdf["surface"] = ["unknown"]
+    out, _stats = apply_surface_resolution(gdf, prediction_store=store, settings=s)
+    assert out["surface_source"].iloc[0] == "ml"
+
+
+def test_osm_priority_env_does_not_allow_ml_over_osm(tmp_path, monkeypatch) -> None:
+    csv_path = tmp_path / "p.csv"
+    _write_runtime_csv(csv_path, surface_pred_group="unpaved_soft")
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_OSM_PRIORITY", "false")
+    s = Settings()
+    store = SurfacePredictionStore(s)
+    store.load()
+    gdf = _minimal_edges_gdf()
+    gdf["surface"] = ["asphalt"]
+    out, _stats = apply_surface_resolution(gdf, prediction_store=store, settings=s)
+    assert out["surface_source"].iloc[0] == "osm"
+    assert out["surface_effective"].iloc[0] == "asphalt"
+
+
+def test_graph_fingerprint_mismatch_disables_ml(tmp_path, monkeypatch) -> None:
+    csv_path = tmp_path / "p.csv"
+    _write_runtime_csv(csv_path, graph_fingerprint="badbadbadbadbad0")
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
+    s = Settings()
+    store = SurfacePredictionStore(s)
+    store.load()
+    assert store.loaded
+    gdf = _minimal_edges_gdf()
+    out, _stats = apply_surface_resolution(gdf, prediction_store=store, settings=s)
+    assert out["surface_source"].iloc[0] != "ml"
+
+
+def test_parse_runtime_json_graph_fingerprint() -> None:
+    blob = json.dumps({"predict": {"graph_hash": "abc123def4567890"}, "train": {}})
+    assert parse_runtime_artifact_graph_hash(blob) == "abc123def4567890"
+
+
+def test_graph_fingerprint_match_allows_ml(tmp_path, monkeypatch) -> None:
+    csv_path = tmp_path / "p.csv"
+    gdf = _minimal_edges_gdf()
+    gh = compute_runtime_routing_graph_hash(gdf)
+    _write_runtime_csv(csv_path, graph_fingerprint=gh)
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
+    s = Settings()
+    store = SurfacePredictionStore(s)
+    store.load()
+    out, _stats = apply_surface_resolution(gdf, prediction_store=store, settings=s)
+    assert out["surface_source"].iloc[0] == "ml"
 
 
 def test_ml_paved_rough_maps_to_profile_surface_string() -> None:

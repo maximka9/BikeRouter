@@ -122,8 +122,9 @@ def main() -> None:
         choices=("off", "on", "both"),
         default=None,
         help=(
-            "Если задано: только сравнение одного маршрута (START/END из .env) "
-            "с ML runtime off|on|both (both = off,on подряд); печать JSON в stdout."
+            "Если задано: сравнение маршрута START/END из .env с ML runtime "
+            "off|on|both (both = off,on); JSON в stdout. Несколько пар O-D: "
+            "python -m bike_router.tools.surface_runtime_route_experiment --pairs-csv ..."
         ),
     )
     args = parser.parse_args()

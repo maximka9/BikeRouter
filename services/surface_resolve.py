@@ -47,12 +47,29 @@ _HIGHWAY_SURFACE = {
 }
 
 # Группа Surface AI → строка для ``ModeProfile.surface`` (ключи CYCLIST/PEDESTRIAN).
-_ML_GROUP_TO_PROFILE_SURFACE = {
+ML_GROUP_TO_ROUTING_PROFILE_SURFACE: Dict[str, str] = {
     "paved_good": "asphalt",
     "paved_rough": "compacted",
     "unpaved_soft": "unpaved",
     "unknown": "unknown",
 }
+_ML_GROUP_TO_PROFILE_SURFACE = ML_GROUP_TO_ROUTING_PROFILE_SURFACE
+
+
+def ml_group_to_profile_surface(group: str) -> str:
+    """Строка ``surface_effective`` для профиля по группе Surface AI."""
+    g = (group or "").strip().lower()
+    return ML_GROUP_TO_ROUTING_PROFILE_SURFACE.get(g, "unknown")
+
+
+def _osm_surface_blocks_ml(surface_osm: str) -> bool:
+    """True, если в OSM есть осмысленное покрытие — ML не применяется (инвариант)."""
+    s = (surface_osm or "").strip().lower()
+    if not s:
+        return False
+    if s == "unknown":
+        return False
+    return True
 
 
 def _first_value(val: Any) -> Any:
@@ -113,10 +130,6 @@ def build_surface_effective_column(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFr
     return gdf
 
 
-def _osm_surface_present(surface_osm: str) -> bool:
-    return bool((surface_osm or "").strip())
-
-
 def _ensure_edge_id_column(gdf: gpd.GeoDataFrame) -> None:
     if "edge_id" in gdf.columns and gdf["edge_id"].astype(str).str.len().gt(0).any():
         return
@@ -142,7 +155,7 @@ def _ml_surface_string(pred: "SurfacePrediction") -> str:
         c = pred.surface_concrete.strip().lower()
         if c:
             return c
-    return _ML_GROUP_TO_PROFILE_SURFACE.get(g, "unknown")
+    return ml_group_to_profile_surface(g)
 
 
 @dataclass
@@ -194,11 +207,15 @@ def apply_surface_resolution(
 ) -> tuple[gpd.GeoDataFrame, SurfaceResolutionStats]:
     """Колонка ``surface_effective`` и диагностика источника покрытия.
 
-    Приоритет: валидный OSM ``surface`` → (опционально) ML → tracktype/highway → unknown.
+    Приоритет: осмысленный OSM ``surface`` (не пустой и не ``unknown``) → ML →
+    эвристика highway/tracktype → unknown. Покрытие из OSM никогда не перезаписывается ML.
     """
     stats = SurfaceResolutionStats(edge_count=len(edges_gdf))
     gdf = build_surface_effective_column(edges_gdf)
     _ensure_edge_id_column(gdf)
+
+    if prediction_store is not None:
+        prediction_store.begin_graph_session(gdf)
 
     s = settings
     use_ml = (
@@ -224,7 +241,7 @@ def apply_surface_resolution(
         highway = row.get("highway")
         tracktype = row.get("tracktype")
 
-        if s and s.surface_ai_runtime_osm_priority and _osm_surface_present(surface_osm):
+        if s and _osm_surface_blocks_ml(surface_osm):
             eff = resolve_surface_effective(surface_osm, highway, tracktype)
             surf_eff.append(eff)
             surf_src.append("osm")
@@ -301,7 +318,7 @@ def apply_surface_resolution(
         if (
             s is not None
             and s.surface_ai_runtime_fallback_to_heuristic
-            and not _osm_surface_present(surface_osm)
+            and not _osm_surface_blocks_ml(surface_osm)
         ):
             inf = infer_surface_from_tracktype_highway(highway, tracktype)
             if inf:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import math
 import os
 import re
@@ -29,6 +30,8 @@ import osmnx as ox
 import pandas as pd
 from shapely.geometry import box
 from shapely.ops import unary_union
+
+_log_surface_ai = logging.getLogger(__name__)
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
@@ -595,6 +598,7 @@ class SurfaceAIArtifacts:
     dangerous_errors_predict_holdout_effective_png: Path
     unknown_risk_map_png: Path
     run_summary_csv: Path
+    runtime_predictions_csv: Path
 
 
 def normalize_surface_value(raw: Any) -> Optional[str]:
@@ -2467,6 +2471,139 @@ def artifact_paths(output_dir: Path) -> SurfaceAIArtifacts:
         dangerous_errors_predict_holdout_effective_png=output_dir / "19_surface_ai_dangerous_errors_predict_holdout_effective.png",
         unknown_risk_map_png=output_dir / "11_surface_ai_unknown_risk_map.png",
         run_summary_csv=output_dir / "08_surface_ai_run_summary.csv",
+        runtime_predictions_csv=output_dir / "runtime_predictions.csv",
+    )
+
+
+def write_runtime_router_predictions_from_experiment(
+    predictions_inside: pd.DataFrame,
+    predict_edges: gpd.GeoDataFrame,
+    *,
+    settings: Settings,
+    group_selected: Dict[str, Any],
+    artifacts: SurfaceAIArtifacts,
+    precache_polygon: Any,
+) -> None:
+    """Пишет CSV в формате ``SurfacePredictionStore`` (каталог эксперимента + cache по Settings)."""
+    from datetime import timezone
+
+    from .surface_prediction_store import (
+        SurfacePredictionStore,
+        _first_osm_scalar,
+        _norm_group as _runtime_norm_group,
+        _rounded_geometry_hash as _runtime_geom_hash,
+        compute_runtime_routing_graph_hash,
+        write_runtime_predictions_csv,
+    )
+    from .surface_resolve import ml_group_to_profile_surface
+
+    if predictions_inside.empty:
+        _log_surface_ai.warning("runtime_predictions: пустой predictions_inside — пропуск записи")
+        return
+
+    pe = predict_edges.copy()
+    if "edge_id" not in pe.columns and all(c in pe.columns for c in ("u", "v", "key")):
+        pe["edge_id"] = (
+            pd.to_numeric(pe["u"], errors="coerce").fillna(-1).astype(int).astype(str)
+            + "_"
+            + pd.to_numeric(pe["v"], errors="coerce").fillna(-1).astype(int).astype(str)
+            + "_"
+            + pd.to_numeric(pe["key"], errors="coerce").fillna(0).astype(int).astype(str)
+        )
+    if "edge_id" not in pe.columns:
+        _log_surface_ai.warning("runtime_predictions: у predict_edges нет edge_id — пропуск")
+        return
+
+    pe_geo = pe[["edge_id", "geometry"]].drop_duplicates(subset=["edge_id"], keep="first")
+    merged = predictions_inside.merge(pe_geo, on="edge_id", how="left")
+
+    try:
+        if precache_polygon is not None:
+            area_fp = hashlib.sha256(
+                getattr(precache_polygon, "wkt", str(precache_polygon)).encode("utf-8")
+            ).hexdigest()[:24]
+        else:
+            area_fp = ""
+    except Exception:
+        area_fp = ""
+
+    graph_hash = compute_runtime_routing_graph_hash(pe)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    gkey = str(group_selected.get("model_key") or "")
+
+    rows: List[Dict[str, Any]] = []
+    for _, row in merged.iterrows():
+        geom = row.get("geometry")
+        if geom is not None and not bool(getattr(geom, "is_empty", False)):
+            gh_r = _runtime_geom_hash(geom)
+        else:
+            gh_r = ""
+
+        u, v, k = row.get("u"), row.get("v"), row.get("key", 0)
+        try:
+            und = SurfacePredictionStore._undirected_key(
+                int(float(u)), int(float(v)), int(float(k))
+            )
+        except Exception:
+            und = ""
+        try:
+            uvkey = f"{int(float(u))}_{int(float(v))}_{int(float(k))}"
+        except Exception:
+            uvkey = str(row.get("edge_id") or "")
+
+        raw_grp = str(
+            row.get("surface_pred_group")
+            or row.get("surface_pred_group_direct")
+            or "unknown"
+        )
+        grp = _runtime_norm_group(raw_grp)
+
+        ow = row.get("osmid")
+        if ow is None:
+            ow = row.get("osm_way_id")
+        try:
+            osm_scalar = _first_osm_scalar(ow)
+            osm_way_id = int(float(str(osm_scalar).split(".")[0])) if osm_scalar is not None else ""
+        except Exception:
+            osm_way_id = ""
+
+        dangerous = bool(row.get("dangerous_upgrade_effective", False))
+        safe_flag = "false" if dangerous else "true"
+        eff_ml = ml_group_to_profile_surface(grp)
+
+        rows.append(
+            {
+                "edge_id": str(row["edge_id"]).strip(),
+                "uvkey": uvkey,
+                "osm_way_id": osm_way_id,
+                "geometry_hash_rounded": gh_r,
+                "undirected_edge_key": und,
+                "surface_pred_group": grp,
+                "surface_pred_concrete": str(row.get("surface_pred_concrete") or "")
+                or str(row.get("surface_pred_concrete_compact") or ""),
+                "surface_pred_confidence": float(row.get("surface_pred_confidence") or 0.0),
+                "surface_pred_margin": float(row.get("surface_pred_margin") or 0.0),
+                "surface_effective_ml": eff_ml,
+                "surface_ml_safe": safe_flag,
+                "surface_ml_reject_reason": "",
+                "model_key": gkey,
+                "model_target": "group_direct",
+                "artifact_created_at": ts,
+                "artifact_id": artifacts.output_dir.name,
+                "area_fingerprint": area_fp,
+                "graph_fingerprint": graph_hash,
+            }
+        )
+
+    rt_df = pd.DataFrame(rows)
+    write_runtime_predictions_csv(rt_df, artifacts.runtime_predictions_csv)
+    cache_path = settings.surface_ai_runtime_predictions_resolved_path
+    write_runtime_predictions_csv(rt_df, cache_path)
+    _log_surface_ai.info(
+        "runtime_predictions: записано %d строк в %s и %s",
+        len(rt_df),
+        artifacts.runtime_predictions_csv,
+        cache_path,
     )
 
 
@@ -4292,6 +4429,14 @@ def run_surface_ai_experiment(
     write_predictions_csv(predictions_inside, artifacts.predictions_inside_polygon_csv)
     if save_heavy_artifacts(config):
         write_predictions_geojson(predictions_inside, predict_edges, artifacts.predictions_inside_polygon_geojson)
+    write_runtime_router_predictions_from_experiment(
+        predictions_inside,
+        predict_edges,
+        settings=settings,
+        group_selected=group_selected,
+        artifacts=artifacts,
+        precache_polygon=precache_polygon,
+    )
     write_baseline_tables(baseline_table, artifacts)
 
     tile_coverage = (

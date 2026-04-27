@@ -69,6 +69,17 @@ def test_tile_usage_report_fields_exist(tmp_path) -> None:
         tile_usage_csv=tmp_path / "tile_usage.csv",
         tile_usage_map_png=tmp_path / "tile_usage.png",
         neighbor_feature_importance_png=tmp_path / "neighbor.png",
+        train_polygon_geojson=tmp_path / "train_polygon.geojson",
+        predict_polygon_geojson=tmp_path / "predict_polygon.geojson",
+        tile_coverage_polygon_geojson=tmp_path / "tile_coverage_polygon.geojson",
+        train_edges_geojson=tmp_path / "train_edges.geojson",
+        predict_edges_geojson=tmp_path / "predict_edges.geojson",
+        dataset_all_tile_edges_csv=tmp_path / "dataset_all.csv",
+        predictions_inside_polygon_csv=tmp_path / "pred_inside.csv",
+        predictions_inside_polygon_geojson=tmp_path / "pred_inside.geojson",
+        tile_usage_map_train_png=tmp_path / "tile_usage_train.png",
+        tile_usage_map_predict_png=tmp_path / "tile_usage_predict.png",
+        train_vs_predict_report_txt=tmp_path / "train_vs_predict.txt",
     )
 
     summary = write_tile_usage_report(tiles, edges, polygon, artifacts)

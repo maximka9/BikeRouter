@@ -340,6 +340,28 @@ class SurfaceAIConfig:
     use_tile_green_mask_features: bool = True
     max_dangerous_upgrade_rate_effective: float = 0.10
     max_calibration_ece: float = 0.08
+    train_area_mode: str = "tile_coverage"
+    predict_area_mode: str = "precache_polygon"
+    train_on_all_tile_edges: bool = True
+    predict_only_inside_polygon: bool = True
+    train_graph_source_priority: Tuple[str, ...] = (
+        "tile_coverage_graph",
+        "area_precache",
+        "osmnx_fallback",
+    )
+    predict_graph_source_priority: Tuple[str, ...] = (
+        "area_precache",
+        "tile_coverage_graph",
+        "osmnx_fallback",
+    )
+    osmnx_retain_all: bool = True
+    osmnx_truncate_by_edge: bool = True
+    osmnx_simplify: bool = True
+    osmnx_network_type: str = "all"
+    osmnx_custom_filter: str = ""
+    holdout_predict_polygon_known_share: float = 0.20
+    tile_edge_match_mode: str = "samples_and_buffer"
+    edge_tile_buffer_m: float = 10.0
     use_satellite_features: bool = True
     sample_step_m: float = 7.0
     pixel_window: int = 5
@@ -409,6 +431,30 @@ class SurfaceAIConfig:
             use_tile_green_mask_features=_env_bool("SURFACE_AI_USE_TILE_GREEN_MASK_FEATURES", True),
             max_dangerous_upgrade_rate_effective=_env_float("SURFACE_AI_MAX_DANGEROUS_UPGRADE_RATE_EFFECTIVE", 0.10),
             max_calibration_ece=_env_float("SURFACE_AI_MAX_CALIBRATION_ECE", 0.08),
+            train_area_mode=_env_str("SURFACE_AI_TRAIN_AREA_MODE", "tile_coverage"),
+            predict_area_mode=_env_str("SURFACE_AI_PREDICT_AREA_MODE", "precache_polygon"),
+            train_on_all_tile_edges=_env_bool("SURFACE_AI_TRAIN_ON_ALL_TILE_EDGES", True),
+            predict_only_inside_polygon=_env_bool("SURFACE_AI_PREDICT_ONLY_INSIDE_POLYGON", True),
+            train_graph_source_priority=_split_csv(
+                _env_str(
+                    "SURFACE_AI_TRAIN_GRAPH_SOURCE_PRIORITY",
+                    "tile_coverage_graph,area_precache,osmnx_fallback",
+                )
+            ),
+            predict_graph_source_priority=_split_csv(
+                _env_str(
+                    "SURFACE_AI_PREDICT_GRAPH_SOURCE_PRIORITY",
+                    "area_precache,tile_coverage_graph,osmnx_fallback",
+                )
+            ),
+            osmnx_retain_all=_env_bool("SURFACE_AI_OSMNX_RETAIN_ALL", True),
+            osmnx_truncate_by_edge=_env_bool("SURFACE_AI_OSMNX_TRUNCATE_BY_EDGE", True),
+            osmnx_simplify=_env_bool("SURFACE_AI_OSMNX_SIMPLIFY", True),
+            osmnx_network_type=_env_str("SURFACE_AI_OSMNX_NETWORK_TYPE", "all"),
+            osmnx_custom_filter=_env_str("SURFACE_AI_OSMNX_CUSTOM_FILTER", ""),
+            holdout_predict_polygon_known_share=_env_float("SURFACE_AI_HOLDOUT_PREDICT_POLYGON_KNOWN_SHARE", 0.20),
+            tile_edge_match_mode=_env_str("SURFACE_AI_TILE_EDGE_MATCH_MODE", "samples_and_buffer"),
+            edge_tile_buffer_m=_env_float("SURFACE_AI_EDGE_TILE_BUFFER_M", 10.0),
             use_satellite_features=_env_bool("SURFACE_AI_USE_SATELLITE_FEATURES", True),
             sample_step_m=_env_float("SURFACE_AI_SAMPLE_STEP_M", 7.0),
             pixel_window=_env_int("SURFACE_AI_PIXEL_WINDOW", 5),
@@ -468,6 +514,17 @@ class SurfaceAIArtifacts:
     tile_usage_csv: Path
     tile_usage_map_png: Path
     neighbor_feature_importance_png: Path
+    train_polygon_geojson: Path
+    predict_polygon_geojson: Path
+    tile_coverage_polygon_geojson: Path
+    train_edges_geojson: Path
+    predict_edges_geojson: Path
+    dataset_all_tile_edges_csv: Path
+    predictions_inside_polygon_csv: Path
+    predictions_inside_polygon_geojson: Path
+    tile_usage_map_train_png: Path
+    tile_usage_map_predict_png: Path
+    train_vs_predict_report_txt: Path
 
 
 def normalize_surface_value(raw: Any) -> Optional[str]:
@@ -674,6 +731,9 @@ def build_osm_geometry_dataset(
             "surface_group_true": true_group,
             "is_surface_known": bool(surface_norm in CONCRETE_SURFACE_VALUES),
             "geometry_wkt": row.geometry.wkt if row.geometry is not None else None,
+            "inside_train_area": bool(getattr(row, "inside_train_area", False)),
+            "inside_predict_area": bool(getattr(row, "inside_predict_area", False)),
+            "surface_ai_edge_source": getattr(row, "surface_ai_edge_source", None),
         }
         for col in AI_OSM_FEATURES:
             item[col] = _norm_feature(getattr(row, col, None))
@@ -893,10 +953,11 @@ def spatial_train_test_split(
     edges_gdf: gpd.GeoDataFrame,
     config: SurfaceAIConfig,
 ) -> pd.Series:
-    known = dataset[dataset["is_surface_known"]].copy()
+    candidate_mask = dataset.get("is_train_candidate", dataset["is_surface_known"]).astype(bool)
+    known = dataset[candidate_mask].copy()
     if len(known) < int(config.min_known_edges):
         raise ValueError(
-            f"Not enough known surface edges for training: found {len(known)}. "
+            f"Not enough known train-candidate surface edges for training: found {len(known)}. "
             f"Need at least {config.min_known_edges}."
         )
     if known["surface_train_label"].nunique() < 2:
@@ -946,6 +1007,17 @@ def spatial_train_test_split(
     split.loc[known.index[~cells.isin(test_cells | calibration_cells).to_numpy()]] = "train"
     split.loc[known.index[cells.isin(calibration_cells).to_numpy()]] = "calibration"
     split.loc[known.index[cells.isin(test_cells).to_numpy()]] = "test"
+    holdout_share = max(0.0, float(config.holdout_predict_polygon_known_share))
+    if holdout_share > 0 and "inside_predict_area" in dataset.columns:
+        train_inside = known.index[
+            (split.loc[known.index] == "train").to_numpy()
+            & dataset.loc[known.index, "inside_predict_area"].astype(bool).to_numpy()
+        ]
+        holdout_n = int(round(len(train_inside) * holdout_share))
+        if holdout_n > 0 and len(train_inside) > holdout_n:
+            rng = np.random.default_rng(int(config.random_state) + 17)
+            chosen = rng.choice(np.array(train_inside), size=holdout_n, replace=False)
+            split.loc[chosen] = "predict_holdout"
     if (split == "train").sum() == 0 or (split == "test").sum() == 0:
         raise ValueError("Spatial split produced an empty train or test partition")
     return split
@@ -1745,6 +1817,35 @@ def calibration_artifacts_for_selected(
     return metrics
 
 
+def evaluate_selected_on_split(
+    dataset: pd.DataFrame,
+    selected: Dict[str, Any],
+    models: Dict[str, Any],
+    config: SurfaceAIConfig,
+    *,
+    target: str,
+    split_name: str,
+) -> Dict[str, Any]:
+    subset = dataset[dataset["surface_ai_split"] == split_name].copy()
+    if subset.empty:
+        return {"split": split_name, "target": target, "edge_count": 0}
+    key = selected["model_key"]
+    entry = models[key]
+    model = entry.get("calibrated_model") or entry["model"]
+    metrics, _ = evaluate_task_model(
+        candidate=key,
+        model=model,
+        feature_set=entry["feature_set"],
+        target=target,
+        test=subset,
+        labels=entry["labels"],
+        config=config,
+    )
+    metrics["split"] = split_name
+    metrics["edge_count"] = int(len(subset))
+    return metrics
+
+
 def apply_posthoc_calibration_to_selected(
     dataset: pd.DataFrame,
     selected: Dict[str, Any],
@@ -2015,6 +2116,24 @@ def dataset_summary(dataset: pd.DataFrame) -> Dict[str, Any]:
         "known_surface_edges": known,
         "unknown_surface_edges": total - known,
         "unknown_share": float((total - known) / total) if total else 0.0,
+        "train_edges_total": int(dataset.get("inside_train_area", pd.Series(False, index=dataset.index)).astype(bool).sum()),
+        "train_edges_with_tile_features": int(
+            (
+                dataset.get("inside_train_area", pd.Series(False, index=dataset.index)).astype(bool)
+                & dataset.get("has_tile_features", pd.Series(False, index=dataset.index)).astype(bool)
+            ).sum()
+        ),
+        "train_known_surface_edges": int(dataset.get("is_train_candidate", pd.Series(False, index=dataset.index)).astype(bool).sum()),
+        "train_unknown_surface_edges": int(
+            (
+                dataset.get("inside_train_area", pd.Series(False, index=dataset.index)).astype(bool)
+                & ~dataset["is_surface_known"].astype(bool)
+            ).sum()
+        ),
+        "predict_edges_inside_polygon": int(dataset.get("inside_predict_area", pd.Series(False, index=dataset.index)).astype(bool).sum()),
+        "predict_unknown_surface_edges_inside_polygon": int(
+            dataset.get("is_prediction_candidate", pd.Series(False, index=dataset.index)).astype(bool).sum()
+        ),
         "surface_norm_distribution": dataset["surface_true_concrete"].value_counts(dropna=False).to_dict(),
         "surface_train_label_distribution": dataset.loc[
             dataset["is_surface_known"], "surface_train_label"
@@ -2078,6 +2197,17 @@ def artifact_paths(output_dir: Path) -> SurfaceAIArtifacts:
         tile_usage_csv=output_dir / "surface_ai_tile_usage.csv",
         tile_usage_map_png=output_dir / "surface_ai_tile_usage_map.png",
         neighbor_feature_importance_png=output_dir / "surface_ai_neighbor_feature_importance.png",
+        train_polygon_geojson=output_dir / "surface_ai_train_polygon.geojson",
+        predict_polygon_geojson=output_dir / "surface_ai_predict_polygon.geojson",
+        tile_coverage_polygon_geojson=output_dir / "surface_ai_tile_coverage_polygon.geojson",
+        train_edges_geojson=output_dir / "surface_ai_train_edges.geojson",
+        predict_edges_geojson=output_dir / "surface_ai_predict_edges.geojson",
+        dataset_all_tile_edges_csv=output_dir / "surface_ai_dataset_all_tile_edges.csv",
+        predictions_inside_polygon_csv=output_dir / "surface_ai_predictions_inside_polygon.csv",
+        predictions_inside_polygon_geojson=output_dir / "surface_ai_predictions_inside_polygon.geojson",
+        tile_usage_map_train_png=output_dir / "surface_ai_tile_usage_map_train.png",
+        tile_usage_map_predict_png=output_dir / "surface_ai_tile_usage_map_predict.png",
+        train_vs_predict_report_txt=output_dir / "surface_ai_train_vs_predict_report.txt",
     )
 
 
@@ -2098,6 +2228,12 @@ def prediction_columns(predictions: pd.DataFrame) -> List[str]:
         "surface_osm_norm",
         "surface_true_concrete",
         "surface_true_group",
+        "surface_true",
+        "inside_train_area",
+        "inside_predict_area",
+        "has_tile_features",
+        "is_train_candidate",
+        "is_prediction_candidate",
         "is_surface_known",
         "surface_train_label",
         "surface_pred_concrete",
@@ -2167,9 +2303,24 @@ def write_predictions_csv(predictions: pd.DataFrame, path: Path) -> None:
 
 def write_predictions_geojson(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, path: Path) -> None:
     base = edges_gdf[["edge_id", "geometry"]].copy()
+    prediction_ids = set(predictions["edge_id"].astype(str)) if "edge_id" in predictions.columns else set()
+    if predictions.empty:
+        base = base.iloc[0:0]
+    elif prediction_ids:
+        base = base[base["edge_id"].astype(str).isin(prediction_ids)]
     gdf = base.merge(predictions.drop(columns=["geometry"], errors="ignore"), on="edge_id", how="left")
     gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs="EPSG:4326")
     path.parent.mkdir(parents=True, exist_ok=True)
+    gdf.to_file(path, driver="GeoJSON")
+
+
+def write_edges_geojson(edges_gdf: gpd.GeoDataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gdf = edges_gdf.copy()
+    if gdf.crs is None:
+        gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+    else:
+        gdf = gdf.to_crs("EPSG:4326")
     gdf.to_file(path, driver="GeoJSON")
 
 
@@ -2427,7 +2578,20 @@ def _tile_bounds_geom(x: int, y: int, z: int) -> Any:
     return box(lon1, lat2, lon2, lat1)
 
 
-def scan_cached_tiles(tiles_dir: Path | str, tms_server: str, z: int) -> gpd.GeoDataFrame:
+def count_cached_tile_images(tiles_dir: Path | str) -> int:
+    tiles_dir = Path(tiles_dir)
+    if not tiles_dir.exists():
+        return 0
+    suffixes = {".jpg", ".jpeg", ".png", ".webp"}
+    return sum(1 for p in tiles_dir.iterdir() if p.is_file() and p.suffix.lower() in suffixes)
+
+
+def scan_cached_tiles(
+    tiles_dir: Path | str,
+    tms_server: str,
+    z: int,
+    precache_polygon: Any = None,
+) -> gpd.GeoDataFrame:
     tiles_dir = Path(tiles_dir)
     rows = []
     pat = re.compile(rf"^{re.escape(tms_server)}_{int(z)}_(\d+)_(\d+)\.(jpg|jpeg|png|webp)$", re.IGNORECASE)
@@ -2455,102 +2619,233 @@ def scan_cached_tiles(tiles_dir: Path | str, tms_server: str, z: int) -> gpd.Geo
         gdf["footprint_area_m2"] = gdf.to_crs(_utm_crs_for(gdf)).geometry.area.astype(float).values
     else:
         gdf["footprint_area_m2"] = []
+    if precache_polygon is not None:
+        gdf["inside_precache_polygon"] = gdf.geometry.intersects(precache_polygon) if not gdf.empty else []
+    elif "inside_precache_polygon" not in gdf.columns:
+        gdf["inside_precache_polygon"] = False if not gdf.empty else []
     return gdf
 
 
-def _load_edges_from_osmnx_polygon(polygon: Any, settings: Settings, *, source: str) -> Tuple[gpd.GeoDataFrame, Dict[str, Any]]:
+def _polygon_area_km2(polygon: Any) -> float:
+    if polygon is None or polygon.is_empty:
+        return 0.0
+    gdf = gpd.GeoDataFrame({"name": ["area"]}, geometry=[polygon], crs="EPSG:4326")
+    return float(gdf.to_crs(_utm_crs_for(gdf)).geometry.area.iloc[0] / 1_000_000.0)
+
+
+def _write_polygon_geojson(path: Path, polygon: Any, name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gdf = gpd.GeoDataFrame({"name": [name]}, geometry=[polygon], crs="EPSG:4326")
+    gdf.to_file(path, driver="GeoJSON")
+
+
+def tile_coverage_polygon_from_tiles(tiles_gdf: gpd.GeoDataFrame, fallback_polygon: Any) -> Any:
+    if tiles_gdf.empty:
+        return fallback_polygon
+    return unary_union(list(tiles_gdf.geometry.values))
+
+
+def _area_polygon_from_mode(mode: str, tile_coverage_polygon: Any, precache_polygon: Any) -> Any:
+    mode = str(mode or "precache_polygon")
+    if mode == "tile_coverage":
+        return tile_coverage_polygon
+    if mode == "tile_coverage_intersect_precache_polygon":
+        return tile_coverage_polygon.intersection(precache_polygon)
+    if mode == "tile_coverage_union_precache_polygon":
+        return tile_coverage_polygon.union(precache_polygon)
+    return precache_polygon
+
+
+def _load_edges_from_osmnx_polygon(
+    polygon: Any,
+    settings: Settings,
+    config: SurfaceAIConfig,
+    *,
+    source: str,
+) -> Tuple[gpd.GeoDataFrame, Dict[str, Any]]:
     ox.settings.cache_folder = settings.osmnx_cache_dir
     ox.settings.use_cache = True
     for tag in OSM_TAG_COLUMNS + ("smoothness",):
         if tag not in ox.settings.useful_tags_way:
             ox.settings.useful_tags_way += [tag]
-    graph = ox.graph_from_polygon(
-        polygon,
-        custom_filter=OSM_HIGHWAY_FILTER,
-        simplify=False,
-        retain_all=True,
-    )
+    kwargs: Dict[str, Any] = {
+        "simplify": bool(config.osmnx_simplify),
+        "retain_all": bool(config.osmnx_retain_all),
+        "truncate_by_edge": bool(config.osmnx_truncate_by_edge),
+    }
+    custom_filter = str(config.osmnx_custom_filter or "").strip()
+    if custom_filter:
+        kwargs["custom_filter"] = custom_filter
+    else:
+        kwargs["network_type"] = str(config.osmnx_network_type or "all")
+    graph = ox.graph_from_polygon(polygon, **kwargs)
     if not isinstance(graph, nx.MultiDiGraph):
         graph = nx.MultiDiGraph(graph)
-    return GraphBuilder.to_geodataframe(graph), {"graph_source": source, "graph_path": None}
+    return GraphBuilder.to_geodataframe(graph), {
+        "graph_source": source,
+        "graph_path": None,
+        "osmnx_retain_all": bool(config.osmnx_retain_all),
+        "osmnx_truncate_by_edge": bool(config.osmnx_truncate_by_edge),
+        "osmnx_simplify": bool(config.osmnx_simplify),
+        "osmnx_network_type": str(config.osmnx_network_type or "all"),
+        "osmnx_custom_filter": custom_filter,
+    }
 
 
-def load_edges_for_surface_ai_area(settings: Settings, config: SurfaceAIConfig) -> Tuple[gpd.GeoDataFrame, Dict[str, Any]]:
-    """Load edges using the Surface AI graph-source priority.
-
-    The preferred path is the deterministic area precache. If it is unavailable,
-    the optional tile-coverage polygon keeps the experiment near already cached
-    satellite tiles before the final Overpass fallback.
-    """
-    if not settings.has_precache_area_polygon:
-        raise ValueError("PRECACHE_AREA_POLYGON_WKT is empty or not a polygon")
-
-    polygon = parse_precache_polygon(settings)
+def load_edges_for_surface_ai_polygon(
+    settings: Settings,
+    config: SurfaceAIConfig,
+    polygon: Any,
+    *,
+    priority: Sequence[str],
+    scope: str,
+) -> Tuple[gpd.GeoDataFrame, Dict[str, Any]]:
+    """Load edges for one Surface AI area using a scoped source priority."""
     meta: Dict[str, Any] = {
         "precache_polygon_bounds_lonlat": tuple(float(x) for x in polygon.bounds),
         "graph_source": None,
         "graph_path": None,
-        "graph_source_priority": list(config.graph_source_priority),
+        "graph_source_priority": list(priority),
         "graph_fallback_reasons": [],
+        "graph_scope": scope,
     }
-    priorities = tuple(config.graph_source_priority or ("area_precache", "tiles_coverage_graph", "osmnx_fallback"))
+    priorities = tuple(priority or ("area_precache", "tiles_coverage_graph", "osmnx_fallback"))
 
-    if "area_precache" in priorities:
-        for label, path in (("graph_base", graph_base_path(settings)), ("graph_green", graph_green_path(settings))):
-            if not path.exists():
-                meta["graph_fallback_reasons"].append(f"area_precache_{label}_missing")
+    for source in priorities:
+        if source == "tile_coverage_graph":
+            try:
+                edges, osm_meta = _load_edges_from_osmnx_polygon(
+                    polygon,
+                    settings,
+                    config,
+                    source="tile_coverage_graph" if scope == "train" else "tile_coverage_graph_predict",
+                )
+                meta.update(osm_meta)
+                return edges, meta
+            except Exception as exc:
+                meta["graph_fallback_reasons"].append(f"tile_coverage_graph_failed:{exc}")
                 continue
-            graph = load_graphml_path(path)
-            if graph is None:
-                meta["graph_fallback_reasons"].append(f"area_precache_{label}_load_failed")
+        if source == "area_precache":
+            loaded = False
+            for label, path in (("graph_base", graph_base_path(settings)), ("graph_green", graph_green_path(settings))):
+                if not path.exists():
+                    meta["graph_fallback_reasons"].append(f"area_precache_{label}_missing")
+                    continue
+                graph = load_graphml_path(path)
+                if graph is None:
+                    meta["graph_fallback_reasons"].append(f"area_precache_{label}_load_failed")
+                    continue
+                meta["graph_source"] = "area_precache_graphml"
+                meta["graph_path"] = str(path)
+                return GraphBuilder.to_geodataframe(graph), meta
+            if config.strict_area_precache and not loaded:
+                raise FileNotFoundError(
+                    "Surface AI strict area precache is enabled, but graph_base.graphml/graph_green.graphml were not usable"
+                )
+            continue
+        if source == "osmnx_fallback":
+            try:
+                edges, osm_meta = _load_edges_from_osmnx_polygon(
+                    polygon,
+                    settings,
+                    config,
+                    source="osmnx_overpass_fallback",
+                )
+                meta.update(osm_meta)
+                return edges, meta
+            except Exception as exc:
+                meta["graph_fallback_reasons"].append(f"osmnx_fallback_failed:{exc}")
                 continue
-            meta["graph_source"] = "area_precache_graphml"
-            meta["graph_path"] = str(path)
-            return GraphBuilder.to_geodataframe(graph), meta
-        if config.strict_area_precache:
-            raise FileNotFoundError(
-                "Surface AI strict area precache is enabled, but graph_base.graphml/graph_green.graphml were not usable"
-            )
+        meta["graph_fallback_reasons"].append(f"unknown_graph_source:{source}")
+
+    raise ValueError(f"No usable Surface AI graph source for {scope}: {priorities}; reasons={meta['graph_fallback_reasons']}")
+
+
+def load_edges_for_surface_ai_area(settings: Settings, config: SurfaceAIConfig) -> Tuple[gpd.GeoDataFrame, Dict[str, Any]]:
+    if not settings.has_precache_area_polygon:
+        raise ValueError("PRECACHE_AREA_POLYGON_WKT is empty or not a polygon")
+    return load_edges_for_surface_ai_polygon(
+        settings,
+        config,
+        parse_precache_polygon(settings),
+        priority=config.graph_source_priority,
+        scope="legacy",
+    )
+
+
+def build_train_predict_polygons(
+    settings: Settings,
+    config: SurfaceAIConfig,
+    tiles_gdf: gpd.GeoDataFrame,
+) -> Tuple[Any, Any, Any, Dict[str, Any]]:
+    precache_polygon = parse_precache_polygon(settings)
+    tile_coverage_polygon = tile_coverage_polygon_from_tiles(tiles_gdf, precache_polygon)
+    train_polygon = _area_polygon_from_mode(config.train_area_mode, tile_coverage_polygon, precache_polygon)
+    predict_polygon = _area_polygon_from_mode(config.predict_area_mode, tile_coverage_polygon, precache_polygon)
+    meta = {
+        "train_area_mode": config.train_area_mode,
+        "predict_area_mode": config.predict_area_mode,
+        "tile_coverage_area_km2": _polygon_area_km2(tile_coverage_polygon),
+        "precache_polygon_area_km2": _polygon_area_km2(precache_polygon),
+        "train_polygon_area_km2": _polygon_area_km2(train_polygon),
+        "predict_polygon_area_km2": _polygon_area_km2(predict_polygon),
+    }
+    return train_polygon, predict_polygon, tile_coverage_polygon, meta
+
+
+def _edge_inside_polygon_flags(edges_gdf: gpd.GeoDataFrame, polygon: Any) -> pd.Series:
+    if edges_gdf.empty:
+        return pd.Series([], dtype=bool)
+    gdf = edges_gdf.to_crs("EPSG:4326") if edges_gdf.crs else edges_gdf.set_crs("EPSG:4326", allow_override=True)
+    return gdf.geometry.intersects(polygon)
+
+
+def combine_train_predict_edges(
+    train_edges: gpd.GeoDataFrame,
+    predict_edges: gpd.GeoDataFrame,
+    train_polygon: Any,
+    predict_polygon: Any,
+) -> gpd.GeoDataFrame:
+    train = train_edges.copy()
+    predict = predict_edges.copy()
+    train["inside_train_area"] = _edge_inside_polygon_flags(train, train_polygon).values
+    train["inside_predict_area"] = _edge_inside_polygon_flags(train, predict_polygon).values
+    predict["inside_train_area"] = _edge_inside_polygon_flags(predict, train_polygon).values
+    predict["inside_predict_area"] = _edge_inside_polygon_flags(predict, predict_polygon).values
+    train["surface_ai_edge_source"] = "train_graph"
+    predict["surface_ai_edge_source"] = "predict_graph"
+    combined = pd.concat([train, predict], axis=0, ignore_index=True)
+    if "edge_id" in combined.columns:
+        combined["_prefer_predict"] = (combined["surface_ai_edge_source"] == "predict_graph").astype(int)
+        combined = combined.sort_values("_prefer_predict").drop_duplicates("edge_id", keep="last").drop(columns="_prefer_predict")
+    return gpd.GeoDataFrame(combined, geometry="geometry", crs="EPSG:4326")
+
+
+def mark_dataset_area_flags(dataset: pd.DataFrame, config: SurfaceAIConfig) -> pd.DataFrame:
+    df = dataset.copy()
+    for col in ("inside_train_area", "inside_predict_area"):
+        if col not in df.columns:
+            df[col] = False
+        df[col] = df[col].fillna(False).astype(bool)
+    if config.use_satellite_features:
+        sampled = pd.to_numeric(df.get("sampled_pixel_count", 0), errors="coerce").fillna(0)
+        missing = pd.to_numeric(df.get("tile_missing_share", 1.0), errors="coerce").fillna(1.0)
+        df["has_tile_features"] = (sampled > 0) & (missing < 1.0)
     else:
-        meta["graph_fallback_reasons"].append("area_precache_disabled_by_priority")
-
-    if "tiles_coverage_graph" in priorities and config.use_tile_coverage_polygon:
-        tiles_dir = Path(config.tiles_dir or (Path(settings.cache_dir) / "tiles"))
-        tiles = scan_cached_tiles(tiles_dir, config.tms_server or settings.tms_server, int(config.tile_zoom or settings.satellite_zoom))
-        if tiles.empty:
-            meta["graph_fallback_reasons"].append("tiles_coverage_empty")
-        else:
-            inside = tiles[tiles.geometry.intersects(polygon)].copy()
-            if inside.empty:
-                meta["graph_fallback_reasons"].append("tiles_coverage_outside_precache_polygon")
-            else:
-                coverage = unary_union(list(inside.geometry.values))
-                experiment_polygon = polygon.intersection(coverage)
-                if experiment_polygon.is_empty:
-                    meta["graph_fallback_reasons"].append("tiles_coverage_intersection_empty")
-                else:
-                    edges, osm_meta = _load_edges_from_osmnx_polygon(
-                        experiment_polygon,
-                        settings,
-                        source="tiles_coverage_graph",
-                    )
-                    meta.update(osm_meta)
-                    meta["tile_coverage_tiles_for_graph"] = int(len(inside))
-                    meta["tile_coverage_polygon_bounds_lonlat"] = tuple(float(x) for x in experiment_polygon.bounds)
-                    return edges, meta
-    elif "tiles_coverage_graph" in priorities:
-        meta["graph_fallback_reasons"].append("tiles_coverage_graph_disabled_by_config")
-
-    if "osmnx_fallback" in priorities:
-        edges, osm_meta = _load_edges_from_osmnx_polygon(
-            polygon,
-            settings,
-            source="osmnx_overpass_fallback",
-        )
-        meta.update(osm_meta)
-        return edges, meta
-
-    raise ValueError(f"No usable Surface AI graph source in priority: {priorities}")
+        df["has_tile_features"] = True
+    df["is_train_candidate"] = (
+        df["inside_train_area"].astype(bool)
+        & df["has_tile_features"].astype(bool)
+        & df["is_surface_known"].astype(bool)
+    )
+    predict_area_mask = df["inside_predict_area"].astype(bool) if config.predict_only_inside_polygon else pd.Series(True, index=df.index)
+    df["is_prediction_candidate"] = (
+        predict_area_mask
+        & df["has_tile_features"].astype(bool)
+        & ~df["is_surface_known"].astype(bool)
+    )
+    df["surface_true"] = df["surface_true_concrete"].where(df["is_surface_known"].astype(bool), None)
+    return df
 
 
 def write_tile_usage_report(
@@ -2558,7 +2853,19 @@ def write_tile_usage_report(
     edges_gdf: gpd.GeoDataFrame,
     polygon: Any,
     artifacts: SurfaceAIArtifacts,
+    *,
+    predict_edges_gdf: Optional[gpd.GeoDataFrame] = None,
+    train_polygon: Any = None,
+    predict_polygon: Any = None,
+    config: Optional[SurfaceAIConfig] = None,
+    total_cached_tiles: Optional[int] = None,
 ) -> Dict[str, Any]:
+    train_edges_gdf = edges_gdf
+    predict_edges_gdf = predict_edges_gdf if predict_edges_gdf is not None else edges_gdf
+    train_polygon = train_polygon if train_polygon is not None else polygon
+    predict_polygon = predict_polygon if predict_polygon is not None else polygon
+    total_cached_tiles = int(total_cached_tiles if total_cached_tiles is not None else len(tiles_gdf))
+
     if tiles_gdf.empty:
         pd.DataFrame(
             columns=[
@@ -2566,45 +2873,107 @@ def write_tile_usage_report(
                 "x",
                 "y",
                 "path",
-                "inside_precache_polygon",
-                "intersects_any_edge",
+                "inside_train_area",
+                "inside_predict_area",
+                "intersects_train_edge",
+                "intersects_predict_edge",
+                "sampled_by_train_edge",
+                "sampled_by_predict_edge",
                 "sampled_pixel_count",
                 "sampled_edge_count",
-                "used_in_features",
+                "unused_reason",
             ]
         ).to_csv(artifacts.tile_usage_csv, index=False, encoding="utf-8")
         plot_tile_usage_map(tiles_gdf, artifacts.tile_usage_map_png)
+        plot_tile_usage_map(tiles_gdf, artifacts.tile_usage_map_train_png, zone="train")
+        plot_tile_usage_map(tiles_gdf, artifacts.tile_usage_map_predict_png, zone="predict")
         return {
-            "tiles_total_in_cache": 0,
-            "tiles_inside_precache_polygon": 0,
-            "tiles_intersect_graph_edges": 0,
-            "tiles_sampled_by_edges": 0,
-            "tile_usage_share_inside_polygon": 0.0,
-            "unused_tiles_inside_polygon": 0,
+            "tiles_total_in_cache": total_cached_tiles,
+            "tiles_matching_server_zoom": 0,
+            "tiles_in_train_area": 0,
+            "tiles_intersect_train_edges": 0,
+            "tiles_sampled_by_train_edges": 0,
+            "tiles_in_predict_area": 0,
+            "tiles_intersect_predict_edges": 0,
+            "tiles_sampled_by_predict_edges": 0,
+            "train_tile_usage_share": 0.0,
+            "predict_tile_usage_share": 0.0,
             "edges_with_tile_samples": 0,
-            "edges_without_tile_samples": int(len(edges_gdf)),
+            "edges_without_tile_samples": int(len(train_edges_gdf)),
         }
+
+    def usage_union(edges: gpd.GeoDataFrame) -> Any:
+        if edges is None or edges.empty:
+            return None
+        gdf = edges.copy()
+        if gdf.crs is None:
+            gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+        else:
+            gdf = gdf.to_crs("EPSG:4326")
+        mode = str((config.tile_edge_match_mode if config else "samples_and_buffer") or "samples_and_buffer")
+        if "buffer" in mode:
+            projected = gdf.to_crs(_utm_crs_for(gdf))
+            buffered = projected.geometry.buffer(float(config.edge_tile_buffer_m if config else 10.0))
+            return gpd.GeoSeries(buffered, crs=projected.crs).to_crs("EPSG:4326").unary_union
+        return unary_union(list(gdf.geometry.values))
+
     tiles = tiles_gdf.copy()
-    tiles["inside_precache_polygon"] = tiles.geometry.intersects(polygon)
-    edge_union = unary_union(list(edges_gdf.geometry.values)) if len(edges_gdf) else None
-    tiles["intersects_any_edge"] = tiles.geometry.intersects(edge_union) if edge_union is not None else False
-    tiles["sampled_edge_count"] = tiles["intersects_any_edge"].astype(int)
+    tiles["inside_train_area"] = tiles.geometry.intersects(train_polygon)
+    tiles["inside_predict_area"] = tiles.geometry.intersects(predict_polygon)
+    train_union = usage_union(train_edges_gdf)
+    predict_union = usage_union(predict_edges_gdf)
+    tiles["intersects_train_edge"] = tiles.geometry.intersects(train_union) if train_union is not None else False
+    tiles["intersects_predict_edge"] = tiles.geometry.intersects(predict_union) if predict_union is not None else False
+    tiles["sampled_by_train_edge"] = tiles["intersects_train_edge"]
+    tiles["sampled_by_predict_edge"] = tiles["intersects_predict_edge"]
+    tiles["sampled_edge_count"] = tiles["sampled_by_train_edge"].astype(int) + tiles["sampled_by_predict_edge"].astype(int)
     tiles["sampled_pixel_count"] = 0
-    tiles["used_in_features"] = tiles["intersects_any_edge"]
+    tiles["used_in_features"] = tiles["sampled_by_train_edge"] | tiles["sampled_by_predict_edge"]
+
+    def unused_reason(row: pd.Series) -> str:
+        if bool(row["sampled_by_train_edge"]) and bool(row["sampled_by_predict_edge"]):
+            return "used_for_train_and_predict"
+        if bool(row["sampled_by_train_edge"]):
+            return "used_for_train_only"
+        if bool(row["sampled_by_predict_edge"]):
+            return "used_for_predict_only"
+        if not bool(row["inside_train_area"]) and not bool(row["inside_predict_area"]):
+            return "outside_train_and_predict_area"
+        return "no_road_edge_intersection"
+
+    tiles["unused_reason"] = tiles.apply(unused_reason, axis=1)
     tiles.drop(columns="geometry").to_csv(artifacts.tile_usage_csv, index=False, encoding="utf-8")
     plot_tile_usage_map(tiles, artifacts.tile_usage_map_png)
-    inside = int(tiles["inside_precache_polygon"].sum())
-    used = int((tiles["inside_precache_polygon"] & tiles["used_in_features"]).sum())
-    return {
-        "tiles_total_in_cache": int(len(tiles)),
-        "tiles_inside_precache_polygon": inside,
-        "tiles_intersect_graph_edges": int(tiles["intersects_any_edge"].sum()),
-        "tiles_sampled_by_edges": used,
-        "tile_usage_share_inside_polygon": float(used / inside) if inside else 0.0,
-        "unused_tiles_inside_polygon": int(max(0, inside - used)),
-        "edges_with_tile_samples": int((edges_gdf["edge_id"].notna()).sum()),
+    plot_tile_usage_map(tiles, artifacts.tile_usage_map_train_png, zone="train")
+    plot_tile_usage_map(tiles, artifacts.tile_usage_map_predict_png, zone="predict")
+    train_inside = int(tiles["inside_train_area"].sum())
+    train_used = int((tiles["inside_train_area"] & tiles["sampled_by_train_edge"]).sum())
+    predict_inside = int(tiles["inside_predict_area"].sum())
+    predict_used = int((tiles["inside_predict_area"] & tiles["sampled_by_predict_edge"]).sum())
+    out = {
+        "tiles_total_in_cache": total_cached_tiles,
+        "tiles_matching_server_zoom": int(len(tiles)),
+        "tiles_in_train_area": train_inside,
+        "tiles_intersect_train_edges": int(tiles["intersects_train_edge"].sum()),
+        "tiles_sampled_by_train_edges": train_used,
+        "tiles_in_predict_area": predict_inside,
+        "tiles_intersect_predict_edges": int(tiles["intersects_predict_edge"].sum()),
+        "tiles_sampled_by_predict_edges": predict_used,
+        "train_tile_usage_share": float(train_used / train_inside) if train_inside else 0.0,
+        "predict_tile_usage_share": float(predict_used / predict_inside) if predict_inside else 0.0,
+        "edges_with_tile_samples": int((train_edges_gdf["edge_id"].notna()).sum()),
         "edges_without_tile_samples": 0,
     }
+    out.update(
+        {
+            "tiles_inside_precache_polygon": predict_inside,
+            "tiles_intersect_graph_edges": int(tiles["intersects_train_edge"].sum()),
+            "tiles_sampled_by_edges": train_used,
+            "tile_usage_share_inside_polygon": float(predict_used / predict_inside) if predict_inside else 0.0,
+            "unused_tiles_inside_polygon": int(max(0, predict_inside - predict_used)),
+        }
+    )
+    return out
 
 
 def write_spatial_prior_ablation(artifacts: SurfaceAIArtifacts, baseline_table: pd.DataFrame) -> Dict[str, Any]:
@@ -2649,7 +3018,7 @@ def write_spatial_prior_ablation(artifacts: SurfaceAIArtifacts, baseline_table: 
     return out
 
 
-def plot_tile_usage_map(tiles_gdf: gpd.GeoDataFrame, path: Path) -> None:
+def plot_tile_usage_map(tiles_gdf: gpd.GeoDataFrame, path: Path, *, zone: str = "any") -> None:
     plt = _import_pyplot()
     fig, ax = plt.subplots(figsize=(10, 10))
     ax.set_axis_off()
@@ -2661,9 +3030,22 @@ def plot_tile_usage_map(tiles_gdf: gpd.GeoDataFrame, path: Path) -> None:
             tiles["inside_precache_polygon"] = False
         if "used_in_features" not in tiles.columns:
             tiles["used_in_features"] = False
-        outside = tiles[~tiles["inside_precache_polygon"]]
-        unused = tiles[tiles["inside_precache_polygon"] & ~tiles["used_in_features"]]
-        used = tiles[tiles["used_in_features"]]
+        if zone == "train":
+            inside_col = "inside_train_area"
+            used_col = "sampled_by_train_edge"
+        elif zone == "predict":
+            inside_col = "inside_predict_area"
+            used_col = "sampled_by_predict_edge"
+        else:
+            inside_col = "inside_precache_polygon" if "inside_precache_polygon" in tiles.columns else "inside_predict_area"
+            used_col = "used_in_features"
+        if inside_col not in tiles.columns:
+            tiles[inside_col] = False
+        if used_col not in tiles.columns:
+            tiles[used_col] = False
+        outside = tiles[~tiles[inside_col].astype(bool)]
+        unused = tiles[tiles[inside_col].astype(bool) & ~tiles[used_col].astype(bool)]
+        used = tiles[tiles[used_col].astype(bool)]
         if not outside.empty:
             outside.boundary.plot(ax=ax, color="#bdbdbd", linewidth=0.4, label="outside")
         if not unused.empty:
@@ -2853,6 +3235,8 @@ def write_report(
     config: SurfaceAIConfig,
     run_meta: Dict[str, Any],
     tile_coverage: Optional[Dict[str, Any]] = None,
+    area_meta: Optional[Dict[str, Any]] = None,
+    holdout_metrics: Optional[Dict[str, Any]] = None,
 ) -> None:
     top = baseline_table[baseline_table["target"].astype(str).str.contains("concrete")].sort_values(
         ["macro_f1", "balanced_accuracy"],
@@ -2862,16 +3246,34 @@ def write_report(
         "Surface AI experiment report",
         "",
         f"Output dir: {artifacts.output_dir}",
+        f"Train area mode: {config.train_area_mode}",
+        f"Predict area mode: {config.predict_area_mode}",
+        f"Train graph source: {run_meta.get('train_graph_source')}",
+        f"Train graph path: {run_meta.get('train_graph_path')}",
+        f"Predict graph source: {run_meta.get('predict_graph_source')}",
+        f"Predict graph path: {run_meta.get('predict_graph_path')}",
         f"Graph source: {run_meta.get('graph_source')}",
         f"Graph path: {run_meta.get('graph_path')}",
         f"Tiles dir: {run_meta.get('tiles_dir')}",
         f"Tile zoom: {run_meta.get('tile_zoom')}",
+        f"Total cached tiles: {(tile_coverage or {}).get('tiles_total_in_cache')}",
+        f"Matching server/zoom tiles: {(tile_coverage or {}).get('tiles_matching_server_zoom')}",
+        f"Train area tiles: {(tile_coverage or {}).get('tiles_in_train_area')}",
+        f"Predict area tiles: {(tile_coverage or {}).get('tiles_in_predict_area')}",
+        f"Area metrics: {area_meta or {}}",
         "",
         "Dataset:",
         f"  Total edges: {summary.get('total_edges')}",
         f"  Known surface edges: {summary.get('known_surface_edges')}",
         f"  Unknown surface edges: {summary.get('unknown_surface_edges')}",
         f"  Unknown share: {summary.get('unknown_share'):.3f}",
+        f"  Train edges total: {summary.get('train_edges_total')}",
+        f"  Train edges with tile features: {summary.get('train_edges_with_tile_features')}",
+        f"  Train known surface edges: {summary.get('train_known_surface_edges')}",
+        f"  Train unknown surface edges: {summary.get('train_unknown_surface_edges')}",
+        f"  Predict edges inside polygon: {summary.get('predict_edges_inside_polygon')}",
+        f"  Predict unknown surface edges inside polygon: {summary.get('predict_unknown_surface_edges_inside_polygon')}",
+        f"  Predictions produced inside polygon: {summary.get('predictions_produced_inside_polygon')}",
         f"  Frequent concrete classes: {label_meta.get('frequent_surface_classes')}",
         f"  Rare concrete classes: {label_meta.get('rare_surface_classes')}",
         "",
@@ -2883,6 +3285,8 @@ def write_report(
         f"  Selected metrics: {selected.get('metrics')}",
         f"  Selected group direct model: {(group_selected or {}).get('model_name')} ({(group_selected or {}).get('model_key')})",
         f"  Group direct metrics: {(group_selected or {}).get('metrics')}",
+        f"  Global test metrics: {selected.get('metrics')}",
+        f"  Predict polygon holdout metrics: {holdout_metrics or {}}",
         f"  Concrete target mode: {config.concrete_target_mode}",
         f"  Group target mode: {config.group_target_mode}",
         f"  Tile coverage: {tile_coverage or {}}",
@@ -2912,13 +3316,18 @@ def write_report(
             "  Rare surface classes are grouped into rare_other_* train labels.",
             "  The output is prepared for future routing integration but safe_to_use_for_routing=false.",
             "",
+            "Tile-driven graph warning:",
+            "  If tile coverage area is large, but train graph has few edges, possible causes are cached tiles without roads, wrong server/zoom, graph-source fallback failure, restrictive filters, fragmented tile coverage, or partial Overpass response.",
+            "",
             "Artifacts:",
         ]
     )
     for field in artifacts.__dataclass_fields__:
         if field != "output_dir":
             lines.append(f"  {field}: {getattr(artifacts, field)}")
-    artifacts.report_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    text = "\n".join(lines) + "\n"
+    artifacts.report_txt.write_text(text, encoding="utf-8")
+    artifacts.train_vs_predict_report_txt.write_text(text, encoding="utf-8")
 
 
 def write_metrics_json(
@@ -2935,6 +3344,8 @@ def write_metrics_json(
     run_meta: Dict[str, Any],
     tile_coverage: Optional[Dict[str, Any]] = None,
     calibration_metrics: Optional[Dict[str, Any]] = None,
+    area_meta: Optional[Dict[str, Any]] = None,
+    holdout_metrics: Optional[Dict[str, Any]] = None,
 ) -> None:
     payload = {
         "selected_model": selected,
@@ -2962,6 +3373,10 @@ def write_metrics_json(
         "config": asdict(config),
         "run_meta": run_meta,
         "tile_coverage": tile_coverage or {},
+        "tile_usage": tile_coverage or {},
+        "area_meta": area_meta or {},
+        "global_tile_coverage_test_metrics": selected.get("metrics"),
+        "predict_polygon_holdout_metrics": holdout_metrics or {},
         "calibration_metrics": calibration_metrics or {},
     }
     with open(artifacts.metrics_json, "w", encoding="utf-8") as f:
@@ -3033,16 +3448,73 @@ def run_surface_ai_experiment(
         "tms_server": config.tms_server or settings.tms_server,
     }
 
-    for _ in progress(range(1), "[1/8] Load graph/edges", total=1):
-        edges_raw, graph_meta = load_edges_for_surface_ai_area(settings, config)
-        run_meta.update(graph_meta)
+    precache_polygon = parse_precache_polygon(settings)
+    tiles_dir = Path(run_meta["tiles_dir"])
+    total_cached_tiles = count_cached_tile_images(tiles_dir)
+    for _ in progress(range(1), "[1/10] Scan cached tiles", total=1):
+        tiles_gdf = scan_cached_tiles(
+            tiles_dir,
+            str(run_meta["tms_server"]),
+            int(run_meta["tile_zoom"]),
+            precache_polygon=precache_polygon,
+        )
+        train_polygon, predict_polygon, tile_coverage_polygon, area_meta = build_train_predict_polygons(
+            settings,
+            config,
+            tiles_gdf,
+        )
+        area_meta.update(
+            {
+                "tiles_total_in_cache": total_cached_tiles,
+                "tiles_matching_server_zoom": int(len(tiles_gdf)),
+            }
+        )
+        _write_polygon_geojson(artifacts.train_polygon_geojson, train_polygon, "train_polygon")
+        _write_polygon_geojson(artifacts.predict_polygon_geojson, predict_polygon, "predict_polygon")
+        _write_polygon_geojson(artifacts.tile_coverage_polygon_geojson, tile_coverage_polygon, "tile_coverage_polygon")
 
-    polygon = parse_precache_polygon(settings)
-    for _ in progress(range(1), "[2/8] Filter polygon", total=1):
-        edges = filter_edges_to_polygon(edges_raw, polygon)
+    for _ in progress(range(1), "[2/10] Load train graph", total=1):
+        train_raw, train_meta = load_edges_for_surface_ai_polygon(
+            settings,
+            config,
+            train_polygon,
+            priority=config.train_graph_source_priority,
+            scope="train",
+        )
+        run_meta["train_graph_source"] = train_meta.get("graph_source")
+        run_meta["train_graph_path"] = train_meta.get("graph_path")
+        run_meta["train_graph_fallback_reasons"] = train_meta.get("graph_fallback_reasons", [])
+        run_meta["graph_source"] = run_meta["train_graph_source"]
+        run_meta["graph_path"] = run_meta["train_graph_path"]
+
+    for _ in progress(range(1), "[3/10] Filter train graph", total=1):
+        train_edges = filter_edges_to_polygon(train_raw, train_polygon)
         for col in AI_OSM_FEATURES:
-            if col not in edges.columns:
-                edges[col] = None
+            if col not in train_edges.columns:
+                train_edges[col] = None
+
+    for _ in progress(range(1), "[4/10] Load predict graph", total=1):
+        predict_raw, predict_meta = load_edges_for_surface_ai_polygon(
+            settings,
+            config,
+            predict_polygon,
+            priority=config.predict_graph_source_priority,
+            scope="predict",
+        )
+        run_meta["predict_graph_source"] = predict_meta.get("graph_source")
+        run_meta["predict_graph_path"] = predict_meta.get("graph_path")
+        run_meta["predict_graph_fallback_reasons"] = predict_meta.get("graph_fallback_reasons", [])
+
+    for _ in progress(range(1), "[5/10] Filter predict graph", total=1):
+        predict_edges = filter_edges_to_polygon(predict_raw, predict_polygon)
+        for col in AI_OSM_FEATURES:
+            if col not in predict_edges.columns:
+                predict_edges[col] = None
+
+    write_edges_geojson(train_edges, artifacts.train_edges_geojson)
+    write_edges_geojson(predict_edges, artifacts.predict_edges_geojson)
+    edges = combine_train_predict_edges(train_edges, predict_edges, train_polygon, predict_polygon)
+    if max_edges is not None:
         edges = limit_edges_for_experiment(
             edges,
             max_edges,
@@ -3054,14 +3526,16 @@ def run_surface_ai_experiment(
         edges,
         settings,
         config,
-        polygon,
+        train_polygon,
         progress=progress,
     )
+    dataset = mark_dataset_area_flags(dataset, config)
     dataset["surface_ai_split"] = spatial_train_cal_test_split(dataset, edges, config)
     if config.use_neighbor_features:
         dataset = add_neighbor_features(dataset)
     summary = dataset_summary(dataset)
     write_dataset_csv(dataset, artifacts.dataset_csv)
+    write_dataset_csv(dataset, artifacts.dataset_all_tile_edges_csv)
 
     concrete_models, concrete_table = train_evaluate_task_models(
         dataset,
@@ -3097,16 +3571,50 @@ def run_surface_ai_experiment(
         config,
         target="group_direct",
     )
+    holdout_metrics = {
+        "concrete_compact": evaluate_selected_on_split(
+            dataset,
+            concrete_selected,
+            concrete_models,
+            config,
+            target="concrete_compact",
+            split_name="predict_holdout",
+        ),
+        "group_direct": evaluate_selected_on_split(
+            dataset,
+            group_selected,
+            group_models,
+            config,
+            target="group_direct",
+            split_name="predict_holdout",
+        ),
+    }
     baseline_table = pd.concat([concrete_table, group_table], axis=0, ignore_index=True)
 
     predictions = predict_all_edges(dataset, concrete_models, group_models, config, progress=progress)
+    predictions_inside = predictions[predictions.get("is_prediction_candidate", pd.Series(False, index=predictions.index)).astype(bool)].copy()
+    summary["predictions_produced_inside_polygon"] = int(len(predictions_inside))
     write_predictions_csv(predictions, artifacts.predictions_csv)
     write_predictions_geojson(predictions, edges, artifacts.predictions_geojson)
+    write_predictions_csv(predictions_inside, artifacts.predictions_inside_polygon_csv)
+    write_predictions_geojson(predictions_inside, predict_edges, artifacts.predictions_inside_polygon_geojson)
     write_baseline_tables(baseline_table, artifacts)
 
-    tiles_dir = Path(run_meta["tiles_dir"])
-    tiles_gdf = scan_cached_tiles(tiles_dir, str(run_meta["tms_server"]), int(run_meta["tile_zoom"]))
-    tile_coverage = write_tile_usage_report(tiles_gdf, edges, polygon, artifacts) if config.tile_usage_report else {}
+    tile_coverage = (
+        write_tile_usage_report(
+            tiles_gdf,
+            train_edges,
+            train_polygon,
+            artifacts,
+            predict_edges_gdf=predict_edges,
+            train_polygon=train_polygon,
+            predict_polygon=predict_polygon,
+            config=config,
+            total_cached_tiles=total_cached_tiles,
+        )
+        if config.tile_usage_report
+        else {}
+    )
     dangerous_overall = dangerous_upgrade_metrics(
         predictions.loc[predictions["surface_ai_split"] == "test", "surface_group_direct_label"].astype(str).tolist(),
         predictions.loc[predictions["surface_ai_split"] == "test", "surface_effective_group_for_routing_raw"].astype(str).tolist(),
@@ -3139,9 +3647,10 @@ def run_surface_ai_experiment(
     ].copy()
     if neighbor_importance.empty:
         neighbor_importance = feature_importance.head(30).copy()
-    for step in progress(range(6), "[7/8] Visualizations", total=6):
+    predictions_predict_area = predictions[predictions.get("inside_predict_area", pd.Series(False, index=predictions.index)).astype(bool)].copy()
+    for step in progress(range(6), "[9/10] Visualizations", total=6):
         if step == 0:
-            plot_surface_maps(predictions, edges, artifacts, config)
+            plot_surface_maps(predictions_predict_area, predict_edges, artifacts, config)
         elif step == 1:
             plot_confusion_matrix(
                 concrete_selected["metrics"],
@@ -3179,7 +3688,7 @@ def run_surface_ai_experiment(
         else:
             pass
 
-    for _ in progress(range(1), "[8/8] Export reports/model", total=1):
+    for _ in progress(range(1), "[10/10] Export reports/model", total=1):
         write_metrics_json(
             artifacts,
             selected=concrete_selected,
@@ -3193,6 +3702,8 @@ def run_surface_ai_experiment(
             run_meta=run_meta,
             tile_coverage=tile_coverage,
             calibration_metrics={"concrete": concrete_calibration, "group_direct": group_calibration},
+            area_meta=area_meta,
+            holdout_metrics=holdout_metrics,
         )
         with open(artifacts.group_direct_metrics_json, "w", encoding="utf-8") as f:
             json.dump(_json_safe(group_selected), f, ensure_ascii=False, indent=2)
@@ -3238,6 +3749,8 @@ def run_surface_ai_experiment(
             config=config,
             run_meta=run_meta,
             tile_coverage=tile_coverage,
+            area_meta=area_meta,
+            holdout_metrics=holdout_metrics,
         )
 
     return artifacts

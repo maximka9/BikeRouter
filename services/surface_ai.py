@@ -256,6 +256,15 @@ GROUP_COLORS: Dict[str, str] = {
     "unknown": "#8A8A8A",
 }
 
+# Обратная совместимость: старое имя без реального oversampling → weighted RF.
+_GROUP_MODEL_CANDIDATE_ALIASES: Dict[str, str] = {
+    "group_direct_combined_rf_paved_rough_oversampled": "group_direct_combined_rf_paved_rough_weighted",
+}
+
+
+def _normalize_group_model_candidates(names: Tuple[str, ...]) -> Tuple[str, ...]:
+    return tuple(_GROUP_MODEL_CANDIDATE_ALIASES.get(n, n) for n in names)
+
 
 def _env_str(name: str, default: str) -> str:
     return os.getenv(name, default)
@@ -315,7 +324,6 @@ class SurfaceAIConfig:
         "group_direct_combined_rf_balanced_without_spatial_prior",
         "group_direct_combined_rf_neighbor_features",
         "group_direct_combined_rf_class_weight_manual",
-        "group_direct_combined_rf_paved_rough_oversampled",
         "group_direct_combined_rf_threshold_tuned",
     )
     concrete_target_mode: str = "compact"
@@ -332,8 +340,9 @@ class SurfaceAIConfig:
     group_class_weight_paved_good: float = 1.0
     group_class_weight_paved_rough: float = 4.0
     group_class_weight_unpaved_soft: float = 3.0
+    # Включает post-hoc правило топ-1 только у кандидата ``*threshold_tuned*`` (см. ``_tuned_group_top_fields``).
     group_threshold_tuning: bool = True
-    paved_rough_min_proba: float = 0.25
+    paved_rough_min_proba: float = 0.30
     unpaved_soft_min_proba: float = 0.35
     calibration_enabled: bool = True
     calibration_method: str = "sigmoid"
@@ -425,10 +434,12 @@ class SurfaceAIConfig:
                     "always_majority,highway_heuristic,osm_only_rf,satellite_only_rf,combined_rf,combined_rf_balanced,combined_rf_without_spatial_prior,combined_rf_balanced_without_spatial_prior,combined_rf_with_neighbors",
                 )
             ),
-            group_model_candidates=_split_csv(
-                _env_str(
-                    "SURFACE_AI_GROUP_MODEL_CANDIDATES",
-                    "group_direct_always_majority,group_direct_highway_heuristic,group_direct_osm_only_rf,group_direct_satellite_only_rf,group_direct_combined_rf,group_direct_combined_rf_balanced,group_direct_combined_rf_calibrated,group_direct_combined_rf_without_spatial_prior,group_direct_combined_rf_balanced_without_spatial_prior,group_direct_combined_rf_neighbor_features,group_direct_combined_rf_class_weight_manual,group_direct_combined_rf_paved_rough_oversampled,group_direct_combined_rf_threshold_tuned",
+            group_model_candidates=_normalize_group_model_candidates(
+                _split_csv(
+                    _env_str(
+                        "SURFACE_AI_GROUP_MODEL_CANDIDATES",
+                        "group_direct_always_majority,group_direct_highway_heuristic,group_direct_osm_only_rf,group_direct_satellite_only_rf,group_direct_combined_rf,group_direct_combined_rf_balanced,group_direct_combined_rf_calibrated,group_direct_combined_rf_without_spatial_prior,group_direct_combined_rf_balanced_without_spatial_prior,group_direct_combined_rf_neighbor_features,group_direct_combined_rf_class_weight_manual,group_direct_combined_rf_threshold_tuned",
+                    )
                 )
             ),
             concrete_target_mode=_env_str("SURFACE_AI_CONCRETE_TARGET_MODE", "compact"),
@@ -446,7 +457,7 @@ class SurfaceAIConfig:
             group_class_weight_paved_rough=_env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_PAVED_ROUGH", 4.0),
             group_class_weight_unpaved_soft=_env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_UNPAVED_SOFT", 3.0),
             group_threshold_tuning=_env_bool("SURFACE_AI_GROUP_THRESHOLD_TUNING", True),
-            paved_rough_min_proba=_env_float("SURFACE_AI_PAVED_ROUGH_MIN_PROBA", 0.25),
+            paved_rough_min_proba=_env_float("SURFACE_AI_PAVED_ROUGH_MIN_PROBA", 0.30),
             unpaved_soft_min_proba=_env_float("SURFACE_AI_UNPAVED_SOFT_MIN_PROBA", 0.35),
             calibration_enabled=_env_bool("SURFACE_AI_CALIBRATION_ENABLED", True),
             calibration_method=_env_str("SURFACE_AI_CALIBRATION_METHOD", "sigmoid"),
@@ -1204,12 +1215,22 @@ def _rf(config: SurfaceAIConfig, *, class_weight: Optional[str]) -> RandomForest
 
 
 def _manual_group_class_weight(config: SurfaceAIConfig) -> Dict[str, float]:
-    return {
+    """Веса только для меток ``group_target_labels(group_target_mode)`` (без лишних ключей для sklearn)."""
+    labels = group_target_labels(config.group_target_mode)
+    by_label = {
         "paved_good": float(config.group_class_weight_paved_good),
         "paved_rough": float(config.group_class_weight_paved_rough),
         "unpaved_soft": float(config.group_class_weight_unpaved_soft),
+        "unpaved_hard": float(config.group_class_weight_unpaved_soft),
         "rough_or_unpaved": float(config.group_class_weight_unpaved_soft),
     }
+    out: Dict[str, float] = {}
+    for lab in labels:
+        if lab in by_label:
+            out[lab] = by_label[lab]
+        else:
+            out[lab] = 1.0
+    return out
 
 
 def _build_pipeline(candidate: str, feature_set: str, config: SurfaceAIConfig) -> Pipeline:
@@ -1231,7 +1252,7 @@ def _build_pipeline(candidate: str, feature_set: str, config: SurfaceAIConfig) -
             cw = config.rf_class_weight or "balanced_subsample"
         if candidate in {
             "group_direct_combined_rf_class_weight_manual",
-            "group_direct_combined_rf_paved_rough_oversampled",
+            "group_direct_combined_rf_paved_rough_weighted",
             "group_direct_combined_rf_threshold_tuned",
         }:
             cw = _manual_group_class_weight(config)
@@ -1321,7 +1342,7 @@ def _candidate_feature_set(candidate: str) -> str:
         return "combined_with_neighbors"
     if key in {
         "combined_rf_class_weight_manual",
-        "combined_rf_paved_rough_oversampled",
+        "combined_rf_paved_rough_weighted",
         "combined_rf_threshold_tuned",
     }:
         return "combined"
@@ -1357,8 +1378,11 @@ def _candidate_display(candidate: str) -> Tuple[str, str]:
         "group_direct_combined_rf_neighbor_features": ("Group direct RF + neighbor features", "OSM + geometry + satellite + neighbors"),
         "group_direct_combined_rf_with_neighbors": ("Group direct RF + neighbor features", "OSM + geometry + satellite + neighbors"),
         "group_direct_combined_rf_class_weight_manual": ("Group direct RF manual rough weights", "OSM + geometry + satellite"),
-        "group_direct_combined_rf_paved_rough_oversampled": ("Group direct RF rough oversampled", "OSM + geometry + satellite"),
-        "group_direct_combined_rf_threshold_tuned": ("Group direct RF threshold tuned", "OSM + geometry + satellite"),
+        "group_direct_combined_rf_paved_rough_weighted": (
+            "Group direct RF manual weights (paved_rough emphasis)",
+            "OSM + geometry + satellite; same RF weights as class_weight_manual until real oversampling exists",
+        ),
+        "group_direct_combined_rf_threshold_tuned": ("Group direct RF + post-hoc group thresholds", "OSM + geometry + satellite"),
     }
     return mapping.get(candidate, (candidate, _candidate_feature_set(candidate)))
 
@@ -1414,6 +1438,8 @@ def _group_metrics_for_predictions(y_true: Sequence[str], y_pred: Sequence[str])
     pred_s = pd.Series(ypg)
     rough_mask = true_s == "paved_rough"
     rough_to_good = rough_mask & (pred_s == "paved_good")
+    good_mask = true_s == "paved_good"
+    good_to_rough = good_mask & (pred_s == "paved_rough")
     return {
         "target": "group",
         "accuracy": float(accuracy_score(ytg, ypg)),
@@ -1427,6 +1453,8 @@ def _group_metrics_for_predictions(y_true: Sequence[str], y_pred: Sequence[str])
         "f1_paved_rough": float(report.get("paved_rough", {}).get("f1-score", 0.0)),
         "paved_rough_to_paved_good_count": int(rough_to_good.sum()),
         "paved_rough_to_paved_good_rate": float(rough_to_good.mean()) if rough_mask.any() else 0.0,
+        "paved_good_to_paved_rough_count": int(good_to_rough.sum()),
+        "paved_good_to_paved_rough_rate": float(good_to_rough.mean()) if good_mask.any() else 0.0,
         "classification_report": report,
         "confusion_matrix_labels": labels,
         "confusion_matrix": confusion_matrix(ytg, ypg, labels=labels).astype(int).tolist(),
@@ -1713,7 +1741,8 @@ def _tuned_group_top_fields(
     candidate: str,
 ) -> Tuple[List[str], List[float], List[str], List[float], List[float]]:
     pred, conf, top2, top2_conf, margin = _proba_top_fields(proba)
-    if not (config.group_threshold_tuning or "threshold_tuned" in candidate):
+    # Иначе все group-direct кандидаты получают один post-processing — сравнение моделей искажается.
+    if "threshold_tuned" not in candidate or not config.group_threshold_tuning:
         return pred, conf, top2, top2_conf, margin
     tuned: List[str] = []
     tuned_conf: List[float] = []

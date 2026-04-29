@@ -232,6 +232,24 @@ def apply_surface_resolution(
         and prediction_store is not None
         and prediction_store.loaded
     )
+    if s is not None and bool(s.surface_ai_runtime_enabled):
+        if use_ml:
+            logger.info(
+                "surface_resolution: use_ml=True "
+                "(SURFACE_AI_RUNTIME_ENABLED=True, SurfacePredictionStore.loaded=True)"
+            )
+        else:
+            reason = "prediction_store_missing"
+            if prediction_store is not None and not prediction_store.loaded:
+                reason = (
+                    getattr(prediction_store, "failure_reason", None)
+                    or "store_not_loaded"
+                )
+            logger.warning(
+                "surface_resolution: use_ml=False "
+                "(SURFACE_AI_RUNTIME_ENABLED=True, reason=%s)",
+                reason,
+            )
 
     n = len(gdf)
     surf_eff: List[str] = []

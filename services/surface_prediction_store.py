@@ -166,6 +166,10 @@ class SurfacePredictionStore:
             return
 
         path: Path = self._settings.surface_ai_runtime_predictions_resolved_path
+        logger.info(
+            "Surface AI runtime: enabled=True predictions_path=%s",
+            path,
+        )
         if not path.is_file():
             msg = f"runtime predictions file missing: {path}"
             self._failure_reason = msg
@@ -288,9 +292,14 @@ class SurfacePredictionStore:
         self._loaded = True
         self._ml_graph_ok = True
         logger.info(
-            "Surface AI runtime: загружено %d предсказаний из %s",
-            len(self._by_edge_id),
+            "Surface AI runtime: loaded=True file_exists=True csv_empty=False "
+            "path=%s rows=%d required_columns_ok=True "
+            "index(edge_id/undirected/way_geom)=%d/%d/%d",
             path,
+            len(df),
+            len(self._by_edge_id),
+            len(self._by_undirected),
+            len(self._by_way_geom),
         )
 
     def begin_graph_session(self, edges_gdf: Any) -> None:

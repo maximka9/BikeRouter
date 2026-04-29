@@ -5,13 +5,13 @@
 ``pool.imap`` chunksize 1. Главный процесс делает warmup графа до пула.
 
 Число строк маршрутов примерно ``n*(n-1) * n_profiles * n_weather * 6`` при направленных парах
-(по умолчанию). Сетки: summer=95, winter=135, all=230.
+(по умолчанию). Сетки: ``summer``=95, ``winter``=135, ``all``=230 (лето+зима).
 
 Запуск::
 
     python -m bike_router.tools.route_batch_experiment
     python -m bike_router.tools.route_batch_experiment --n-points 10 --weather-grid summer
-    python -m bike_router.tools.route_batch_experiment --weather-grid summer
+    python -m bike_router.tools.route_batch_experiment --weather-grid winter
 """
 
 from __future__ import annotations
@@ -21,11 +21,62 @@ import logging
 import os
 import sys
 
+logger = logging.getLogger(__name__)
+
 
 def _ensure_pkg_path() -> None:
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if root not in sys.path:
         sys.path.insert(0, root)
+
+
+def _route_batch_output_xlsx_suffix(
+    *,
+    n_points: int,
+    directed_pairs: bool,
+    weather_grid: str,
+    profiles_mode: str,
+    surface_ai_runtime_marker: str = "",
+) -> str:
+    """Часть имени Excel без даты: точки, направления пар, сетка погоды, профили."""
+    wg = (weather_grid or "all").strip().lower()
+    if wg in ("summer_wind", "summer-wind"):
+        wg = "summer"
+    pair = "directed_AB_BA" if directed_pairs else "undirected_only"
+    prof = (profiles_mode or "both").strip().lower().replace(" ", "_")
+    parts = [f"n{n_points}", pair, wg, prof]
+    marker = (surface_ai_runtime_marker or "").strip().lower()
+    if marker:
+        parts.append(marker)
+    return "_".join(parts)
+
+
+def _surface_ai_runtime_filename_marker() -> str:
+    """Маркер для имени Excel: только если runtime ML включён в настройках."""
+    _ensure_pkg_path()
+    from bike_router.config import Settings
+
+    settings = Settings()
+    if not settings.surface_ai_runtime_enabled:
+        return ""
+
+    from bike_router.services.surface_prediction_store import SurfacePredictionStore
+
+    store = SurfacePredictionStore(settings)
+    store.load()
+    if store.loaded:
+        logger.info(
+            "route_batch_experiment: Surface AI runtime ML active; Excel suffix includes ml_on"
+        )
+        return "ml_on"
+
+    logger.warning(
+        "route_batch_experiment: SURFACE_AI_RUNTIME_ENABLED=True, "
+        "but SurfacePredictionStore.loaded=False; Excel suffix includes ml_unloaded "
+        "(reason=%s)",
+        store.failure_reason or "unknown",
+    )
+    return "ml_unloaded"
 
 
 def run_combined_route_batch_experiment(
@@ -59,6 +110,13 @@ def run_combined_route_batch_experiment(
     assert len(grid) in (95, 135, 230)
 
     mw = mp_resolve_pool_workers(0)
+    suffix = _route_batch_output_xlsx_suffix(
+        n_points=n_points,
+        directed_pairs=directed_pairs,
+        weather_grid=wg,
+        profiles_mode=profiles_mode,
+        surface_ai_runtime_marker=_surface_ai_runtime_filename_marker(),
+    )
     return run_variants_over_weather_cases(
         script_stem="route_batch_experiment",
         n_points=n_points,
@@ -74,6 +132,7 @@ def run_combined_route_batch_experiment(
         mp_weather_chunk_size=25,
         directed_pairs=directed_pairs,
         write_vertices=False,
+        output_xlsx_suffix=suffix,
     )
 
 
@@ -87,7 +146,8 @@ def main() -> None:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Сетки: summer=95, winter=135, all=230. По умолчанию пары направленные n*(n-1). "
+            "Сетки: summer=95, winter=135, all=лето+зима (230). По умолчанию пары направленные A→B и B→A; "
+            "флаг --undirected-pairs оставляет только i<j. Excel: имя файла с параметрами (без даты). "
             "Вершины в csv.gz не пишутся. Параллель: min(6, CPU-1) процессов, чанк погоды 25."
         ),
     )
@@ -103,7 +163,7 @@ def main() -> None:
         default="all",
         metavar="NAME",
         dest="weather_grid",
-        help="Synthetic-сетка (как в heat_weather_experiment).",
+        help="Synthetic-сетка: summer (только лето), winter (только зима), all (лето и зима).",
     )
     parser.add_argument(
         "--undirected-pairs",

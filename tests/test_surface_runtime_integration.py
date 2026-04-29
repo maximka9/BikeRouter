@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import geopandas as gpd
@@ -79,6 +80,58 @@ def test_osm_surface_has_priority_over_ml(tmp_path, monkeypatch) -> None:
     assert out["surface_source"].iloc[0] == "osm"
     assert out["surface_effective"].iloc[0] == "asphalt"
     assert stats.surface_source_osm_count == 1
+
+
+def test_surface_runtime_logs_loaded_and_use_ml(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    csv_path = tmp_path / "p.csv"
+    _write_runtime_csv(csv_path)
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_STRICT", "false")
+
+    caplog.set_level(logging.INFO)
+    s = Settings()
+    store = SurfacePredictionStore(s)
+    store.load()
+    out, stats = apply_surface_resolution(
+        _minimal_edges_gdf(),
+        prediction_store=store,
+        settings=s,
+    )
+
+    assert store.loaded
+    assert out["surface_source"].iloc[0] == "ml"
+    assert stats.surface_source_ml_count == 1
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Surface AI runtime: enabled=True predictions_path=" in messages
+    assert "Surface AI runtime: loaded=True" in messages
+    assert "surface_resolution: use_ml=True" in messages
+
+
+def test_route_batch_suffix_includes_ml_marker() -> None:
+    from bike_router.tools.route_batch_experiment import _route_batch_output_xlsx_suffix
+
+    assert _route_batch_output_xlsx_suffix(
+        n_points=10,
+        directed_pairs=True,
+        weather_grid="all",
+        profiles_mode="both",
+        surface_ai_runtime_marker="ml_on",
+    ) == "n10_directed_AB_BA_all_both_ml_on"
+
+
+def test_route_batch_ml_marker_when_store_loaded(tmp_path, monkeypatch) -> None:
+    from bike_router.tools.route_batch_experiment import _surface_ai_runtime_filename_marker
+
+    csv_path = tmp_path / "p.csv"
+    _write_runtime_csv(csv_path)
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_STRICT", "false")
+
+    assert _surface_ai_runtime_filename_marker() == "ml_on"
 
 
 def test_ml_surface_effective_maps_to_different_profile_coefficient(

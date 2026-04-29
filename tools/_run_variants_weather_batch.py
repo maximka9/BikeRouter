@@ -33,6 +33,7 @@ def run_variants_over_weather_cases(
     mp_weather_chunk_size: int,
     directed_pairs: bool,
     write_vertices: bool,
+    output_xlsx_suffix: Optional[str] = None,
 ) -> str:
     """Один Excel: либо непустой ``synthetic_weather_grid``, либо ``fixed_weather_kw`` (одна погода)."""
     from bike_router.config import ROUTING_ALGO_VERSION, Settings, routing_engine_cache_fingerprint
@@ -534,7 +535,10 @@ def run_variants_over_weather_cases(
 
     s_var, s_prof, s_dir = build_summaries(raw_rows)
     pair_cmp = build_pair_comparison(raw_rows)
-    out = experiment_output_xlsx_path(script_stem=script_stem)
+    out = experiment_output_xlsx_path(
+        script_stem=script_stem,
+        filename_suffix=output_xlsx_suffix if output_xlsx_suffix else None,
+    )
     wkt_fp = routing_engine_cache_fingerprint()
 
     meta_rows: List[Tuple[str, Any]] = [

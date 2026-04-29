@@ -2,7 +2,8 @@
 
 Используется ``route_variants_experiment``, ``heat_weather_experiment``, ``route_batch_experiment``
 и ``run_variants_over_weather_cases`` (см. ``_run_variants_weather_batch``).
-Выходные .xlsx пишутся в ``bike_router/experiment_outputs/`` (см. ``experiment_output_xlsx_path``).
+Выходные .xlsx пишутся в ``bike_router/experiment_outputs/`` (см. ``experiment_output_xlsx_path``);
+для ``route_batch_experiment`` имя может включать параметры (точки, пары, сетка погоды).
 """
 
 from __future__ import annotations
@@ -84,12 +85,32 @@ DEFAULT_MAX_SAMPLE_ATTEMPTS = 50_000
 EXPERIMENT_OUTPUT_DIR_NAME = "experiment_outputs"
 
 
-def experiment_output_xlsx_path(*, script_stem: str) -> str:
-    """Путь к .xlsx: ``bike_router/experiment_outputs/{script_stem}_YYYYMMDD_HHMMSS.xlsx`` (UTC)."""
+def _sanitize_experiment_xlsx_suffix(raw: str) -> str:
+    s = re.sub(r"[^\w\-\.]", "_", raw.strip())
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s[:200] if len(s) > 200 else s
+
+
+def experiment_output_xlsx_path(
+    *,
+    script_stem: str,
+    filename_suffix: Optional[str] = None,
+) -> str:
+    """Путь к .xlsx в ``bike_router/experiment_outputs``.
+
+    Без ``filename_suffix``: ``{script_stem}_YYYYMMDD_HHMMSS.xlsx`` (UTC).
+    С суффиксом: ``{script_stem}_{suffix}.xlsx`` (параметры прогона без времени в имени).
+    """
     pkg_root = Path(__file__).resolve().parent.parent
     out_dir = pkg_root / EXPERIMENT_OUTPUT_DIR_NAME
     out_dir.mkdir(parents=True, exist_ok=True)
-    fn = datetime.now(timezone.utc).strftime(f"{script_stem}_%Y%m%d_%H%M%S.xlsx")
+    if filename_suffix:
+        safe = _sanitize_experiment_xlsx_suffix(filename_suffix)
+        if not safe:
+            safe = "run"
+        fn = f"{script_stem}_{safe}.xlsx"
+    else:
+        fn = datetime.now(timezone.utc).strftime(f"{script_stem}_%Y%m%d_%H%M%S.xlsx")
     return str(out_dir / fn)
 # Режим ``past``: столько дней архива, каждый день — 14:00 локально.
 PAST_ARCHIVE_DAYS = 10

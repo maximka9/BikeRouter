@@ -11,15 +11,18 @@ from typing import Any, Dict, List, Tuple
 _POINTS: List[Tuple[float, float]] = ()
 _CORRIDOR: Tuple[float, ...] = (10.0, 100.0)
 _ENGINE: Any = None
+_INCLUDE_SURFACE_ML_REPORT = False
 
 
 def init_worker(
     points: List[Tuple[float, float]],
     corridor: Tuple[float, ...],
+    include_surface_ml_report: bool = False,
 ) -> None:
-    global _POINTS, _CORRIDOR, _ENGINE
+    global _POINTS, _CORRIDOR, _ENGINE, _INCLUDE_SURFACE_ML_REPORT
     _POINTS = tuple(points)
     _CORRIDOR = tuple(corridor)
+    _INCLUDE_SURFACE_ML_REPORT = bool(include_surface_ml_report)
     for name in (
         "bike_router.engine",
         "bike_router.services.weather",
@@ -163,6 +166,7 @@ def run_variants_weather_chunk_task(
     from bike_router.tools._experiment_common import (
         EXPECTED_VARIANTS,
         SYNTHETIC_TEST_WEATHER_ISO,
+        call_with_route_surface_source_report,
         kwargs_fixed_snapshot_from_case,
         route_to_raw_row,
         _point_id_fmt,
@@ -211,7 +215,7 @@ def run_variants_weather_chunk_task(
             ),
         }
         try:
-            alt = _ENGINE.compute_alternatives(
+            call = lambda: _ENGINE.compute_alternatives(
                 start=start,
                 end=end,
                 profile_key=prof,
@@ -220,6 +224,14 @@ def run_variants_weather_chunk_task(
                 departure_time=dep_iso,
                 **wkw,
             )
+            if _INCLUDE_SURFACE_ML_REPORT:
+                alt, surface_report_by_mode = call_with_route_surface_source_report(
+                    _ENGINE,
+                    call,
+                )
+            else:
+                alt = call()
+                surface_report_by_mode = {}
             by_mode = {r.mode: r for r in alt.routes}
         except RouteNotFoundError:
             n_skip += 1
@@ -273,6 +285,9 @@ def run_variants_weather_chunk_task(
                 baseline_full=baseline,
                 weather_date="",
                 test_weather_meta=test_meta,
+                surface_ml_report_metrics=surface_report_by_mode.get(mode, {})
+                if _INCLUDE_SURFACE_ML_REPORT
+                else None,
             )
             raw_rows.append(row)
             n_ok += 1
@@ -288,6 +303,7 @@ def run_variants_fixed_weather_od_task(
     from bike_router.exceptions import BikeRouterError, RouteNotFoundError
     from bike_router.tools._experiment_common import (
         EXPECTED_VARIANTS,
+        call_with_route_surface_source_report,
         route_to_raw_row,
         _point_id_fmt,
     )
@@ -307,7 +323,7 @@ def run_variants_fixed_weather_od_task(
     dep_iso = str(fk.get("weather_time") or "")
 
     try:
-        alt = _ENGINE.compute_alternatives(
+        call = lambda: _ENGINE.compute_alternatives(
             start=start,
             end=end,
             profile_key=prof,
@@ -316,6 +332,14 @@ def run_variants_fixed_weather_od_task(
             departure_time=dep_iso,
             **fk,
         )
+        if _INCLUDE_SURFACE_ML_REPORT:
+            alt, surface_report_by_mode = call_with_route_surface_source_report(
+                _ENGINE,
+                call,
+            )
+        else:
+            alt = call()
+            surface_report_by_mode = {}
         by_mode = {r.mode: r for r in alt.routes}
     except RouteNotFoundError:
         return raw_rows, failures, 0, 0, 1
@@ -367,6 +391,9 @@ def run_variants_fixed_weather_od_task(
             baseline_full=baseline,
             weather_date="",
             test_weather_meta=None,
+            surface_ml_report_metrics=surface_report_by_mode.get(mode, {})
+            if _INCLUDE_SURFACE_ML_REPORT
+            else None,
         )
         raw_rows.append(row)
         n_ok += 1

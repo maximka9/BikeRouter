@@ -34,6 +34,7 @@ def run_variants_over_weather_cases(
     directed_pairs: bool,
     write_vertices: bool,
     output_xlsx_suffix: Optional[str] = None,
+    include_surface_ml_report: bool = False,
 ) -> str:
     """Один Excel: либо непустой ``synthetic_weather_grid``, либо ``fixed_weather_kw`` (одна погода)."""
     from bike_router.config import ROUTING_ALGO_VERSION, Settings, routing_engine_cache_fingerprint
@@ -48,6 +49,7 @@ def run_variants_over_weather_cases(
         EXPECTED_VARIANTS,
         EXPERIMENT_CORRIDOR_EXPAND_M,
         SYNTHETIC_TEST_WEATHER_ISO,
+        add_surface_ml_report_summary_means,
         build_heat_experiment_extra_sheet_blocks,
         build_heat_vs_green_by_weather_rows,
         build_heat_weather_influence_rows,
@@ -58,6 +60,7 @@ def run_variants_over_weather_cases(
         build_summaries_by_weather_case_and_variant,
         build_summaries_by_weather_case_id,
         build_winter_kpi_rows,
+        call_with_route_surface_source_report,
         experiment_output_xlsx_path,
         kwargs_fixed_snapshot_from_case,
         meta_append_batch_weather_snapshot,
@@ -181,7 +184,11 @@ def run_variants_over_weather_cases(
             with Pool(
                 processes=mw,
                 initializer=_mp_init,
-                initargs=(pls, tuple(EXPERIMENT_CORRIDOR_EXPAND_M)),
+                initargs=(
+                    pls,
+                    tuple(EXPERIMENT_CORRIDOR_EXPAND_M),
+                    bool(include_surface_ml_report),
+                ),
             ) as pool:
                 results = list(
                     tqdm(
@@ -263,7 +270,7 @@ def run_variants_over_weather_cases(
                         refresh=False,
                     )
                     try:
-                        alt = eng.compute_alternatives(
+                        call = lambda: eng.compute_alternatives(
                             start=start,
                             end=end,
                             profile_key=prof,
@@ -272,6 +279,13 @@ def run_variants_over_weather_cases(
                             departure_time=dep_iso,
                             **wkw,
                         )
+                        if include_surface_ml_report:
+                            alt, surface_report_by_mode = (
+                                call_with_route_surface_source_report(eng, call)
+                            )
+                        else:
+                            alt = call()
+                            surface_report_by_mode = {}
                         by_mode = {r.mode: r for r in alt.routes}
                     except RouteNotFoundError:
                         n_skip += 1
@@ -329,6 +343,9 @@ def run_variants_over_weather_cases(
                             baseline_full=baseline,
                             weather_date="",
                             test_weather_meta=test_meta,
+                            surface_ml_report_metrics=surface_report_by_mode.get(mode, {})
+                            if include_surface_ml_report
+                            else None,
                         )
                         raw_rows.append(row)
                         n_ok += 1
@@ -393,7 +410,11 @@ def run_variants_over_weather_cases(
             with Pool(
                 processes=mw,
                 initializer=_mp_init,
-                initargs=(pls, tuple(EXPERIMENT_CORRIDOR_EXPAND_M)),
+                initargs=(
+                    pls,
+                    tuple(EXPERIMENT_CORRIDOR_EXPAND_M),
+                    bool(include_surface_ml_report),
+                ),
             ) as pool:
                 results = list(
                     tqdm(
@@ -439,7 +460,7 @@ def run_variants_over_weather_cases(
                 start = (o_pt.lat, o_pt.lon)
                 end = (d_pt.lat, d_pt.lon)
                 try:
-                    alt = eng.compute_alternatives(
+                    call = lambda: eng.compute_alternatives(
                         start=start,
                         end=end,
                         profile_key=prof,
@@ -448,6 +469,13 @@ def run_variants_over_weather_cases(
                         departure_time=dep_iso,
                         **fk,
                     )
+                    if include_surface_ml_report:
+                        alt, surface_report_by_mode = (
+                            call_with_route_surface_source_report(eng, call)
+                        )
+                    else:
+                        alt = call()
+                        surface_report_by_mode = {}
                     by_mode = {r.mode: r for r in alt.routes}
                 except RouteNotFoundError:
                     n_skip += 1
@@ -505,6 +533,9 @@ def run_variants_over_weather_cases(
                         baseline_full=baseline,
                         weather_date="",
                         test_weather_meta=None,
+                        surface_ml_report_metrics=surface_report_by_mode.get(mode, {})
+                        if include_surface_ml_report
+                        else None,
                     )
                     raw_rows.append(row)
                     n_ok += 1
@@ -534,6 +565,8 @@ def run_variants_over_weather_cases(
             pbar.close()
 
     s_var, s_prof, s_dir = build_summaries(raw_rows)
+    if include_surface_ml_report:
+        add_surface_ml_report_summary_means(s_var, raw_rows)
     pair_cmp = build_pair_comparison(raw_rows)
     out = experiment_output_xlsx_path(
         script_stem=script_stem,

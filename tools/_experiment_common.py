@@ -17,12 +17,13 @@ import re
 import sys
 import time
 import uuid
+import types
 from pathlib import Path
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta, timezone
 from math import asin, cos, radians, sin, sqrt
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 try:
     from zoneinfo import ZoneInfo
@@ -718,6 +719,289 @@ SUMMARY_NUM_KEYS = (
     "weather_test_shortwave_radiation_wm2",
 )
 
+SURFACE_ML_REPORT_KEYS = (
+    "osm_surface_missing_share_pct",
+    "surface_from_osm_share_pct",
+    "surface_from_ml_share_pct",
+    "surface_from_heuristic_share_pct",
+    "surface_unknown_after_ml_share_pct",
+)
+
+
+def _surface_report_first_value(val: Any) -> Any:
+    if isinstance(val, list):
+        return val[0] if val else None
+    return val
+
+
+def _surface_report_norm(val: Any) -> str:
+    val = _surface_report_first_value(val)
+    if val is None:
+        return ""
+    try:
+        if isinstance(val, float) and math.isnan(val):
+            return ""
+    except TypeError:
+        pass
+    return str(val).strip().lower()
+
+
+def _surface_report_raw_osm_surface(edge_data: Dict[str, Any]) -> str:
+    for key in ("surface_osm", "surface"):
+        s = _surface_report_norm(edge_data.get(key))
+        if s and s != "nan":
+            return s
+    return ""
+
+
+def _surface_report_effective_surface(edge_data: Dict[str, Any]) -> str:
+    s = _surface_report_norm(edge_data.get("surface_effective"))
+    if s and s != "nan":
+        return s
+    return "unknown"
+
+
+def _surface_report_missing_or_unresolved_osm(raw_surface: str) -> bool:
+    return raw_surface in {
+        "",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "nan",
+        "no",
+        "unknown",
+        "undefined",
+    }
+
+
+def _surface_report_effective_unknown(effective_surface: str) -> bool:
+    return effective_surface in {
+        "",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "nan",
+        "unknown",
+        "undefined",
+    }
+
+
+def _surface_report_source_category(
+    source_value: Any,
+    *,
+    raw_surface: str,
+    effective_surface: str,
+) -> str:
+    """Нормализовать внутренний источник покрытия к osm/ml/heuristic/unknown."""
+    if _surface_report_effective_unknown(effective_surface):
+        return "unknown"
+
+    src = _surface_report_norm(source_value)
+    if src == "osm" or src.startswith("osm_"):
+        return "osm"
+    if src == "ml" or src.startswith("ml_") or src in {
+        "ai",
+        "model",
+        "surface_ai",
+        "surface-ml",
+    }:
+        return "ml"
+    if (
+        src == "heuristic"
+        or src.startswith("heuristic_")
+        or "heuristic" in src
+        or "fallback" in src
+        or src in {"tracktype", "highway"}
+    ):
+        return "heuristic"
+    if src == "unknown" or src.startswith("unknown_") or src.startswith("default"):
+        return "unknown"
+
+    if not _surface_report_missing_or_unresolved_osm(raw_surface):
+        return "osm"
+    return "heuristic" if effective_surface else "unknown"
+
+
+def route_surface_source_report_metrics(G: Any, route: Any) -> Dict[str, float]:
+    """Доли источников покрытия вдоль маршрута по сумме длин рёбер, в процентах."""
+    meters = {
+        "osm_surface_missing": 0.0,
+        "osm": 0.0,
+        "ml": 0.0,
+        "heuristic": 0.0,
+        "unknown": 0.0,
+    }
+    total_m = 0.0
+    if G is None or route is None:
+        return {k: 0.0 for k in SURFACE_ML_REPORT_KEYS}
+
+    for edge in getattr(route, "edges", []) or []:
+        try:
+            d = G.edges[edge]
+        except Exception:
+            continue
+        try:
+            ln = float(d.get("length", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            ln = 0.0
+        if not math.isfinite(ln) or ln <= 0.0:
+            continue
+
+        total_m += ln
+        raw = _surface_report_raw_osm_surface(d)
+        eff = _surface_report_effective_surface(d)
+        if _surface_report_missing_or_unresolved_osm(raw):
+            meters["osm_surface_missing"] += ln
+
+        category = _surface_report_source_category(
+            d.get("surface_source"),
+            raw_surface=raw,
+            effective_surface=eff,
+        )
+        if category not in ("osm", "ml", "heuristic", "unknown"):
+            category = "unknown"
+        meters[category] += ln
+
+    if total_m <= 0.0:
+        return {k: 0.0 for k in SURFACE_ML_REPORT_KEYS}
+
+    def pct(m: float) -> float:
+        return round(100.0 * float(m) / total_m, 2)
+
+    return {
+        "osm_surface_missing_share_pct": pct(meters["osm_surface_missing"]),
+        "surface_from_osm_share_pct": pct(meters["osm"]),
+        "surface_from_ml_share_pct": pct(meters["ml"]),
+        "surface_from_heuristic_share_pct": pct(meters["heuristic"]),
+        "surface_unknown_after_ml_share_pct": pct(meters["unknown"]),
+    }
+
+
+def call_with_route_surface_source_report(
+    engine: Any,
+    call: Callable[[], Any],
+) -> Tuple[Any, Dict[str, Dict[str, float]]]:
+    """Выполнить вызов движка и снять route-level surface metrics без изменения API."""
+    engine_dict = getattr(engine, "__dict__", {})
+    had_instance_attr = "_build_route_response" in engine_dict
+    original_instance_attr = engine_dict.get("_build_route_response")
+    original = getattr(engine, "_build_route_response", None)
+    if original is None:
+        return call(), {}
+
+    report_by_mode: Dict[str, Dict[str, float]] = {}
+
+    def wrapped(
+        self: Any,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        profile_key: str,
+        mode: str,
+        route: Any,
+        cost_weight_key: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        response = original(
+            start,
+            end,
+            profile_key,
+            mode,
+            route,
+            cost_weight_key,
+            *args,
+            **kwargs,
+        )
+        try:
+            G = (
+                kwargs.get("graph")
+                or getattr(self, "graph", None)
+                or getattr(self, "_graph", None)
+            )
+            report_by_mode[str(getattr(response, "mode", mode) or mode)] = (
+                route_surface_source_report_metrics(G, route)
+            )
+        except Exception as exc:
+            _log.warning(
+                "Не удалось посчитать ML surface report для варианта %s: %s",
+                mode,
+                exc,
+            )
+        return response
+
+    setattr(engine, "_build_route_response", types.MethodType(wrapped, engine))
+    try:
+        result = call()
+    finally:
+        if had_instance_attr:
+            setattr(engine, "_build_route_response", original_instance_attr)
+        else:
+            try:
+                delattr(engine, "_build_route_response")
+            except AttributeError:
+                pass
+    return result, report_by_mode
+
+
+def _surface_ml_report_row(metrics: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if metrics is None:
+        return {}
+    out: Dict[str, Any] = {}
+    for key in SURFACE_ML_REPORT_KEYS:
+        v = metrics.get(key)
+        if v is None or v == "":
+            out[key] = None
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            out[key] = None
+            continue
+        out[key] = round(fv, 2) if math.isfinite(fv) else None
+    return out
+
+
+def add_surface_ml_report_summary_means(
+    summary_variant: List[Dict[str, Any]],
+    raw_rows: List[Dict[str, Any]],
+) -> None:
+    """Добавить в блок «Средние по варианту» средние ML surface доли, в процентах."""
+    if not raw_rows or not any(
+        k in row for row in raw_rows for k in SURFACE_ML_REPORT_KEYS
+    ):
+        return
+
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for row in raw_rows:
+        groups[
+            (str(row.get("profile") or ""), str(row.get("variant_key") or ""))
+        ].append(row)
+
+    for srow in summary_variant:
+        rs = groups.get(
+            (
+                str(srow.get("profile") or ""),
+                str(srow.get("variant_key") or ""),
+            ),
+            [],
+        )
+        for key in SURFACE_ML_REPORT_KEYS:
+            vals: List[float] = []
+            for row in rs:
+                v = row.get(key)
+                if v is None or v == "":
+                    continue
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(fv):
+                    vals.append(fv)
+            m = _mean(vals)
+            srow[f"mean_{key}"] = round(m, 2) if m is not None else None
+
 
 def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
     """Числовые поля снимка Open-Meteo из ответа движка (для Excel и сводок)."""
@@ -1092,6 +1376,7 @@ def route_to_raw_row(
     baseline_full: Any = None,
     weather_date: str = "",
     test_weather_meta: Optional[Dict[str, Any]] = None,
+    surface_ml_report_metrics: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     st = _stress_fields(r)
     cc = _combined_cost_fields(r)
@@ -1148,6 +1433,7 @@ def route_to_raw_row(
         "stressful_intersections_count": st["stressful_intersections_count"],
         "cost": float(r.cost),
         "surface_na_fraction": float(getattr(r.surfaces, "na_fraction", 0.0) or 0.0),
+        **_surface_ml_report_row(surface_ml_report_metrics),
         "surface_inferred_fraction": float(
             getattr(getattr(r, "quality_hints", None), "inferred_surface_fraction", 0.0)
             or 0.0
@@ -2704,6 +2990,11 @@ _ROUTE_COL_RU: Dict[str, str] = {
     "stressful_intersections_count": "Стресс. пересечения",
     "cost": "Стоимость модели",
     "surface_na_fraction": "Доля surface=N/A",
+    "osm_surface_missing_share_pct": "Доля участков без исходного тега surface в OSM, %",
+    "surface_from_osm_share_pct": "Доля покрытия, взятого из OSM, %",
+    "surface_from_ml_share_pct": "Доля покрытия, восстановленного моделью, %",
+    "surface_from_heuristic_share_pct": "Доля покрытия, определённого эвристически, %",
+    "surface_unknown_after_ml_share_pct": "Доля покрытия, оставшегося неопределённым после восстановления, %",
     "surface_inferred_fraction": "Доля покрытия по fallback",
     "highway_inferred_fraction": "Доля highway по fallback",
     "mode": "Режим (техн.)",

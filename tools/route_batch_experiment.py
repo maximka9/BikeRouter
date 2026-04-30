@@ -110,12 +110,13 @@ def run_combined_route_batch_experiment(
     assert len(grid) in (95, 135, 230)
 
     mw = mp_resolve_pool_workers(0)
+    surface_ai_runtime_marker = _surface_ai_runtime_filename_marker()
     suffix = _route_batch_output_xlsx_suffix(
         n_points=n_points,
         directed_pairs=directed_pairs,
         weather_grid=wg,
         profiles_mode=profiles_mode,
-        surface_ai_runtime_marker=_surface_ai_runtime_filename_marker(),
+        surface_ai_runtime_marker=surface_ai_runtime_marker,
     )
     return run_variants_over_weather_cases(
         script_stem="route_batch_experiment",
@@ -133,6 +134,7 @@ def run_combined_route_batch_experiment(
         directed_pairs=directed_pairs,
         write_vertices=False,
         output_xlsx_suffix=suffix,
+        include_surface_ml_report=(surface_ai_runtime_marker == "ml_on"),
     )
 
 

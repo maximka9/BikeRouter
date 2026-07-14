@@ -44,6 +44,17 @@ jobs:
           python -m registration.scripts.calculate_program_size
           python -m registration.scripts.check_abstract
 
+      - name: Generate deposited materials
+        run: |
+          python -m registration.scripts.generate_deposit_pdf
+          test -s registration/private/02_deposit.pdf
+
+      - name: Upload deposited PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: deposited-materials
+          path: registration/private/02_deposit.pdf
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

@@ -130,20 +130,44 @@ def _markdown() -> str:
     return "\n".join(lines)
 
 
-def _font_name() -> str:
+def _register_font(name: str, candidates: list[Path]) -> str:
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 
-    candidates = [
-        Path("C:/Windows/Fonts/arial.ttf"),
-        Path("C:/Windows/Fonts/calibri.ttf"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-    ]
     for font_path in candidates:
         if font_path.is_file():
-            pdfmetrics.registerFont(TTFont("BikeRouterFont", str(font_path)))
-            return "BikeRouterFont"
+            pdfmetrics.registerFont(TTFont(name, str(font_path)))
+            return name
     return "Helvetica"
+
+
+def _font_name() -> str:
+    return _register_font(
+        "BikeRouterFont",
+        [
+            Path("C:/Windows/Fonts/arial.ttf"),
+            Path("C:/Windows/Fonts/calibri.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        ],
+    )
+
+
+def _mono_font_name() -> str:
+    return _register_font(
+        "BikeRouterMono",
+        [
+            Path("C:/Windows/Fonts/consola.ttf"),
+            Path("C:/Windows/Fonts/cour.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+            Path("/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf"),
+        ],
+    )
+
+
+def _wrap_text(line: str, width: int = 118) -> list[str]:
+    if len(line) <= width:
+        return [line]
+    return [line[i : i + width] for i in range(0, len(line), width)]
 
 
 def _write_pdf(path: Path, text: str) -> None:
@@ -151,6 +175,7 @@ def _write_pdf(path: Path, text: str) -> None:
     from reportlab.pdfgen import canvas
 
     font_name = _font_name()
+    mono_font = _mono_font_name()
     c = canvas.Canvas(str(path), pagesize=A4)
     width, height = A4
     left = 48
@@ -182,11 +207,22 @@ def _write_pdf(path: Path, text: str) -> None:
             y -= line_height
             continue
         elif len(line) >= 7 and line[:5].strip().isdigit() and line[5:7] == ": ":
-            c.setFont(font_name, 6)
+            c.setFont(mono_font, 6)
             c.drawString(left, y, line)
         else:
             c.setFont(font_name, 9)
-            c.drawString(left, y, line)
+            chunks = _wrap_text(line)
+            for idx, chunk in enumerate(chunks):
+                if idx:
+                    y -= line_height
+                    if y < 48:
+                        c.setFont(font_name, 8)
+                        c.drawRightString(width - 48, 24, str(page))
+                        c.showPage()
+                        page += 1
+                        y = top
+                    c.setFont(font_name, 9)
+                c.drawString(left, y, chunk)
         y -= line_height
     c.setFont(font_name, 8)
     c.drawRightString(width - 48, 24, str(page))

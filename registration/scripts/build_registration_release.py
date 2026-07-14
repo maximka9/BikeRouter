@@ -36,8 +36,8 @@ def _manifest_files() -> list[Path]:
     return files
 
 
-def _write_manifest_csv(files: list[Path]) -> Path:
-    path = OUT_DIR / "04_source_manifest.csv"
+def _write_manifest_csv(files: list[Path], filename: str) -> Path:
+    path = OUT_DIR / filename
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(["path", "bytes", "sha256"])
@@ -53,7 +53,7 @@ def _write_manifest_csv(files: list[Path]) -> Path:
 
 
 def _write_checksums(files: list[Path], archive: Path | None = None) -> Path:
-    path = OUT_DIR / "05_checksums.txt"
+    path = OUT_DIR / "06_checksums.txt"
     rows = []
     for item in files:
         rows.append(f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {relative_path(item)}")
@@ -62,7 +62,8 @@ def _write_checksums(files: list[Path], archive: Path | None = None) -> Path:
         OUT_DIR / "02_deposit.pdf",
         OUT_DIR / "02_deposit_backup.pdf",
         OUT_DIR / "03_program_size.json",
-        OUT_DIR / "04_source_manifest.csv",
+        OUT_DIR / "04_program_source_manifest.csv",
+        OUT_DIR / "05_archive_manifest.csv",
     ]
     for item in private_docs:
         if item.is_file():
@@ -97,7 +98,9 @@ def main() -> int:
     )
     archive = OUT_DIR / ZIP_NAME
     files = _manifest_files()
-    _write_manifest_csv(files)
+    program_files = selected_files(for_archive=False)
+    _write_manifest_csv(program_files, "04_program_source_manifest.csv")
+    _write_manifest_csv(files, "05_archive_manifest.csv")
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for path in files:
             zf.write(path, relative_path(path))

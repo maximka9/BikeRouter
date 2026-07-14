@@ -193,7 +193,7 @@ python -m bike_router
 
 Откройте http://127.0.0.1:8000/ — интерфейс. OpenAPI: http://127.0.0.1:8000/docs  
 
-Переменные **`BIKE_ROUTER_HOST`** и **`BIKE_ROUTER_PORT`** задают bind для `python -m bike_router` (по умолчанию **`0.0.0.0:8000`**, чтобы зайти с телефона в той же сети: `http://<IPv4 из ipconfig>:8000`). Только localhost: `BIKE_ROUTER_HOST=127.0.0.1`.
+Переменные **`BIKE_ROUTER_HOST`** и **`BIKE_ROUTER_PORT`** задают bind для `python -m bike_router`. По умолчанию локальный запуск использует **`127.0.0.1:8000`**. Для доступа из локальной сети явно задайте **`BIKE_ROUTER_HOST=0.0.0.0`**.
 
 ### Windows: «зависает» `import osmnx` или `import pyogrio`
 

@@ -36,9 +36,6 @@ jobs:
       - name: Targeted mypy
         run: python -m mypy bike_router/api.py bike_router/models.py bike_router/config.py registration/scripts
 
-      - name: Pytest
-        run: python -m pytest -q
-
       - name: Registration abstract
         run: |
           python -m registration.scripts.calculate_program_size
@@ -54,6 +51,18 @@ jobs:
         with:
           name: deposited-materials
           path: registration/private/02_deposit.pdf
+
+      - name: Pytest
+        run: |
+          set -o pipefail
+          python -m pytest -x -vv --tb=long 2>&1 | tee pytest.log
+
+      - name: Upload pytest log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log
+          path: pytest.log
 
   gitleaks:
     runs-on: ubuntu-latest

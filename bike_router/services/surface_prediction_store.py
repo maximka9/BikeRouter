@@ -141,6 +141,7 @@ class SurfacePredictionStore:
         self._failure_reason: Optional[str] = None
         self._artifact_graph_hash: str = ""
         self._ml_graph_ok: bool = True
+        self._has_explicit_undirected_keys: bool = False
         self._by_edge_id: Dict[str, SurfacePrediction] = {}
         self._by_undirected: Dict[str, SurfacePrediction] = {}
         self._by_way_geom: Dict[str, SurfacePrediction] = {}
@@ -148,6 +149,10 @@ class SurfacePredictionStore:
     @property
     def loaded(self) -> bool:
         return self._loaded
+
+    @property
+    def graph_ok(self) -> bool:
+        return self._ml_graph_ok
 
     @property
     def failure_reason(self) -> Optional[str]:
@@ -158,6 +163,7 @@ class SurfacePredictionStore:
         self._failure_reason = None
         self._artifact_graph_hash = ""
         self._ml_graph_ok = True
+        self._has_explicit_undirected_keys = False
         self._by_edge_id.clear()
         self._by_undirected.clear()
         self._by_way_geom.clear()
@@ -273,10 +279,19 @@ class SurfacePredictionStore:
             pred = self._row_to_prediction(row)
             eid = str(row["edge_id"]).strip()
             self._by_edge_id[eid] = pred
+            und_raw = row.get("undirected_edge_key")
+            if und_raw is not None and str(und_raw).strip():
+                self._has_explicit_undirected_keys = True
+                self._by_undirected[str(und_raw).strip()] = pred
             u = row.get("u")
             v = row.get("v")
             k = row.get("key", 0)
-            if u is not None and v is not None and str(u).strip() != "":
+            if (
+                not str(und_raw or "").strip()
+                and u is not None
+                and v is not None
+                and str(u).strip() != ""
+            ):
                 try:
                     uu, vv, kk = int(u), int(v), int(float(k))
                     uk = self._undirected_key(uu, vv, kk)
@@ -313,11 +328,57 @@ class SurfacePredictionStore:
         cur = compute_runtime_routing_graph_hash(edges_gdf)
         if cur == exp:
             return
+        overlap = (
+            self._count_undirected_key_overlap(edges_gdf, max_checks=10000)
+            if self._has_explicit_undirected_keys
+            else 0
+        )
+        if overlap > 0:
+            logger.warning(
+                "graph_fingerprint mismatch (artifact=%r current_graph=%r), "
+                "но найдено совпадений undirected_edge_key=%d — продолжаем ML-сопоставление",
+                exp,
+                cur,
+                overlap,
+            )
+            return
         self._ml_graph_ok = False
         msg = f"graph_fingerprint mismatch (artifact={exp!r} current_graph={cur!r})"
         if self._settings.surface_ai_runtime_strict:
             raise ValueError(msg)
         logger.warning("%s — ML-предсказания отключены для этого графа", msg)
+
+    def _count_undirected_key_overlap(self, edges_gdf: Any, *, max_checks: int) -> int:
+        if not self._by_undirected or edges_gdf is None:
+            return 0
+        try:
+            cols = getattr(edges_gdf, "columns", [])
+            idx = getattr(edges_gdf, "index", None)
+            names = list(getattr(idx, "names", []) or [])
+
+            def values(col: str) -> Any:
+                if col in cols:
+                    return edges_gdf[col].values
+                if idx is not None and col in names:
+                    return idx.get_level_values(col)
+                return []
+
+            us, vs, ks = values("u"), values("v"), values("key")
+            checked = 0
+            overlap = 0
+            for u, v, k in zip(us, vs, ks):
+                try:
+                    key = self._undirected_key(int(u), int(v), int(float(k)))
+                except Exception:
+                    continue
+                checked += 1
+                if key in self._by_undirected:
+                    overlap += 1
+                if checked >= max_checks:
+                    break
+            return overlap
+        except Exception:
+            return 0
 
     @staticmethod
     def _undirected_key(u: Any, v: Any, key: Any) -> str:

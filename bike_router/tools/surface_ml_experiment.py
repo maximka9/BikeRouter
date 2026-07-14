@@ -1,4 +1,4 @@
-"""CLI for the experimental OSM surface ML recovery module.
+﻿"""CLI for the experimental OSM surface ML recovery module.
 
 Run from the repository parent:
 
@@ -16,10 +16,6 @@ import os
 import sys
 
 
-def _ensure_pkg_path() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,7 +41,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    _ensure_pkg_path()
     from bike_router.config import Settings
     from bike_router.services.surface_ml import (
         SurfaceMLConfig,
@@ -80,4 +75,5 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+
 

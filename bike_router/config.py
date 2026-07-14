@@ -23,8 +23,9 @@ try:
     from dotenv import load_dotenv
 
     _PACKAGE_DIR = Path(__file__).resolve().parent
-    _PROJECT_ENV = _PACKAGE_DIR / ".env"
-    _LOCAL_ENV = _PACKAGE_DIR / ".env.local"
+    _PROJECT_ROOT = _PACKAGE_DIR.parent
+    _PROJECT_ENV = _PROJECT_ROOT / ".env"
+    _LOCAL_ENV = _PROJECT_ROOT / ".env.local"
     # Проектный .env с override=True: иначе BIKE_ROUTER_BASE_DIR из переменных
     # Windows перебивает репозиторий. Локальный override — только .env.local.
     load_dotenv(_PROJECT_ENV, override=True)

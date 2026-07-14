@@ -1,4 +1,4 @@
-"""CLI for final experimental AI recovery of concrete OSM surface values.
+﻿"""CLI for final experimental AI recovery of concrete OSM surface values.
 
 Example:
 
@@ -14,10 +14,6 @@ import sys
 from pathlib import Path
 
 
-def _ensure_pkg_path() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -110,7 +106,6 @@ def _override_config(config, args):
 
 
 def main(argv: list[str] | None = None) -> None:
-    _ensure_pkg_path()
     from bike_router.config import Settings
     from bike_router.services.surface_ai import (
         SurfaceAIConfig,
@@ -137,3 +132,4 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -1,0 +1,280 @@
+{
+  "version": "3.0.0",
+  "commit": "a213dc81289498ad169a7c3ef04c0386e17ec889",
+  "file_count": 68,
+  "total_bytes": 1318120,
+  "files": [
+    {
+      "path": "bike_router/__about__.py",
+      "bytes": 553
+    },
+    {
+      "path": "bike_router/__init__.py",
+      "bytes": 1342
+    },
+    {
+      "path": "bike_router/__main__.py",
+      "bytes": 901
+    },
+    {
+      "path": "bike_router/api.py",
+      "bytes": 32881
+    },
+    {
+      "path": "bike_router/app.py",
+      "bytes": 3282
+    },
+    {
+      "path": "bike_router/config.py",
+      "bytes": 33380
+    },
+    {
+      "path": "bike_router/engine.py",
+      "bytes": 116506
+    },
+    {
+      "path": "bike_router/exceptions.py",
+      "bytes": 3647
+    },
+    {
+      "path": "bike_router/frontend/about.css",
+      "bytes": 2725
+    },
+    {
+      "path": "bike_router/frontend/about.html",
+      "bytes": 12429
+    },
+    {
+      "path": "bike_router/frontend/app.js",
+      "bytes": 81238
+    },
+    {
+      "path": "bike_router/frontend/index.html",
+      "bytes": 10256
+    },
+    {
+      "path": "bike_router/frontend/style.css",
+      "bytes": 45348
+    },
+    {
+      "path": "bike_router/job_status.py",
+      "bytes": 464
+    },
+    {
+      "path": "bike_router/logutil.py",
+      "bytes": 751
+    },
+    {
+      "path": "bike_router/metrics.py",
+      "bytes": 2897
+    },
+    {
+      "path": "bike_router/middleware/__init__.py",
+      "bytes": 126
+    },
+    {
+      "path": "bike_router/middleware/request_log.py",
+      "bytes": 1332
+    },
+    {
+      "path": "bike_router/models.py",
+      "bytes": 35759
+    },
+    {
+      "path": "bike_router/policies/heat_season.json",
+      "bytes": 422
+    },
+    {
+      "path": "bike_router/policies/stress_policy.json",
+      "bytes": 1290
+    },
+    {
+      "path": "bike_router/policies/weather_policy.json",
+      "bytes": 1566
+    },
+    {
+      "path": "bike_router/services/__init__.py",
+      "bytes": 57
+    },
+    {
+      "path": "bike_router/services/alternatives_jobs.py",
+      "bytes": 3816
+    },
+    {
+      "path": "bike_router/services/area_graph_cache.py",
+      "bytes": 33368
+    },
+    {
+      "path": "bike_router/services/cache.py",
+      "bytes": 4268
+    },
+    {
+      "path": "bike_router/services/corridor_graph_cache.py",
+      "bytes": 5835
+    },
+    {
+      "path": "bike_router/services/elevation.py",
+      "bytes": 4244
+    },
+    {
+      "path": "bike_router/services/geocoding.py",
+      "bytes": 13963
+    },
+    {
+      "path": "bike_router/services/graph.py",
+      "bytes": 35987
+    },
+    {
+      "path": "bike_router/services/green.py",
+      "bytes": 39260
+    },
+    {
+      "path": "bike_router/services/heat.py",
+      "bytes": 13194
+    },
+    {
+      "path": "bike_router/services/policy_data.py",
+      "bytes": 1148
+    },
+    {
+      "path": "bike_router/services/retry.py",
+      "bytes": 3424
+    },
+    {
+      "path": "bike_router/services/route_cache.py",
+      "bytes": 4589
+    },
+    {
+      "path": "bike_router/services/routing.py",
+      "bytes": 75709
+    },
+    {
+      "path": "bike_router/services/routing_criteria.py",
+      "bytes": 19610
+    },
+    {
+      "path": "bike_router/services/seasonal.py",
+      "bytes": 12723
+    },
+    {
+      "path": "bike_router/services/seasonal_params.py",
+      "bytes": 3773
+    },
+    {
+      "path": "bike_router/services/stress.py",
+      "bytes": 8366
+    },
+    {
+      "path": "bike_router/services/surface_ai.py",
+      "bytes": 231195
+    },
+    {
+      "path": "bike_router/services/surface_ai_mp.py",
+      "bytes": 9753
+    },
+    {
+      "path": "bike_router/services/surface_ml.py",
+      "bytes": 57270
+    },
+    {
+      "path": "bike_router/services/surface_prediction_store.py",
+      "bytes": 18700
+    },
+    {
+      "path": "bike_router/services/surface_resolve.py",
+      "bytes": 14970
+    },
+    {
+      "path": "bike_router/services/surface_runtime_constants.py",
+      "bytes": 693
+    },
+    {
+      "path": "bike_router/services/tiles.py",
+      "bytes": 11094
+    },
+    {
+      "path": "bike_router/services/weather.py",
+      "bytes": 50134
+    },
+    {
+      "path": "bike_router/services/weather_params.py",
+      "bytes": 4114
+    },
+    {
+      "path": "bike_router/tools/__init__.py",
+      "bytes": 55
+    },
+    {
+      "path": "bike_router/tools/_batch_experiment_mp.py",
+      "bytes": 14993
+    },
+    {
+      "path": "bike_router/tools/_experiment_common.py",
+      "bytes": 127339
+    },
+    {
+      "path": "bike_router/tools/_heat_mp_worker.py",
+      "bytes": 380
+    },
+    {
+      "path": "bike_router/tools/_parallel_utils.py",
+      "bytes": 2284
+    },
+    {
+      "path": "bike_router/tools/_run_variants_weather_batch.py",
+      "bytes": 29662
+    },
+    {
+      "path": "bike_router/tools/heat_stress_experiment.py",
+      "bytes": 2134
+    },
+    {
+      "path": "bike_router/tools/heat_weather_experiment.py",
+      "bytes": 20189
+    },
+    {
+      "path": "bike_router/tools/precache_area.py",
+      "bytes": 2770
+    },
+    {
+      "path": "bike_router/tools/precache_status.py",
+      "bytes": 4905
+    },
+    {
+      "path": "bike_router/tools/prewarm_scenarios.py",
+      "bytes": 3397
+    },
+    {
+      "path": "bike_router/tools/route_batch_experiment.py",
+      "bytes": 7752
+    },
+    {
+      "path": "bike_router/tools/route_scenarios.json",
+      "bytes": 6160
+    },
+    {
+      "path": "bike_router/tools/route_variants_experiment.py",
+      "bytes": 4278
+    },
+    {
+      "path": "bike_router/tools/run_route_scenarios.py",
+      "bytes": 5216
+    },
+    {
+      "path": "bike_router/tools/surface_ai_experiment.py",
+      "bytes": 4969
+    },
+    {
+      "path": "bike_router/tools/surface_ml_experiment.py",
+      "bytes": 2502
+    },
+    {
+      "path": "bike_router/tools/surface_runtime_route_experiment.py",
+      "bytes": 5798
+    },
+    {
+      "path": "bike_router/tools/weather_scenarios_experiment.py",
+      "bytes": 2985
+    }
+  ]
+}

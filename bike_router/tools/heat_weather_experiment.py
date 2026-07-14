@@ -1,4 +1,4 @@
-"""Только маршрут ``heat`` на synthetic-сетке погоды (fixed-snapshot, без Open-Meteo).
+﻿"""Только маршрут ``heat`` на synthetic-сетке погоды (fixed-snapshot, без Open-Meteo).
 
 Выход: ``bike_router/experiment_outputs/heat_weather_experiment_YYYYMMDD_HHMMSS.xlsx`` (UTC в имени).
 
@@ -49,10 +49,6 @@ from typing import Any, Dict, List, Optional, Tuple
 _log = logging.getLogger(__name__)
 
 
-def _ensure_pkg_path() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
 
 def run_heat_weather_experiment(
@@ -67,7 +63,6 @@ def run_heat_weather_experiment(
     chunk_size: int = 1,
     mp_weather_chunk_size: int = 25,
 ) -> str:
-    _ensure_pkg_path()
 
     import gc
     from multiprocessing import Pool
@@ -522,3 +517,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

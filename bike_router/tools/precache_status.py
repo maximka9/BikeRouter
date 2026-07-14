@@ -1,4 +1,4 @@
-"""Диагностика каталога area_precache для текущего .env.
+﻿"""Диагностика каталога area_precache для текущего .env.
 
 Движок ищет ``meta.json`` только в **одном** каталоге:
 ``cache/area_precache/<sha256>/``, где хэш зависит от WKT арены, имени и
@@ -22,14 +22,9 @@ import sys
 from pathlib import Path
 
 
-def _ensure_pkg_path() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
 
 def main() -> None:
-    _ensure_pkg_path()
     from bike_router.config import Settings
     from bike_router.services.area_graph_cache import (
         area_green_edges_bundle_is_valid,
@@ -126,3 +121,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

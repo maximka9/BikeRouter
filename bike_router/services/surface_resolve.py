@@ -138,7 +138,20 @@ def build_surface_effective_column(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFr
     return gdf
 
 
+def _ensure_edge_key_columns(gdf: gpd.GeoDataFrame) -> None:
+    if all(c in gdf.columns for c in ("u", "v", "key")):
+        return
+    idx = gdf.index
+    if not isinstance(idx, pd.MultiIndex):
+        return
+    names = list(idx.names or [])
+    for col in ("u", "v", "key"):
+        if col not in gdf.columns and col in names:
+            gdf[col] = idx.get_level_values(col)
+
+
 def _ensure_edge_id_column(gdf: gpd.GeoDataFrame) -> None:
+    _ensure_edge_key_columns(gdf)
     if "edge_id" in gdf.columns and gdf["edge_id"].astype(str).str.len().gt(0).any():
         return
     if not all(c in gdf.columns for c in ("u", "v", "key")):
@@ -231,6 +244,7 @@ def apply_surface_resolution(
         and bool(s.surface_ai_runtime_enabled)
         and prediction_store is not None
         and prediction_store.loaded
+        and bool(getattr(prediction_store, "graph_ok", True))
     )
     if s is not None and bool(s.surface_ai_runtime_enabled):
         if use_ml:

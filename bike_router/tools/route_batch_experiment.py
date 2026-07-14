@@ -1,4 +1,4 @@
-"""Комбинированный батч: 6 вариантов маршрута и synthetic-сетка погоды (как heat_weather).
+﻿"""Комбинированный батч: 6 вариантов маршрута и synthetic-сетка погоды (как heat_weather).
 
 Один Excel: направленные пары A->B и B->A, ``compute_alternatives`` один раз на
 (пара, профиль, погодный кейс). Параллель по умолчанию: авто (4–6 воркеров, не больше числа задач), чанк погоды 25,
@@ -24,10 +24,6 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-def _ensure_pkg_path() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
 
 def _route_batch_output_xlsx_suffix(
@@ -53,7 +49,6 @@ def _route_batch_output_xlsx_suffix(
 
 def _surface_ai_runtime_filename_marker() -> str:
     """Маркер для имени Excel: только если runtime ML включён в настройках."""
-    _ensure_pkg_path()
     from bike_router.config import Settings
 
     settings = Settings()
@@ -88,7 +83,6 @@ def run_combined_route_batch_experiment(
     log_every: int,
     directed_pairs: bool,
 ) -> str:
-    _ensure_pkg_path()
     from bike_router.tools._experiment_common import (
         mp_resolve_pool_workers,
         weather_summer_heat_grid,
@@ -139,7 +133,6 @@ def run_combined_route_batch_experiment(
 
 
 def main() -> None:
-    _ensure_pkg_path()
     from bike_router.tools._experiment_common import DEFAULT_BATCH_LOG_EVERY
 
     parser = argparse.ArgumentParser(
@@ -191,7 +184,6 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.surface_ai_runtime is not None:
-        _ensure_pkg_path()
         from bike_router.tools.surface_runtime_route_experiment import run_modes
 
         modes = "off,on" if args.surface_ai_runtime == "both" else str(args.surface_ai_runtime)
@@ -221,3 +213,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

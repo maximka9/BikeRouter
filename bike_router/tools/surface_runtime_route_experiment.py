@@ -1,4 +1,4 @@
-"""Сравнение маршрутов с SURFACE_AI_RUNTIME off vs on.
+﻿"""Сравнение маршрутов с SURFACE_AI_RUNTIME off vs on.
 
 Примеры::
 
@@ -16,10 +16,6 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 
-def _ensure_pkg_path() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
 
 def _route_surface_shares(surfaces: Dict[str, int]) -> Dict[str, float]:
@@ -58,7 +54,6 @@ def run_modes_for_pair(
     profile: str = "cyclist",
     mode: str = "full",
 ) -> List[Dict[str, Any]]:
-    _ensure_pkg_path()
     from bike_router.app import Application
     from bike_router.config import Settings
     from bike_router.engine import RouteEngine
@@ -113,7 +108,6 @@ def _compare_off_on(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def run_modes(modes_csv: str) -> List[Dict[str, Any]]:
     """Одна пара START/END из Settings — плоский список по режимам (совместимость с route_batch_experiment)."""
-    _ensure_pkg_path()
     from bike_router.config import Settings
 
     s = Settings()
@@ -142,7 +136,6 @@ def run_modes_multi_pairs(
 
 
 def main() -> None:
-    _ensure_pkg_path()
     parser = argparse.ArgumentParser(
         description="Сравнение маршрута(ов) с ML runtime off vs on.",
     )
@@ -174,3 +167,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

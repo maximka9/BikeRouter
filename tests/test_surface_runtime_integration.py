@@ -362,6 +362,49 @@ def test_graph_fingerprint_mismatch_disables_ml(tmp_path, monkeypatch) -> None:
     assert out["surface_source"].iloc[0] != "ml"
 
 
+def test_runtime_matches_graph_multiindex_by_undirected_key_despite_legacy_hash(
+    tmp_path, monkeypatch
+) -> None:
+    csv_path = tmp_path / "p.csv"
+    row = {
+        "edge_id": "1_2_0_9",
+        "uvkey": "1_2_0",
+        "undirected_edge_key": "1_2_0",
+        "osm_way_id": "",
+        "geometry_hash_rounded": "",
+        "surface_pred_group": "paved_rough",
+        "surface_pred_concrete": "",
+        "surface_pred_confidence": 0.9,
+        "surface_pred_margin": 0.4,
+        "surface_ml_safe": "true",
+        "surface_ml_reject_reason": "",
+        "surface_effective_ml": "",
+        "model_key": "test",
+        "model_target": "group_direct",
+        "artifact_created_at": "2026-01-01",
+        "artifact_schema_version": "1",
+        "area_fingerprint": "",
+        "graph_fingerprint": "legacy_edge_id_hash",
+    }
+    pd.DataFrame([row]).to_csv(csv_path, index=False)
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_PREDICTIONS_PATH", str(csv_path))
+    monkeypatch.setenv("SURFACE_AI_RUNTIME_STRICT", "false")
+
+    s = Settings()
+    store = SurfacePredictionStore(s)
+    store.load()
+    gdf = _minimal_edges_gdf().drop(columns=["u", "v", "key", "edge_id"])
+    gdf.index = pd.MultiIndex.from_tuples(
+        [(1, 2, 0)],
+        names=("u", "v", "key"),
+    )
+    out, stats = apply_surface_resolution(gdf, prediction_store=store, settings=s)
+
+    assert out["surface_source"].iloc[0] == "ml"
+    assert stats.surface_source_ml_count == 1
+
+
 def test_parse_runtime_json_graph_fingerprint() -> None:
     blob = json.dumps({"predict": {"graph_hash": "abc123def4567890"}, "train": {}})
     assert parse_runtime_artifact_graph_hash(blob) == "abc123def4567890"

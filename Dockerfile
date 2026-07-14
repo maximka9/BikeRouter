@@ -7,7 +7,6 @@ FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
     BIKE_ROUTER_BASE_DIR=/data
 
 WORKDIR /app
@@ -18,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-COPY . /app/bike_router
+COPY . /app
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

@@ -1,4 +1,5 @@
 # Secrets
+.env
 .env.local
 *.pem
 
@@ -22,6 +23,12 @@ experiment_outputs/
 .cache/
 # Локальный bind mount Docker (./data → /data), OSM/тайлы/area_precache
 data/
+
+# Registration build outputs
+registration/private/
+registration/out/
+registration/*.zip
+registration/*.sha256
 
 # IDE
 .idea/

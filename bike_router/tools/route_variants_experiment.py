@@ -1,4 +1,4 @@
-"""Сравнение шести вариантов маршрута при текущей погоде (один снимок Open-Meteo).
+﻿"""Сравнение шести вариантов маршрута при текущей погоде (один снимок Open-Meteo).
 
 Один запрос погоды в центре полигона на момент запуска. Выход:
 ``bike_router/experiment_outputs/route_variants_experiment_YYYYMMDD_HHMMSS.xlsx`` (UTC в имени).
@@ -22,10 +22,6 @@ from typing import Any, Dict
 _log = logging.getLogger(__name__)
 
 
-def _ensure_pkg_path() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
 
 def run_variants_experiment(
@@ -35,7 +31,6 @@ def run_variants_experiment(
     verbose: bool,
     log_every: int,
 ) -> str:
-    _ensure_pkg_path()
 
     from bike_router.config import Settings
     from bike_router.services.area_graph_cache import parse_precache_polygon
@@ -135,3 +130,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

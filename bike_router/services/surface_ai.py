@@ -4981,15 +4981,14 @@ def run_surface_ai_experiment(
     write_predictions_csv(predictions_inside, artifacts.predictions_inside_polygon_csv)
     if save_heavy_artifacts(config):
         write_predictions_geojson(predictions_inside, predict_edges, artifacts.predictions_inside_polygon_geojson)
-    if save_heavy_artifacts(config):
-        write_runtime_router_predictions_from_experiment(
-            predictions_inside,
-            predict_edges,
-            settings=settings,
-            group_selected=group_selected,
-            artifacts=artifacts,
-            precache_polygon=precache_polygon,
-        )
+    write_runtime_router_predictions_from_experiment(
+        predictions_inside,
+        predict_edges,
+        settings=settings,
+        group_selected=group_selected,
+        artifacts=artifacts,
+        precache_polygon=precache_polygon,
+    )
     write_baseline_tables(baseline_table, artifacts)
 
     tile_coverage = (

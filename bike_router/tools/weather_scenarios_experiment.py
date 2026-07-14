@@ -1,4 +1,4 @@
-"""Сравнение маршрутов при разных погодных сценариях (ручной режим).
+﻿"""Сравнение маршрутов при разных погодных сценариях (ручной режим).
 
 Запуск::
 
@@ -15,14 +15,9 @@ import sys
 from typing import Any, Dict, List, Tuple
 
 
-def _ensure_pkg_path() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
 
 def main() -> None:
-    _ensure_pkg_path()
     from bike_router.engine import RouteEngine
     from bike_router.config import Settings
 
@@ -82,3 +77,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

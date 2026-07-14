@@ -798,7 +798,10 @@ class GraphBuilder:
         G: nx.MultiDiGraph, edges_gdf: gpd.GeoDataFrame
     ) -> nx.MultiDiGraph:
         """Перенести рассчитанные веса обратно в граф."""
-        edges_gdf = edges_gdf.reset_index()
+        if all(c in edges_gdf.columns for c in ("u", "v", "key")):
+            edges_gdf = edges_gdf.reset_index(drop=True)
+        else:
+            edges_gdf = edges_gdf.reset_index()
 
         base_cols = [
             "elevation_diff",

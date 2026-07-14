@@ -60,7 +60,7 @@ class SmokeTests(unittest.TestCase):
 
         import bike_router.config as cfg
 
-        # reload(config) снова вызывает load_dotenv(override=True) — без мока подтянется bike_router/.env.
+        # reload(config) снова вызывает load_dotenv(override=True) — без мока подтянется .env.
         with patch("dotenv.load_dotenv"):
             with patch.dict(
                 os.environ,

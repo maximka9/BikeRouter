@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """CLI: предсборка area_precache (OSM + веса + опционально зелень) по PRECACHE_AREA_POLYGON_WKT.
 
 Запуск из каталога с настроенным ``BIKE_ROUTER_BASE_DIR`` / ``.env``::
@@ -20,10 +20,6 @@ import logging
 import sys
 from pathlib import Path
 
-# Пакет при запуске как скрипт
-_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,3 +67,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

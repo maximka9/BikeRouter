@@ -82,17 +82,6 @@ class ElevationService:
         length_m: float,
         step_m: float = 30.0,
     ) -> Tuple[float, float, float, list]:
-        """Высотный анализ вдоль геометрии ребра с интерполяцией.
-
-        Для рёбер длиннее ``step_m`` промежуточные точки ставятся
-        каждые ~``step_m`` метров, что позволяет учесть холмы и впадины
-        внутри длинных сегментов (разрешение SRTM ≈ 30 м).
-
-        Returns:
-            ``(net_diff, climb, descent, elevations)`` — чистый перепад,
-            суммарный набор, суммарный спуск (метры) и список высот
-            в равноотстоящих точках вдоль ребра.
-        """
         coords = list(geometry.coords)
 
         if length_m <= step_m * 1.5 or len(coords) < 2:

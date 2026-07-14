@@ -1,4 +1,4 @@
-"""Общие функции пакетных экспериментов маршрутов (Excel, точки, сводки).
+﻿"""Общие функции пакетных экспериментов маршрутов (Excel, точки, сводки).
 
 Используется ``route_variants_experiment``, ``heat_weather_experiment``, ``route_batch_experiment``
 и ``run_variants_over_weather_cases`` (см. ``_run_variants_weather_batch``).
@@ -1198,10 +1198,6 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
     return out
 
 
-def _ensure_pkg_path() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -3229,3 +3225,4 @@ def run_variants_over_weather_cases(*args: Any, **kwargs: Any) -> str:
     )
 
     return _run_impl(*args, **kwargs)
+

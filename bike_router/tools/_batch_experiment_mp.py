@@ -6,17 +6,17 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
-_POINTS: List[Tuple[float, float]] = ()
-_CORRIDOR: Tuple[float, ...] = (10.0, 100.0)
+_POINTS: list[tuple[float, float]] = ()
+_CORRIDOR: tuple[float, ...] = (10.0, 100.0)
 _ENGINE: Any = None
 _INCLUDE_SURFACE_ML_REPORT = False
 
 
 def init_worker(
-    points: List[Tuple[float, float]],
-    corridor: Tuple[float, ...],
+    points: list[tuple[float, float]],
+    corridor: tuple[float, ...],
     include_surface_ml_report: bool = False,
 ) -> None:
     global _POINTS, _CORRIDOR, _ENGINE, _INCLUDE_SURFACE_ML_REPORT
@@ -38,16 +38,16 @@ def init_worker(
 
 
 def run_heat_weather_chunk_task(
-    packed: Tuple[str, int, int, int, str, List[Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int]:
+    packed: tuple[str, int, int, int, str, list[Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int, int]:
     """experiment_id, seed, i, j, prof, grid_chunk → rows (route_id=0), failures, ok, fail, skip."""
     experiment_id, seed, i, j, prof, grid_chunk = packed
     from bike_router.exceptions import BikeRouterError, RouteNotFoundError
     from bike_router.tools._experiment_common import (
         SYNTHETIC_TEST_WEATHER_ISO,
+        _point_id_fmt,
         kwargs_fixed_snapshot_from_case,
         route_to_raw_row,
-        _point_id_fmt,
     )
 
     if _ENGINE is None:
@@ -57,8 +57,8 @@ def run_heat_weather_chunk_task(
     d_lat, d_lon = _POINTS[j]
     start = (o_lat, o_lon)
     end = (d_lat, d_lon)
-    raw_rows: List[Dict[str, Any]] = []
-    failures: List[Dict[str, Any]] = []
+    raw_rows: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     n_ok = n_fail = n_skip = 0
     corr = _CORRIDOR
 
@@ -76,15 +76,9 @@ def run_heat_weather_chunk_task(
             "weather_test_cloud_cover_pct": syn_case.cloud_cover_pct,
             "weather_test_humidity_pct": syn_case.humidity_pct,
             "weather_test_shortwave_radiation_wm2": syn_case.shortwave_radiation_wm2,
-            "weather_test_wind_direction_deg": getattr(
-                syn_case, "wind_direction_deg", None
-            ),
-            "weather_test_snowfall_cm_h": float(
-                getattr(syn_case, "snowfall_cm_h", 0.0) or 0.0
-            ),
-            "weather_test_snow_depth_m": float(
-                getattr(syn_case, "snow_depth_m", 0.0) or 0.0
-            ),
+            "weather_test_wind_direction_deg": getattr(syn_case, "wind_direction_deg", None),
+            "weather_test_snowfall_cm_h": float(getattr(syn_case, "snowfall_cm_h", 0.0) or 0.0),
+            "weather_test_snow_depth_m": float(getattr(syn_case, "snow_depth_m", 0.0) or 0.0),
             "weather_test_weather_code": getattr(syn_case, "weather_code", None),
             "weather_test_time_iso": getattr(
                 syn_case, "weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO
@@ -158,18 +152,18 @@ def run_heat_weather_chunk_task(
 
 
 def run_variants_weather_chunk_task(
-    packed: Tuple[str, int, int, int, str, List[Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int]:
+    packed: tuple[str, int, int, int, str, list[Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int, int]:
     """O-D × профиль × чанк synthetic: один ``compute_alternatives`` на кейс → до 6 строк."""
     experiment_id, seed, i, j, prof, grid_chunk = packed
     from bike_router.exceptions import BikeRouterError, RouteNotFoundError
     from bike_router.tools._experiment_common import (
         EXPECTED_VARIANTS,
         SYNTHETIC_TEST_WEATHER_ISO,
+        _point_id_fmt,
         call_with_route_surface_source_report,
         kwargs_fixed_snapshot_from_case,
         route_to_raw_row,
-        _point_id_fmt,
     )
 
     if _ENGINE is None:
@@ -179,8 +173,8 @@ def run_variants_weather_chunk_task(
     d_lat, d_lon = _POINTS[j]
     start = (o_lat, o_lon)
     end = (d_lat, d_lon)
-    raw_rows: List[Dict[str, Any]] = []
-    failures: List[Dict[str, Any]] = []
+    raw_rows: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     n_ok = n_fail = n_skip = 0
     corr = _CORRIDOR
 
@@ -200,15 +194,9 @@ def run_variants_weather_chunk_task(
             "weather_test_cloud_cover_pct": syn_case.cloud_cover_pct,
             "weather_test_humidity_pct": syn_case.humidity_pct,
             "weather_test_shortwave_radiation_wm2": syn_case.shortwave_radiation_wm2,
-            "weather_test_wind_direction_deg": getattr(
-                syn_case, "wind_direction_deg", None
-            ),
-            "weather_test_snowfall_cm_h": float(
-                getattr(syn_case, "snowfall_cm_h", 0.0) or 0.0
-            ),
-            "weather_test_snow_depth_m": float(
-                getattr(syn_case, "snow_depth_m", 0.0) or 0.0
-            ),
+            "weather_test_wind_direction_deg": getattr(syn_case, "wind_direction_deg", None),
+            "weather_test_snowfall_cm_h": float(getattr(syn_case, "snowfall_cm_h", 0.0) or 0.0),
+            "weather_test_snow_depth_m": float(getattr(syn_case, "snow_depth_m", 0.0) or 0.0),
             "weather_test_weather_code": getattr(syn_case, "weather_code", None),
             "weather_test_time_iso": getattr(
                 syn_case, "weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO
@@ -296,16 +284,16 @@ def run_variants_weather_chunk_task(
 
 
 def run_variants_fixed_weather_od_task(
-    packed: Tuple[str, int, int, int, str, Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int]:
+    packed: tuple[str, int, int, int, str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int, int]:
     """Один снимок погоды: задача (experiment_id, seed, i, j, prof, fixed_kw) → до 6 строк."""
     experiment_id, seed, i, j, prof, fixed_kw = packed
     from bike_router.exceptions import BikeRouterError, RouteNotFoundError
     from bike_router.tools._experiment_common import (
         EXPECTED_VARIANTS,
+        _point_id_fmt,
         call_with_route_surface_source_report,
         route_to_raw_row,
-        _point_id_fmt,
     )
 
     if _ENGINE is None:
@@ -315,8 +303,8 @@ def run_variants_fixed_weather_od_task(
     d_lat, d_lon = _POINTS[j]
     start = (o_lat, o_lon)
     end = (d_lat, d_lon)
-    raw_rows: List[Dict[str, Any]] = []
-    failures: List[Dict[str, Any]] = []
+    raw_rows: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     n_ok = n_fail = n_skip = 0
     corr = _CORRIDOR
     fk = dict(fixed_kw)

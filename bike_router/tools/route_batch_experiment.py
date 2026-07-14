@@ -1,4 +1,4 @@
-﻿"""Комбинированный батч: 6 вариантов маршрута и synthetic-сетка погоды (как heat_weather).
+"""Комбинированный батч: 6 вариантов маршрута и synthetic-сетка погоды (как heat_weather).
 
 Один Excel: направленные пары A->B и B->A, ``compute_alternatives`` один раз на
 (пара, профиль, погодный кейс). Параллель по умолчанию: авто (4–6 воркеров, не больше числа задач), чанк погоды 25,
@@ -18,12 +18,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-import sys
 
 logger = logging.getLogger(__name__)
-
-
 
 
 def _route_batch_output_xlsx_suffix(
@@ -136,9 +132,7 @@ def main() -> None:
     from bike_router.tools._experiment_common import DEFAULT_BATCH_LOG_EVERY
 
     parser = argparse.ArgumentParser(
-        description=(
-            "Один Excel: 6 вариантов, synthetic-сетка погоды, направленные O-D, профили."
-        ),
+        description=("Один Excel: 6 вариантов, synthetic-сетка погоды, направленные O-D, профили."),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Сетки: summer=95, winter=135, all=лето+зима (230). По умолчанию пары направленные A→B и B→A; "
@@ -213,4 +207,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

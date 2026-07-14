@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 from ..config import STRESS_COST_SCALE
 from .policy_data import load_stress_policy
@@ -54,7 +54,7 @@ def _parse_maxspeed_kmh(val: Any) -> float:
     return 30.0
 
 
-def _has_protected_bike(tags: Dict[str, Any]) -> bool:
+def _has_protected_bike(tags: dict[str, Any]) -> bool:
     for k in (
         "cycleway",
         "cycleway:left",
@@ -75,7 +75,7 @@ def _has_protected_bike(tags: Dict[str, Any]) -> bool:
     return False
 
 
-def _has_sidewalk(tags: Dict[str, Any]) -> bool:
+def _has_sidewalk(tags: dict[str, Any]) -> bool:
     for k in ("sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:right"):
         v = tags.get(k)
         if v is None:
@@ -86,7 +86,7 @@ def _has_sidewalk(tags: Dict[str, Any]) -> bool:
     return False
 
 
-def _policy_hw_base(hw: str, policy: Dict[str, Any]) -> float:
+def _policy_hw_base(hw: str, policy: dict[str, Any]) -> float:
     h = (hw or "unclassified").lower()
     table = policy.get("highway_base") or {}
     if isinstance(table, dict) and h in table:
@@ -96,7 +96,7 @@ def _policy_hw_base(hw: str, policy: Dict[str, Any]) -> float:
     return 2.0
 
 
-def _policy_speed_penalty(ms: float, policy: Dict[str, Any]) -> float:
+def _policy_speed_penalty(ms: float, policy: dict[str, Any]) -> float:
     rows = policy.get("speed_penalty_kmh")
     if not isinstance(rows, list):
         return 0.0
@@ -111,8 +111,8 @@ def _policy_speed_penalty(ms: float, policy: Dict[str, Any]) -> float:
 
 
 def lts_from_osm_tags(
-    tags: Dict[str, Any],
-    policy: Optional[Dict[str, Any]] = None,
+    tags: dict[str, Any],
+    policy: dict[str, Any] | None = None,
 ) -> float:
     """Уровень стресса сегмента 1..4 (конфигурируется stress_policy.json)."""
     pol = policy if policy is not None else load_stress_policy()
@@ -171,8 +171,8 @@ def lts_from_osm_tags(
 
 
 def intersection_stress_score(
-    tags: Dict[str, Any],
-    policy: Optional[Dict[str, Any]] = None,
+    tags: dict[str, Any],
+    policy: dict[str, Any] | None = None,
 ) -> float:
     """Относительный стресс пересечения/узла [0..1]."""
     pol = policy if policy is not None else load_stress_policy()
@@ -199,10 +199,10 @@ def stress_costs_for_edge(
     length_m: float,
     lts: float,
     intersection_score: float,
-    policy: Optional[Dict[str, Any]] = None,
+    policy: dict[str, Any] | None = None,
     *,
     scale: float = STRESS_COST_SCALE,
-) -> Tuple[float, float, float]:
+) -> tuple[float, float, float]:
     """Сегментный стресс, надбавка за пересечение, сумма."""
     pol = policy if policy is not None else load_stress_policy()
     int_scale = float(pol.get("intersection_cost_scale", 0.35)) if pol else 0.35
@@ -227,7 +227,7 @@ def stress_metrics_for_route(
     lts_values: list[float],
     *,
     high_threshold: float = 2.5,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     if not lengths:
         return {
             "avg_lts": 1.0,
@@ -238,9 +238,7 @@ def stress_metrics_for_route(
         }
     total_m = sum(lengths)
     tw = sum(l * lv for l, lv in zip(lengths, lts_values))
-    high_m = sum(
-        l for l, lv in zip(lengths, lts_values) if lv >= high_threshold
-    )
+    high_m = sum(l for l, lv in zip(lengths, lts_values) if lv >= high_threshold)
     costs = [stress_cost_for_edge(l, lv) for l, lv in zip(lengths, lts_values)]
     return {
         "avg_lts": float(tw / total_m) if total_m > 0 else 1.0,

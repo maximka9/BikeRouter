@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from typing import Any, Optional, Tuple
+from datetime import UTC, date, datetime
+from typing import Any
 
 __all__ = (
     "parse_route_calendar_date",
@@ -23,7 +23,7 @@ __all__ = (
 )
 
 
-def parse_route_calendar_date(reference_iso: Optional[str]) -> Optional[date]:
+def parse_route_calendar_date(reference_iso: str | None) -> date | None:
     """Дата календаря из ISO (для сезона и плавного включения зелени)."""
     if not reference_iso:
         return None
@@ -33,7 +33,7 @@ def parse_route_calendar_date(reference_iso: Optional[str]) -> Optional[date]:
     except ValueError:
         return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return dt.date()
 
 
@@ -90,12 +90,12 @@ def _green_mult_for_season_label(season: str, d: date, s: Any) -> float:
     )
 
 
-def resolve_season_routing_context(
-    d: date, snap: Any, s: Any
-) -> SeasonRoutingContext:
+def resolve_season_routing_context(d: date, snap: Any, s: Any) -> SeasonRoutingContext:
     """Календарь + опционально погодная коррекция (без истории температур — только снимок)."""
     cal = routing_season_label(d, s)
-    mode = str(getattr(s, "season_adaptive_mode", "calendar_only") or "calendar_only").strip().lower()
+    mode = (
+        str(getattr(s, "season_adaptive_mode", "calendar_only") or "calendar_only").strip().lower()
+    )
     eff = cal
     src = "calendar"
     green_mult = season_green_route_multiplier(d, s)
@@ -118,7 +118,9 @@ def resolve_season_routing_context(
     snow_on_green_d = float(getattr(s, "season_adaptive_snow_depth_on_green_m", 0.04))
     snow_on_green_f = float(getattr(s, "season_adaptive_fresh_on_green_cm_h", 0.45))
     cold_green = float(getattr(s, "season_adaptive_cold_on_green_c", 1.5))
-    if cal == "green_season" and (sd >= snow_on_green_d or sf >= snow_on_green_f or T <= cold_green):
+    if cal == "green_season" and (
+        sd >= snow_on_green_d or sf >= snow_on_green_f or T <= cold_green
+    ):
         eff = "late_autumn"
         src = "adaptive"
 
@@ -281,7 +283,7 @@ def snow_fresh_phys_multiplier(snowfall_cm_h: float, s: Any) -> float:
     return m3
 
 
-def normalized_snow_signals(snap: Any, s: Any) -> Tuple[float, float]:
+def normalized_snow_signals(snap: Any, s: Any) -> tuple[float, float]:
     """Нормы [0..1] для снега (глубина, интенсивность снегопада)."""
     sd = _snap_snow_depth_m(snap)
     sf = _snap_snowfall_cm_h(snap)

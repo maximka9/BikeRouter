@@ -1,0 +1,56 @@
+include:
+  - bike_router
+include_files:
+  - README.md
+  - CHANGELOG.md
+  - AUTHORS.md
+  - COPYRIGHT.md
+  - THIRD_PARTY_NOTICES.md
+  - requirements.txt
+  - pyproject.toml
+  - Dockerfile
+  - docker-compose.yml
+  - docker-entrypoint.sh
+  - .env.example
+  - registration/abstract.md
+  - registration/source_selection.yml
+  - registration/manifest.txt
+  - registration/scripts
+source_suffixes:
+  - .py
+  - .js
+  - .html
+  - .css
+  - .json
+archive_suffixes:
+  - .py
+  - .js
+  - .html
+  - .css
+  - .json
+  - .md
+  - .txt
+  - .toml
+  - .yml
+  - .yaml
+  - .sh
+  - .example
+exclude:
+  - bike_router/frontend/vendor
+  - tests
+  - docs
+  - data
+  - cache
+  - experiment_outputs
+  - registration/private
+  - registration/out
+  - .git
+  - .github
+  - __pycache__
+  - .pytest_cache
+  - .mypy_cache
+  - .ruff_cache
+  - .venv
+  - venv
+  - dist
+  - build

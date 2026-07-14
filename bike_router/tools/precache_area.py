@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """CLI: предсборка area_precache (OSM + веса + опционально зелень) по PRECACHE_AREA_POLYGON_WKT.
 
 Запуск из каталога с настроенным ``BIKE_ROUTER_BASE_DIR`` / ``.env``::
@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,7 +32,9 @@ def _phase(msg: str) -> None:
 
 
 def main() -> int:
-    _phase("precache_area: загрузка модулей (geopandas, osmnx — может занять 1–3 мин при холодном старте)…")
+    _phase(
+        "precache_area: загрузка модулей (geopandas, osmnx — может занять 1–3 мин при холодном старте)…"
+    )
     from bike_router.app import Application
     from bike_router.config import Settings
     from bike_router.services.area_graph_cache import (
@@ -54,9 +54,7 @@ def main() -> int:
             "(и при необходимости BIKE_ROUTER_BASE_DIR)."
         )
         return 1
-    _phase(
-        f"precache_area: BIKE_ROUTER_BASE_DIR={s.base_dir!r} — создание Application (OSMnx)…"
-    )
+    _phase(f"precache_area: BIKE_ROUTER_BASE_DIR={s.base_dir!r} — создание Application (OSMnx)…")
     app = Application(s)
     _phase("precache_area: запуск ensure_area_precache…")
     out = ensure_area_precache(app)
@@ -67,4 +65,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

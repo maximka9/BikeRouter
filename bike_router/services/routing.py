@@ -4,21 +4,23 @@ import logging
 import math
 import numbers
 from collections import Counter
+from collections.abc import Callable
 from heapq import heappop, heappush
 from itertools import count
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import networkx as nx
 import osmnx as ox
 
 from ..config import (
     MAX_ROUTE_GRADIENT_DISPLAY,
-    ModeProfile,
-    RoutingPreferenceProfile,
+    TIME_SLOTS,
     TURN_ANGLE_THRESHOLD_DEG,
     TURN_PENALTY_BASE,
-    TIME_SLOTS,
+    ModeProfile,
+    RoutingPreferenceProfile,
 )
+from ..exceptions import RouteNotFoundError
 from .heat import angle_diff_deg, wet_surface_edge_slip_factor
 from .routing_criteria import (
     CRITERION_KEYS,
@@ -28,7 +30,6 @@ from .routing_criteria import (
 )
 from .stress import stress_metrics_for_route
 from .weather import WeatherWeightParams
-from ..exceptions import RouteNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,7 @@ def _wind_flow_bearing_deg(wind_from_deg: float) -> float:
     return (float(wind_from_deg) + 180.0) % 360.0
 
 
-def edge_wind_along_cross_01(
-    edge_data: dict, wind_from_deg: float
-) -> Tuple[float, float, float]:
+def edge_wind_along_cross_01(edge_data: dict, wind_from_deg: float) -> tuple[float, float, float]:
     """Доля «вдоль ветра» / «поперёк» по оси улицы и мин. угол оси к потоку [0..90]."""
     brg = float(edge_data.get("edge_bearing_deg") or 0.0) % 360.0
     flow = _wind_flow_bearing_deg(wind_from_deg)
@@ -60,7 +59,7 @@ def edge_wind_along_cross_01(
 
 def _wind_dir_edge_pack(
     edge_data: dict, weather: WeatherWeightParams
-) -> Optional[Tuple[float, float, float, float, float]]:
+) -> tuple[float, float, float, float, float] | None:
     """Если direction-aware активен: along01, cross01, delta_deg, wind_act_heat, wind_comb_stress."""
     if not weather.enabled:
         return None
@@ -184,13 +183,7 @@ def snow_surface_route_penalty(edge_data: dict, weather: WeatherWeightParams) ->
     w_amp_w = float(getattr(weather, "wc_wet_slip_surface_amp", 0.26))
     w_amp_m = float(getattr(weather, "wc_mixed_surface_amp", 0.18))
     tier_bad = 0.38 + 0.32 * float(min(max(tier, 0), 2))
-    extra += (
-        ss
-        * sn
-        * (w_amp_w * wcw + w_amp_m * wcm * 1.28)
-        * tier_bad
-        * 0.52
-    )
+    extra += ss * sn * (w_amp_w * wcw + w_amp_m * wcm * 1.28) * tier_bad * 0.52
     return max(1.0, min(1.55, 1.0 + extra))
 
 
@@ -246,7 +239,7 @@ def wet_surface_route_penalty(surface_effective: Any, weather: WeatherWeightPara
     return max(1.0, min(1.28, 1.0 + extra))
 
 
-def _parse_maxspeed_kmh(raw: Any) -> Optional[float]:
+def _parse_maxspeed_kmh(raw: Any) -> float | None:
     if raw is None:
         return None
     s = str(raw).strip().lower()
@@ -261,9 +254,7 @@ def _parse_maxspeed_kmh(raw: Any) -> Optional[float]:
         return None
 
 
-def weather_edge_stress_factor(
-    edge_data: dict, weather: WeatherWeightParams
-) -> float:
+def weather_edge_stress_factor(edge_data: dict, weather: WeatherWeightParams) -> float:
     """Погодная поправка stress на уровне ребра (дождь×покрытие, ветер×открытость, LTS×скорость)."""
     if not weather.enabled:
         return 1.0
@@ -285,9 +276,7 @@ def weather_edge_stress_factor(
     if pack is not None:
         along01, cross01, _delta, _wah, _wcs = pack
         sa = float(getattr(weather, "stress_wind_along_open_amp", 0.32))
-        wind_exp = _clamp01(
-            wind_exp_base * (1.0 + sa * along01 * wind_comb)
-        )
+        wind_exp = _clamp01(wind_exp_base * (1.0 + sa * along01 * wind_comb))
         sc = float(getattr(weather, "stress_wind_cross_shelter_amp", 0.40))
         shelter_mult = 1.0 + sc * cross01 * wind_comb
     else:
@@ -328,9 +317,11 @@ def weather_edge_stress_factor(
         hw = str(edge_data.get("highway") or "").strip().lower()
         stair_e = 1.0 if hw == "steps" else 0.0
         snow_bad = (
-            ksurf * sn * ss * surf_w * wet_surface_edge_slip_factor(
-                edge_data.get("surface_effective")
-            )
+            ksurf
+            * sn
+            * ss
+            * surf_w
+            * wet_surface_edge_slip_factor(edge_data.get("surface_effective"))
             + kopen * sn * ss * O * wind_comb
             + kstairs * sn * ss * stair_e
         )
@@ -346,9 +337,7 @@ def weather_edge_stress_factor(
     return max(lo, min(hi, raw))
 
 
-def continuous_heat_edge_weather_factor(
-    edge_data: dict, weather: WeatherWeightParams
-) -> float:
+def continuous_heat_edge_weather_factor(edge_data: dict, weather: WeatherWeightParams) -> float:
     """Непрерывный множитель микроклимата для тепловой компоненты (без hot/cold/neutral)."""
     O = float(edge_data.get("thermal_open_sky_share") or 0.5) or 0.5
     O = _clamp01(O)
@@ -369,9 +358,7 @@ def continuous_heat_edge_weather_factor(
     if pack is not None:
         along01, cross01, _delta, wind_act, _wcs = pack
         ha = float(getattr(weather, "heat_wind_along_open_amp", 0.28))
-        wind_exp = _clamp01(
-            wind_exp_base * (1.0 + ha * along01 * wind_act * O)
-        )
+        wind_exp = _clamp01(wind_exp_base * (1.0 + ha * along01 * wind_act * O))
         hc = float(getattr(weather, "heat_wind_cross_build_amp", 0.35))
         hd = float(getattr(weather, "heat_wind_along_build_damp", 0.24))
         b_build = 1.0 + hc * cross01 * wind_act - hd * along01 * wind_act
@@ -389,17 +376,13 @@ def continuous_heat_edge_weather_factor(
     sig = getattr(weather, "normalized_signals", None) or {}
     rn = _clamp01(float(sig.get("rain_norm", 0.0)))
     exn = _clamp01(float(sig.get("extreme_heat_norm", 0.0)))
-    rain_open_amp = 1.0 + float(
-        getattr(weather, "heat_edge_rain_open_mult", 0.48)
-    ) * rn
-    rain_build_amp = 1.0 + float(
-        getattr(weather, "heat_edge_rain_building_mult", 0.56)
-    ) * rn
-    rain_wind_exp_amp = 1.0 + float(
-        getattr(weather, "heat_edge_rain_wind_exp_mult", 0.22)
-    ) * rn
-    k1_eff = k1 * rain_open_amp * (
-        1.0 + float(getattr(weather, "heat_extreme_open_route_gain", 0.22)) * exn
+    rain_open_amp = 1.0 + float(getattr(weather, "heat_edge_rain_open_mult", 0.48)) * rn
+    rain_build_amp = 1.0 + float(getattr(weather, "heat_edge_rain_building_mult", 0.56)) * rn
+    rain_wind_exp_amp = 1.0 + float(getattr(weather, "heat_edge_rain_wind_exp_mult", 0.22)) * rn
+    k1_eff = (
+        k1
+        * rain_open_amp
+        * (1.0 + float(getattr(weather, "heat_extreme_open_route_gain", 0.22)) * exn)
     )
     k3_eff = k3 * rain_build_amp
     k6_eff = k6 * rain_wind_exp_amp
@@ -444,9 +427,9 @@ def effective_edge_components(
     profile_key: str,
     time_slot_key: str,
     heat_context_mult: float,
-    weather: Optional[WeatherWeightParams],
+    weather: WeatherWeightParams | None,
     *,
-    physical_weight_key: Optional[str] = None,
+    physical_weight_key: str | None = None,
 ) -> EffectiveEdgeComponents:
     """Физика без green_route, heat, stress и явные критерии (таблица критериев)."""
     phys_k = physical_weight_key or f"weight_{profile_key}_full"
@@ -495,7 +478,7 @@ _MIN_GRADIENT_STAT_SEGMENT_M: float = 15.0
 _ABSURD_SEGMENT_GRADIENT_RATIO: float = 0.85
 
 
-def _segment_gradient_ratio_for_stats(edge_data: dict) -> Optional[float]:
+def _segment_gradient_ratio_for_stats(edge_data: dict) -> float | None:
     """|Δh|/L по ребру; None если сегмент не подходит для агрегатов."""
     ln = float(edge_data.get("length", 0) or 0)
     if ln < _MIN_GRADIENT_STAT_SEGMENT_M:
@@ -511,7 +494,7 @@ def _segment_gradient_ratio_for_stats(edge_data: dict) -> Optional[float]:
     return r
 
 
-def _route_max_gradient_pct_from_ratios(ratios: List[float]) -> float:
+def _route_max_gradient_pct_from_ratios(ratios: list[float]) -> float:
     """Максимум по валидным сегментам; ослабление единичного выброса относительно остальных."""
     if not ratios:
         return 0.0
@@ -524,7 +507,7 @@ def _route_max_gradient_pct_from_ratios(ratios: List[float]) -> float:
     return round(min(pct, 55.0), 1)
 
 
-def _route_avg_gradient_pct_from_ratios(ratios: List[float]) -> float:
+def _route_avg_gradient_pct_from_ratios(ratios: list[float]) -> float:
     if not ratios:
         return 0.0
     return round((sum(ratios) / len(ratios)) * 100.0, 1)
@@ -602,9 +585,7 @@ def sanitize_multidigraph_routing_weights(G: nx.MultiDiGraph) -> None:
                 continue
             d[attr] = coerce_edge_weight_numeric(
                 d.get(attr),
-                fallback=coerce_edge_weight_numeric(
-                    d.get("length", 1.0), fallback=1.0
-                ),
+                fallback=coerce_edge_weight_numeric(d.get("length", 1.0), fallback=1.0),
             )
         for attr in list(d.keys()):
             sa = str(attr)
@@ -621,7 +602,7 @@ def sanitize_multidigraph_routing_weights(G: nx.MultiDiGraph) -> None:
             d[attr] = coerce_edge_weight_numeric(d.get(attr), fallback=0.0)
 
 
-def _coords_from_shapely_linear(geom: Any) -> List[Tuple[float, float]]:
+def _coords_from_shapely_linear(geom: Any) -> list[tuple[float, float]]:
     """Вершины (lon, lat) для LineString / MultiLineString / LinearRing / GeometryCollection.
 
     У рёбер OSM иногда бывает ``MultiLineString`` — у него нет ``.coords``, из-за чего
@@ -634,12 +615,12 @@ def _coords_from_shapely_linear(geom: Any) -> List[Tuple[float, float]]:
         if gt in ("LineString", "LinearRing"):
             return list(geom.coords)
         if gt == "MultiLineString":
-            out: List[Tuple[float, float]] = []
+            out: list[tuple[float, float]] = []
             for g in geom.geoms:
                 out.extend(list(g.coords))
             return out
         if gt == "GeometryCollection":
-            acc: List[Tuple[float, float]] = []
+            acc: list[tuple[float, float]] = []
             for g in geom.geoms:
                 acc.extend(_coords_from_shapely_linear(g))
             return acc
@@ -660,7 +641,7 @@ def _first_value(val: Any) -> Any:
     return val
 
 
-def _raw_osm_surface_from_edge(d: Dict[str, Any]) -> str:
+def _raw_osm_surface_from_edge(d: dict[str, Any]) -> str:
     """Тег surface из OSM (без эвристик): ``surface_osm`` или устаревшее ``surface``."""
     for key in ("surface_osm", "surface"):
         v = _first_value(d.get(key))
@@ -672,7 +653,7 @@ def _raw_osm_surface_from_edge(d: Dict[str, Any]) -> str:
     return ""
 
 
-def _effective_surface_from_edge(d: Dict[str, Any]) -> str:
+def _effective_surface_from_edge(d: dict[str, Any]) -> str:
     """Итоговая метка покрытия для статистики вдоль маршрута."""
     v = _first_value(d.get("surface_effective"))
     if v is not None:
@@ -694,8 +675,8 @@ class RouteResult:
 
     def __init__(
         self,
-        nodes: List[int],
-        edges: List[Tuple[int, int, int]],
+        nodes: list[int],
+        edges: list[tuple[int, int, int]],
         start_node: int,
         end_node: int,
     ) -> None:
@@ -713,9 +694,7 @@ class RouteService:
     """Поиск маршрутов и расчёт метрик."""
 
     @staticmethod
-    def _collapse_multidigraph_to_digraph(
-        G: nx.MultiDiGraph, weight_key: str
-    ) -> nx.DiGraph:
+    def _collapse_multidigraph_to_digraph(G: nx.MultiDiGraph, weight_key: str) -> nx.DiGraph:
         """``shortest_simple_paths`` в NetworkX не работает с MultiDiGraph.
 
         Между каждой парой (u, v) оставляем одно ребро с минимальным *weight_key*
@@ -736,9 +715,9 @@ class RouteService:
     @staticmethod
     def _resolve_edge_keys(
         G: nx.MultiDiGraph,
-        nodes: List[int],
+        nodes: list[int],
         weight_key: str,
-    ) -> List[Tuple[int, int, int]]:
+    ) -> list[tuple[int, int, int]]:
         """Для каждой пары узлов определить key с минимальным весом."""
         edges = []
         for i in range(len(nodes) - 1):
@@ -755,21 +734,15 @@ class RouteService:
     def find_route(
         self,
         G: nx.MultiDiGraph,
-        start_coords: Tuple[float, float],
-        end_coords: Tuple[float, float],
+        start_coords: tuple[float, float],
+        end_coords: tuple[float, float],
         weight_key: str,
     ) -> RouteResult:
         """Кратчайший маршрут. Бросает :exc:`RouteNotFoundError` если пути нет."""
-        start = ox.distance.nearest_nodes(
-            G, X=start_coords[1], Y=start_coords[0]
-        )
-        end = ox.distance.nearest_nodes(
-            G, X=end_coords[1], Y=end_coords[0]
-        )
+        start = ox.distance.nearest_nodes(G, X=start_coords[1], Y=start_coords[0])
+        end = ox.distance.nearest_nodes(G, X=end_coords[1], Y=end_coords[0])
         try:
-            nodes = nx.shortest_path(
-                G, source=start, target=end, weight=weight_key
-            )
+            nodes = nx.shortest_path(G, source=start, target=end, weight=weight_key)
             edges = self._resolve_edge_keys(G, nodes, weight_key)
             return RouteResult(nodes, edges, start, end)
         except nx.NetworkXNoPath:
@@ -778,19 +751,15 @@ class RouteService:
     @staticmethod
     def find_next_simple_path_by_length(
         G: nx.MultiDiGraph,
-        start_coords: Tuple[float, float],
-        end_coords: Tuple[float, float],
+        start_coords: tuple[float, float],
+        end_coords: tuple[float, float],
         exclude_signatures: set,
         max_hops: int = 200,
         max_candidates: int = 12,
-    ) -> Optional[RouteResult]:
+    ) -> RouteResult | None:
         """Следующий простой путь по весу ``length``, не входящий в ``exclude_signatures``."""
-        sn = ox.distance.nearest_nodes(
-            G, X=start_coords[1], Y=start_coords[0]
-        )
-        en = ox.distance.nearest_nodes(
-            G, X=end_coords[1], Y=end_coords[0]
-        )
+        sn = ox.distance.nearest_nodes(G, X=start_coords[1], Y=start_coords[0])
+        en = ox.distance.nearest_nodes(G, X=end_coords[1], Y=end_coords[0])
         try:
             H = RouteService._collapse_multidigraph_to_digraph(G, "length")
             gen = nx.shortest_simple_paths(H, sn, en, weight="length")
@@ -814,10 +783,10 @@ class RouteService:
     def find_route_safe(
         self,
         G: nx.MultiDiGraph,
-        start_coords: Tuple[float, float],
-        end_coords: Tuple[float, float],
+        start_coords: tuple[float, float],
+        end_coords: tuple[float, float],
         weight_key: str,
-    ) -> Optional[RouteResult]:
+    ) -> RouteResult | None:
         """Поиск без исключения — возвращает ``None`` если пути нет."""
         try:
             return self.find_route(G, start_coords, end_coords, weight_key)
@@ -828,7 +797,7 @@ class RouteService:
     @staticmethod
     def effective_heat_beta(
         pref: RoutingPreferenceProfile,
-        weather: Optional[WeatherWeightParams] = None,
+        weather: WeatherWeightParams | None = None,
     ) -> float:
         """β с динамическим усилением для extreme-heat режимов heat/heat_stress."""
         beta = float(pref.beta)
@@ -848,8 +817,8 @@ class RouteService:
         pref: RoutingPreferenceProfile,
         *,
         heat_context_mult: float = 1.0,
-        weather: Optional[WeatherWeightParams] = None,
-        physical_weight_key: Optional[str] = None,
+        weather: WeatherWeightParams | None = None,
+        physical_weight_key: str | None = None,
     ) -> float:
         """α·physical' + β·heat' + γ·stress' (без поворотов). Погода — в effective_edge_components."""
         ec = effective_edge_components(
@@ -874,10 +843,10 @@ class RouteService:
         pref: RoutingPreferenceProfile,
         *,
         heat_context_mult: float = 1.0,
-        weather: Optional[WeatherWeightParams] = None,
-        physical_weight_key: Optional[str] = None,
+        weather: WeatherWeightParams | None = None,
+        physical_weight_key: str | None = None,
     ) -> Callable[..., float]:
-        def wf(_u: Any, _v: Any, dk: Dict[int, dict]) -> float:
+        def wf(_u: Any, _v: Any, dk: dict[int, dict]) -> float:
             costs = []
             for _k, ed in dk.items():
                 costs.append(
@@ -898,23 +867,19 @@ class RouteService:
     def find_route_combined(
         self,
         G: nx.MultiDiGraph,
-        start_coords: Tuple[float, float],
-        end_coords: Tuple[float, float],
+        start_coords: tuple[float, float],
+        end_coords: tuple[float, float],
         profile_key: str,
         time_slot_key: str,
         pref: RoutingPreferenceProfile,
         *,
         heat_context_mult: float = 1.0,
-        weather: Optional[WeatherWeightParams] = None,
-        physical_weight_key: Optional[str] = None,
+        weather: WeatherWeightParams | None = None,
+        physical_weight_key: str | None = None,
     ) -> RouteResult:
         """Кратчайший путь по комбинированному весу (без штрафа за поворот)."""
-        start = ox.distance.nearest_nodes(
-            G, X=start_coords[1], Y=start_coords[0]
-        )
-        end = ox.distance.nearest_nodes(
-            G, X=end_coords[1], Y=end_coords[0]
-        )
+        start = ox.distance.nearest_nodes(G, X=start_coords[1], Y=start_coords[0])
+        end = ox.distance.nearest_nodes(G, X=end_coords[1], Y=end_coords[0])
         wf = self._multigraph_combined_weight_fn(
             profile_key,
             time_slot_key,
@@ -942,16 +907,16 @@ class RouteService:
     @staticmethod
     def _resolve_edge_keys_combined(
         G: nx.MultiDiGraph,
-        nodes: List[int],
+        nodes: list[int],
         profile_key: str,
         time_slot_key: str,
         pref: RoutingPreferenceProfile,
         *,
         heat_context_mult: float = 1.0,
-        weather: Optional[WeatherWeightParams] = None,
-        physical_weight_key: Optional[str] = None,
-    ) -> List[Tuple[int, int, int]]:
-        edges: List[Tuple[int, int, int]] = []
+        weather: WeatherWeightParams | None = None,
+        physical_weight_key: str | None = None,
+    ) -> list[tuple[int, int, int]]:
+        edges: list[tuple[int, int, int]] = []
         for i in range(len(nodes) - 1):
             u, v = nodes[i], nodes[i + 1]
             best_key = min(
@@ -979,44 +944,38 @@ class RouteService:
         if ta < TURN_ANGLE_THRESHOLD_DEG:
             return 0.0
         return float(
-            pref.delta
-            * TURN_PENALTY_BASE
-            * min(1.0, (ta - TURN_ANGLE_THRESHOLD_DEG) / 50.0)
+            pref.delta * TURN_PENALTY_BASE * min(1.0, (ta - TURN_ANGLE_THRESHOLD_DEG) / 50.0)
         )
 
     def find_route_combined_with_turns(
         self,
         G: nx.MultiDiGraph,
-        start_coords: Tuple[float, float],
-        end_coords: Tuple[float, float],
+        start_coords: tuple[float, float],
+        end_coords: tuple[float, float],
         profile_key: str,
         time_slot_key: str,
         pref: RoutingPreferenceProfile,
         *,
         heat_context_mult: float = 1.0,
-        weather: Optional[WeatherWeightParams] = None,
-        physical_weight_key: Optional[str] = None,
+        weather: WeatherWeightParams | None = None,
+        physical_weight_key: str | None = None,
     ) -> RouteResult:
         """Dijkstra в пространстве состояний (узел, входящее ребро) — штраф за поворот."""
-        start = ox.distance.nearest_nodes(
-            G, X=start_coords[1], Y=start_coords[0]
-        )
-        end = ox.distance.nearest_nodes(
-            G, X=end_coords[1], Y=end_coords[0]
-        )
+        start = ox.distance.nearest_nodes(G, X=start_coords[1], Y=start_coords[0])
+        end = ox.distance.nearest_nodes(G, X=end_coords[1], Y=end_coords[0])
 
-        State = Tuple[int, Optional[Tuple[int, int, int]]]
-        dist: Dict[State, float] = {}
-        pred: Dict[State, Optional[State]] = {}
+        State = tuple[int, tuple[int, int, int] | None]
+        dist: dict[State, float] = {}
+        pred: dict[State, State | None] = {}
         c = count()
-        fringe: List[Tuple[float, int, State]] = []
+        fringe: list[tuple[float, int, State]] = []
 
         s0: State = (start, None)
         dist[s0] = 0.0
         pred[s0] = None
         heappush(fringe, (0.0, next(c), s0))
 
-        final_state: Optional[State] = None
+        final_state: State | None = None
 
         while fringe:
             d, _, st_v = heappop(fringe)
@@ -1047,7 +1006,7 @@ class RouteService:
                     bd_out = float(ed.get("edge_bearing_deg", 0.0))
                     turn_p = self._turn_penalty_at_node(bd_in, bd_out, pref)
                 nd = d + base + turn_p
-                new_prev: Tuple[int, int, int] = (v, w, k)
+                new_prev: tuple[int, int, int] = (v, w, k)
                 st_w: State = (w, new_prev)
                 if nd < dist.get(st_w, float("inf")):
                     dist[st_w] = nd
@@ -1057,8 +1016,8 @@ class RouteService:
         if final_state is None:
             raise RouteNotFoundError(f"combined_turns:{time_slot_key}")
 
-        edges_rev: List[Tuple[int, int, int]] = []
-        cur: Optional[State] = final_state
+        edges_rev: list[tuple[int, int, int]] = []
+        cur: State | None = final_state
         while cur is not None and cur[1] is not None:
             edges_rev.append(cur[1])
             cur = pred.get(cur)
@@ -1073,7 +1032,7 @@ class RouteService:
     @staticmethod
     def count_significant_turns(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
+        route: RouteResult | None,
         *,
         threshold_deg: float = TURN_ANGLE_THRESHOLD_DEG,
     ) -> int:
@@ -1093,16 +1052,16 @@ class RouteService:
     @staticmethod
     def route_segment_costs(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
+        route: RouteResult | None,
         profile_key: str,
         time_slot_key: str,
         *,
         heat_context_mult: float = 1.0,
-        weather: Optional[WeatherWeightParams] = None,
-        physical_weight_key: Optional[str] = None,
-    ) -> Dict[str, float]:
+        weather: WeatherWeightParams | None = None,
+        physical_weight_key: str | None = None,
+    ) -> dict[str, float]:
         """Суммы physical, heat (с κ), stress по выбранному слоту."""
-        z: Dict[str, float] = {
+        z: dict[str, float] = {
             "physical_base": 0.0,
             "physical": 0.0,
             "green_cost": 0.0,
@@ -1152,22 +1111,18 @@ class RouteService:
                 z["physical"] += pe
                 z["heat"] += ec.heat_eff
                 z["stress"] += ec.st_eff
-                z["stress_segment"] += coerce_edge_weight_numeric(
-                    d.get("stress_segment_cost"), fallback=0.0
-                ) * sw
-                z["stress_intersection"] += coerce_edge_weight_numeric(
-                    d.get("stress_intersection_cost"), fallback=0.0
-                ) * sw
-            else:
-                pe_base = coerce_edge_weight_numeric(
-                    d.get(phys_k), fallback=0.0
+                z["stress_segment"] += (
+                    coerce_edge_weight_numeric(d.get("stress_segment_cost"), fallback=0.0) * sw
                 )
+                z["stress_intersection"] += (
+                    coerce_edge_weight_numeric(d.get("stress_intersection_cost"), fallback=0.0) * sw
+                )
+            else:
+                pe_base = coerce_edge_weight_numeric(d.get(phys_k), fallback=0.0)
                 z["physical_base"] += pe_base
                 z["physical"] += pe_base
                 z["heat"] += hr * hm
-                z["stress"] += coerce_edge_weight_numeric(
-                    d.get("stress_cost"), fallback=0.0
-                )
+                z["stress"] += coerce_edge_weight_numeric(d.get("stress_cost"), fallback=0.0)
                 z["stress_segment"] += coerce_edge_weight_numeric(
                     d.get("stress_segment_cost"), fallback=0.0
                 )
@@ -1185,15 +1140,15 @@ class RouteService:
     @staticmethod
     def route_combined_total(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
+        route: RouteResult | None,
         profile_key: str,
         time_slot_key: str,
         pref: RoutingPreferenceProfile,
         *,
         turn_count: int,
         heat_context_mult: float = 1.0,
-        weather: Optional[WeatherWeightParams] = None,
-        physical_weight_key: Optional[str] = None,
+        weather: WeatherWeightParams | None = None,
+        physical_weight_key: str | None = None,
     ) -> float:
         """Итоговая комбинированная стоимость (с δ·turn)."""
         seg = RouteService.route_segment_costs(
@@ -1217,11 +1172,11 @@ class RouteService:
     @staticmethod
     def route_exposure_metrics(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
+        route: RouteResult | None,
         time_slot_key: str,
         *,
         exposure_threshold: float = 0.45,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Длина участков с высокой экспозицией для слота."""
         if route is None:
             return {"exposed_high_length_m": 0.0, "avg_exposure": 0.0}
@@ -1245,10 +1200,10 @@ class RouteService:
     @staticmethod
     def route_stress_levels(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
+        route: RouteResult | None,
         *,
         high_threshold: float = 2.5,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Средний/макс LTS и доля длины с LTS ≥ порога."""
         if route is None:
             return {
@@ -1256,8 +1211,8 @@ class RouteService:
                 "max_lts": 1.0,
                 "high_stress_fraction": 0.0,
             }
-        lengths: List[float] = []
-        lts: List[float] = []
+        lengths: list[float] = []
+        lts: list[float] = []
         for i in range(route.edge_count):
             d = G.edges[route.edges[i]]
             ln = float(d.get("length", 0.0) or 0.0)
@@ -1273,8 +1228,8 @@ class RouteService:
     @staticmethod
     def route_shade_shares(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
-    ) -> Dict[str, float]:
+        route: RouteResult | None,
+    ) -> dict[str, float]:
         """Средневзвешенные по длине доли тени (растительность / здания)."""
         if route is None:
             return {"vegetation_shade_share": 0.0, "building_shade_share": 0.0}
@@ -1298,7 +1253,7 @@ class RouteService:
     def route_shelter_length_weighted_averages(
         G: nx.MultiDiGraph,
         route: Optional["RouteResult"],
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Средние по длине: открытость, тень зданий, укрытие, «плохое мокрое» покрытие."""
         if route is None or route.edge_count <= 0:
             return {
@@ -1360,8 +1315,8 @@ class RouteService:
     def route_wind_direction_metrics(
         G: nx.MultiDiGraph,
         route: Optional["RouteResult"],
-        weather: Optional[WeatherWeightParams],
-    ) -> Dict[str, float]:
+        weather: WeatherWeightParams | None,
+    ) -> dict[str, float]:
         """Средние по длине и доли «опасного» ветра, если активен direction-aware режим."""
         z = {
             "route_wind_direction_aware": 0.0,
@@ -1371,12 +1326,7 @@ class RouteService:
             "route_frac_wind_along_open_hostile": 0.0,
             "route_frac_wind_cross_building_screen": 0.0,
         }
-        if (
-            route is None
-            or route.edge_count <= 0
-            or weather is None
-            or not weather.enabled
-        ):
+        if route is None or route.edge_count <= 0 or weather is None or not weather.enabled:
             return z
         if not bool(getattr(weather, "wind_direction_available", False)):
             return z
@@ -1430,7 +1380,7 @@ class RouteService:
     @staticmethod
     def count_stressful_intersections(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
+        route: RouteResult | None,
         *,
         score_threshold: float = 0.35,
     ) -> int:
@@ -1448,7 +1398,7 @@ class RouteService:
     @staticmethod
     def count_high_stress_segments(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
+        route: RouteResult | None,
         *,
         lts_threshold: float = 2.5,
     ) -> int:
@@ -1467,9 +1417,7 @@ class RouteService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def route_geometry(
-        G: nx.MultiDiGraph, route: Optional["RouteResult"]
-    ) -> list[list[float]]:
+    def route_geometry(G: nx.MultiDiGraph, route: Optional["RouteResult"]) -> list[list[float]]:
         """Полилиния маршрута по геометриям рёбер, а не только по узлам.
 
         Если у ребра есть ``geometry`` (Shapely LineString), берутся все
@@ -1497,14 +1445,8 @@ class RouteService:
                 first_node_x = G.nodes[u]["x"]
                 start_lon, start_lat = edge_pts[0]
                 end_lon, end_lat = edge_pts[-1]
-                dist_to_start = (
-                    (start_lat - first_node_y) ** 2
-                    + (start_lon - first_node_x) ** 2
-                )
-                dist_to_end = (
-                    (end_lat - first_node_y) ** 2
-                    + (end_lon - first_node_x) ** 2
-                )
+                dist_to_start = (start_lat - first_node_y) ** 2 + (start_lon - first_node_x) ** 2
+                dist_to_end = (end_lat - first_node_y) ** 2 + (end_lon - first_node_x) ** 2
                 if dist_to_end < dist_to_start:
                     edge_pts = edge_pts[::-1]
 
@@ -1522,7 +1464,7 @@ class RouteService:
     @staticmethod
     def calculate_cost(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
+        route: RouteResult | None,
         weight_key: str,
     ) -> float:
         """Суммарная стоимость маршрута по указанному весу."""
@@ -1533,9 +1475,7 @@ class RouteService:
             d = G.edges[route.edges[i]]
             w = d.get(weight_key)
             if w is None:
-                logger.warning(
-                    "У ребра нет веса %s — пропуск в сумме cost", weight_key
-                )
+                logger.warning("У ребра нет веса %s — пропуск в сумме cost", weight_key)
                 continue
             total += float(w)
         if not math.isfinite(total):
@@ -1544,21 +1484,14 @@ class RouteService:
         return total
 
     @staticmethod
-    def calculate_length(
-        G: nx.MultiDiGraph, route: Optional[RouteResult]
-    ) -> float:
+    def calculate_length(G: nx.MultiDiGraph, route: RouteResult | None) -> float:
         """Длина маршрута в метрах."""
         if route is None:
             return 0.0
-        return sum(
-            G.edges[route.edges[i]].get("length", 0)
-            for i in range(route.edge_count)
-        )
+        return sum(G.edges[route.edges[i]].get("length", 0) for i in range(route.edge_count))
 
     @staticmethod
-    def green_stats(
-        G: nx.MultiDiGraph, route: Optional[RouteResult]
-    ) -> Dict[str, Any]:
+    def green_stats(G: nx.MultiDiGraph, route: RouteResult | None) -> dict[str, Any]:
         """Статистика озеленения: категории, средний % деревьев и травы."""
         zero = {
             "categories": {},
@@ -1591,9 +1524,7 @@ class RouteService:
         }
 
     @staticmethod
-    def elevation_stats(
-        G: nx.MultiDiGraph, route: Optional[RouteResult]
-    ) -> Dict[str, float]:
+    def elevation_stats(G: nx.MultiDiGraph, route: RouteResult | None) -> dict[str, float]:
         """Статистика рельефа: набор, спуск (интерполированные), макс/средний уклон."""
         zero = {
             "climb": 0.0,
@@ -1605,7 +1536,7 @@ class RouteService:
             return zero
 
         climb = descent = 0.0
-        ratios: List[float] = []
+        ratios: list[float] = []
 
         for i in range(route.edge_count):
             d = G.edges[route.edges[i]]
@@ -1623,9 +1554,7 @@ class RouteService:
         }
 
     @staticmethod
-    def surface_stats(
-        G: nx.MultiDiGraph, route: Optional[RouteResult]
-    ) -> Tuple[Counter, Counter]:
+    def surface_stats(G: nx.MultiDiGraph, route: RouteResult | None) -> tuple[Counter, Counter]:
         """Подсчёт типов покрытий и дорог вдоль маршрута."""
         sc: Counter = Counter()
         hc: Counter = Counter()
@@ -1641,7 +1570,7 @@ class RouteService:
     @staticmethod
     def route_weight_fallback_metrics(
         G: nx.MultiDiGraph, route: RouteResult, profile: ModeProfile
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Метрики fallback-коэффициентов (1.0) по рёбрам маршрута.
 
         Доли для UI и порогов предупреждений считаются по **сумме длин рёбер**
@@ -1662,11 +1591,7 @@ class RouteService:
             total_m += ln
             raw_osm = _raw_osm_surface_from_edge(d)
             hw_raw = _first_value(d.get("highway"))
-            h = (
-                str(hw_raw).strip().lower()
-                if hw_raw is not None and str(hw_raw).strip()
-                else ""
-            )
+            h = str(hw_raw).strip().lower() if hw_raw is not None and str(hw_raw).strip() else ""
             if not raw_osm:
                 na_surf_m += ln
             elif raw_osm not in profile.surface:
@@ -1684,9 +1609,7 @@ class RouteService:
         }
 
     @staticmethod
-    def elevation_profile(
-        G: nx.MultiDiGraph, route: Optional[RouteResult]
-    ) -> Dict[str, float]:
+    def elevation_profile(G: nx.MultiDiGraph, route: RouteResult | None) -> dict[str, float]:
         """Профиль рельефа относительно стартовой точки.
 
         Returns:
@@ -1715,9 +1638,7 @@ class RouteService:
         }
 
     @staticmethod
-    def stairs_count(
-        G: nx.MultiDiGraph, route: Optional[RouteResult]
-    ) -> Dict[str, Any]:
+    def stairs_count(G: nx.MultiDiGraph, route: RouteResult | None) -> dict[str, Any]:
         """Количество лестниц (highway=steps) и их суммарная длина."""
         if route is None:
             return {"count": 0, "length": 0.0}
@@ -1735,8 +1656,8 @@ class RouteService:
 
     @staticmethod
     def elevation_profile_data(
-        G: nx.MultiDiGraph, route: Optional[RouteResult]
-    ) -> List[Tuple[float, float]]:
+        G: nx.MultiDiGraph, route: RouteResult | None
+    ) -> list[tuple[float, float]]:
         """Точки (кумулятивная дистанция м, относительная высота м).
 
         Первая точка — (0, 0); реальную абсолютную высоту добавляет
@@ -1744,7 +1665,7 @@ class RouteService:
         """
         if route is None:
             return []
-        points: List[Tuple[float, float]] = [(0.0, 0.0)]
+        points: list[tuple[float, float]] = [(0.0, 0.0)]
         cum_dist = 0.0
         cum_elev = 0.0
         for i in range(route.edge_count):
@@ -1757,7 +1678,7 @@ class RouteService:
     @staticmethod
     def estimate_time(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
+        route: RouteResult | None,
         profile: ModeProfile,
     ) -> float:
         """Оценка времени в пути (секунды).
@@ -1811,9 +1732,7 @@ class RouteService:
     STEEP_GRADIENT_ABS = 0.10
 
     @staticmethod
-    def _edge_linestring_coords(
-        G: nx.MultiDiGraph, u: int, v: int, key: int
-    ) -> List[List[float]]:
+    def _edge_linestring_coords(G: nx.MultiDiGraph, u: int, v: int, key: int) -> list[list[float]]:
         """Координаты линии ребра ``[[lon, lat], ...]`` для GeoJSON."""
         data = G.edges[u, v, key]
         geom = data.get("geometry")
@@ -1827,7 +1746,7 @@ class RouteService:
         ]
 
     @staticmethod
-    def _map_feature(coords: List[List[float]], props: Dict[str, Any]) -> dict:
+    def _map_feature(coords: list[list[float]], props: dict[str, Any]) -> dict:
         return {
             "type": "Feature",
             "geometry": {"type": "LineString", "coordinates": coords},
@@ -1837,14 +1756,15 @@ class RouteService:
     @staticmethod
     def build_route_map_layers(
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
-    ) -> Dict[str, Any]:
+        route: RouteResult | None,
+    ) -> dict[str, Any]:
         """Собрать GeoJSON FeatureCollection по категориям сегментов маршрута.
 
         Returns:
             dict с ключами ``greenery``, ``stairs``, ``problematic``, ``na_surface`` —
             каждый — полноценный GeoJSON FeatureCollection (сериализуемый в JSON).
         """
+
         def _empty_fc() -> dict:
             return {"type": "FeatureCollection", "features": []}
 
@@ -1856,10 +1776,10 @@ class RouteService:
                 "na_surface": _empty_fc(),
             }
 
-        greenery_f: List[dict] = []
-        stairs_f: List[dict] = []
-        prob_f: List[dict] = []
-        na_f: List[dict] = []
+        greenery_f: list[dict] = []
+        stairs_f: list[dict] = []
+        prob_f: list[dict] = []
+        na_f: list[dict] = []
 
         for u, v, key in route.edges:
             d = G.edges[u, v, key]
@@ -1898,12 +1818,10 @@ class RouteService:
                 )
 
             if hw == "steps":
-                stairs_f.append(
-                    RouteService._map_feature(coords, {**base, "kind": "steps"})
-                )
+                stairs_f.append(RouteService._map_feature(coords, {**base, "kind": "steps"}))
 
             if hw != "steps":
-                reasons: List[str] = []
+                reasons: list[str] = []
                 if abs(grad_phys) >= RouteService.STEEP_GRADIENT_ABS:
                     reasons.append("steep")
                 if hw in RouteService.PROBLEMATIC_HIGHWAYS:
@@ -1924,7 +1842,7 @@ class RouteService:
                     )
                 )
 
-        def _fc(features: List[dict]) -> dict:
+        def _fc(features: list[dict]) -> dict:
             return {"type": "FeatureCollection", "features": features}
 
         return {

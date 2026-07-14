@@ -7,6 +7,41 @@ authors = [{ name = "Седых Максим Юрьевич" }]
 readme = "README.md"
 dependencies = []
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+    "reportlab",
+    "gitleaks",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [
+    "bike_router/frontend/vendor",
+    "registration/private",
+    "registration/out",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E402", "E501", "E741", "B007", "B023", "B904", "B905", "E731", "F841", "UP035", "UP042"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+exclude = [
+    "bike_router/frontend/vendor",
+    "registration/private",
+    "registration/out",
+]

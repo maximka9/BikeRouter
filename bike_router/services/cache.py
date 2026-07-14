@@ -4,7 +4,7 @@ import logging
 import os
 import pickle
 import tempfile
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class CacheService:
         )
         return os.path.join(self._cache_dir, f"{key}.pkl")
 
-    def load(self, path: str) -> Optional[Any]:
+    def load(self, path: str) -> Any | None:
         """Загрузить данные из кэша. ``None`` если файла нет или он повреждён."""
         if not os.path.exists(path):
             return None
@@ -64,9 +64,7 @@ class CacheService:
         wrapper = {"_cache_fmt": _CACHE_WRAPPER_VERSION, "data": data}
         try:
             d = os.path.dirname(path) or self._cache_dir
-            fd, tmp = tempfile.mkstemp(
-                suffix=".pkl.tmp", dir=d, prefix=".cache_"
-            )
+            fd, tmp = tempfile.mkstemp(suffix=".pkl.tmp", dir=d, prefix=".cache_")
             try:
                 with os.fdopen(fd, "wb") as fh:
                     pickle.dump(wrapper, fh, protocol=pickle.HIGHEST_PROTOCOL)

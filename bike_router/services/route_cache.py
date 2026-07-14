@@ -13,7 +13,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +31,7 @@ class RouteAlternativesDiskCache:
         if self._enabled:
             self._dir.mkdir(parents=True, exist_ok=True)
 
-    def set_cache_context(
-        self, nodes: int, edges: int, engine_fingerprint: str
-    ) -> None:
+    def set_cache_context(self, nodes: int, edges: int, engine_fingerprint: str) -> None:
         """Вызывать после каждого успешного ``warmup()``."""
         self._graph_nodes = int(nodes)
         self._graph_edges = int(edges)
@@ -41,8 +39,8 @@ class RouteAlternativesDiskCache:
 
     @staticmethod
     def _payload_key(
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         *,
         green_enabled: bool = True,
@@ -60,22 +58,25 @@ class RouteAlternativesDiskCache:
 
     def _path(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile: str,
         *,
         green_enabled: bool = True,
     ) -> Path:
-        return self._dir / f"{self._payload_key(start, end, profile, green_enabled=green_enabled)}.json"
+        return (
+            self._dir
+            / f"{self._payload_key(start, end, profile, green_enabled=green_enabled)}.json"
+        )
 
     def get(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         *,
         green_enabled: bool = True,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Вернуть ``{"routes": [...]}`` для :meth:`AlternativesResponse.model_validate` или ``None``."""
         if not self._enabled:
             return None
@@ -83,7 +84,7 @@ class RouteAlternativesDiskCache:
         if not path.is_file():
             return None
         try:
-            with self._lock, open(path, "r", encoding="utf-8") as f:
+            with self._lock, open(path, encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError) as exc:
             logger.debug("Route cache read error %s: %s", path, exc)
@@ -99,8 +100,8 @@ class RouteAlternativesDiskCache:
 
     def put(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         routes_dump: list,
         *,

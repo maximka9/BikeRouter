@@ -18,9 +18,9 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import requests
 from fastapi import FastAPI, HTTPException, Query
@@ -38,7 +38,10 @@ from .exceptions import (
     RouteNotFoundError,
     RouteTooLongError,
 )
+from .job_status import AlternativesJobStatus as AJS
+from .logutil import configure_root_logging
 from .metrics import metrics_text
+from .middleware import RequestLogMiddleware
 from .models import (
     AlternativesJobResponse,
     AlternativesRequest,
@@ -51,10 +54,7 @@ from .models import (
     RouteRequest,
     RouteResponse,
 )
-from .job_status import AlternativesJobStatus as AJS
 from .services.alternatives_jobs import AlternativesJobStore, JobRecord, new_job_id
-from .logutil import configure_root_logging
-from .middleware import RequestLogMiddleware
 from .services.geocoding import GeocodingService
 
 logger = logging.getLogger(__name__)
@@ -63,25 +63,19 @@ routelog = logging.getLogger("bike_router.routing")
 
 
 def _serialize_criteria_bundle(
-    bundle: Optional[Dict[str, List[RouteResponse]]],
-) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    bundle: dict[str, list[RouteResponse]] | None,
+) -> dict[str, list[dict[str, Any]]] | None:
     if not bundle:
         return None
-    return {
-        k: [r.model_dump(mode="json") for r in lst]
-        for k, lst in bundle.items()
-    }
+    return {k: [r.model_dump(mode="json") for r in lst] for k, lst in bundle.items()}
 
 
 def _parse_stored_criteria_bundle(
-    raw: Optional[Dict[str, List[Dict[str, Any]]]],
-) -> Optional[Dict[str, List[RouteResponse]]]:
+    raw: dict[str, list[dict[str, Any]]] | None,
+) -> dict[str, list[RouteResponse]] | None:
     if not raw:
         return None
-    return {
-        k: [RouteResponse.model_validate(x) for x in lst]
-        for k, lst in raw.items()
-    }
+    return {k: [RouteResponse.model_validate(x) for x in lst] for k, lst in raw.items()}
 
 
 def _use_progressive_phase1(_req: AlternativesStartRequest) -> bool:
@@ -89,7 +83,7 @@ def _use_progressive_phase1(_req: AlternativesStartRequest) -> bool:
     return bool(engine.settings.progressive_alternatives_enabled)
 
 
-def _progressive_pending_modes(req: AlternativesStartRequest) -> List[str]:
+def _progressive_pending_modes(req: AlternativesStartRequest) -> list[str]:
     raw = getattr(engine.settings, "progressive_background_variants", "") or ""
     modes = [x.strip() for x in str(raw).split(",") if x.strip()]
     allowed = {"green", "heat", "stress", "heat_stress"}
@@ -100,8 +94,8 @@ def _progressive_pending_modes(req: AlternativesStartRequest) -> List[str]:
 
 
 def _alternatives_kw_common(
-    req: Union[AlternativesRequest, AlternativesStartRequest],
-) -> Dict[str, Any]:
+    req: AlternativesRequest | AlternativesStartRequest,
+) -> dict[str, Any]:
     season_ov = req.season.value if req.season is not None else None
     return {
         "green_enabled": req.green_enabled,
@@ -132,7 +126,7 @@ def _run_progressive_background_thread(
     start: tuple,
     end: tuple,
     profile_key: str,
-    alt_kw: Dict[str, Any],
+    alt_kw: dict[str, Any],
 ) -> None:
     try:
         out = engine.compute_alternatives(
@@ -155,7 +149,7 @@ def _run_progressive_background_thread(
         )
     except BikeRouterError as exc:
         rec = alternatives_job_store.get(job_id)
-        keep: List[Dict[str, Any]] = []
+        keep: list[dict[str, Any]] = []
         if rec is not None:
             with rec.mut:
                 keep = list(rec.routes)
@@ -203,9 +197,7 @@ def _run_green_job_thread(
     """Фон: третий маршрут (green); при ошибке — status=failed и структурированный error."""
     try:
         route = engine.compute_green_route_addon(start, end, profile_key)
-        alternatives_job_store.complete_green_success(
-            job_id, route.model_dump(mode="json")
-        )
+        alternatives_job_store.complete_green_success(job_id, route.model_dump(mode="json"))
         reqlog.info("alternatives_job job_id=%s green ready", job_id)
     except BikeRouterError as exc:
         reqlog.warning(
@@ -235,6 +227,7 @@ def _run_green_job_thread(
             ),
         )
 
+
 _FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 # ── Глобальные сервисы (singleton) ───────────────────────────────
@@ -261,9 +254,7 @@ async def lifespan(_app: FastAPI):
     logger.info("Инициализация движка (warmup)...")
     engine.warmup()
     if engine.settings.use_dynamic_corridor_graph:
-        logger.info(
-            "Сервер готов: граф подгрузится по первому маршруту (коридор ±BUFFER)."
-        )
+        logger.info("Сервер готов: граф подгрузится по первому маршруту (коридор ±BUFFER).")
     else:
         logger.info("Граф загружен — сервер готов к запросам.")
     yield
@@ -307,15 +298,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-def _cors_allow_origins() -> List[str]:
-    """``CORS_ALLOW_ORIGINS``: через запятую или ``*`` (по умолчанию — только для dev)."""
-    raw = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
+
+def _cors_allow_origins() -> list[str]:
+    """``CORS_ALLOW_ORIGINS``: comma-separated origins or explicit ``*`` for dev."""
+    raw = os.getenv("CORS_ALLOW_ORIGINS", "http://127.0.0.1:8000").strip()
     if not raw or raw == "*":
         return ["*"]
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
-def _cors_allow_credentials(origins: List[str]) -> bool:
+def _cors_allow_credentials(origins: list[str]) -> bool:
     """С ``*`` нельзя включать credentials (спецификация CORS / Starlette)."""
     return not (origins == ["*"] or any(o == "*" for o in origins))
 
@@ -467,10 +459,7 @@ async def alternatives(req: AlternativesRequest):
             status_code=500,
             detail=ErrorDetail(
                 code="INTERNAL_ERROR",
-                message=(
-                    "Внутренняя ошибка при расчёте маршрута. "
-                    "Подробности — в логе сервера."
-                ),
+                message=("Внутренняя ошибка при расчёте маршрута. Подробности — в логе сервера."),
             ).model_dump(),
         ) from exc
 
@@ -520,7 +509,7 @@ async def alternatives_start(req: AlternativesStartRequest):
     try:
         if _use_progressive_phase1(req):
             alt_kw = _alternatives_kw_common(req)
-            now_utc = datetime.now(timezone.utc)
+            now_utc = datetime.now(UTC)
             dep_for = req.departure_time or now_utc.replace(microsecond=0).isoformat()
             heat_season = _resolve_season_for_heat_alternatives(
                 season_override=alt_kw.get("season"),
@@ -702,7 +691,7 @@ async def alternatives_job_status(job_id: str):
 
 @app.get(
     "/geocode",
-    response_model=List[GeocodingResult],
+    response_model=list[GeocodingResult],
     summary="Адрес → координаты",
     tags=["Geocoding"],
 )
@@ -755,9 +744,7 @@ async def geocode(
         logger.exception("geocode error duration_ms=%.1f", ms)
         raise HTTPException(
             status_code=502,
-            detail=ErrorDetail(
-                code="GEOCODING_ERROR", message=str(exc)
-            ).model_dump(),
+            detail=ErrorDetail(code="GEOCODING_ERROR", message=str(exc)).model_dump(),
         )
 
 
@@ -797,16 +784,12 @@ async def reverse_geocode(
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=ErrorDetail(
-                code="GEOCODING_ERROR", message=str(exc)
-            ).model_dump(),
+            detail=ErrorDetail(code="GEOCODING_ERROR", message=str(exc)).model_dump(),
         )
     if result is None:
         raise HTTPException(
             status_code=404,
-            detail=ErrorDetail(
-                code="GEOCODING_NOT_FOUND", message="Адрес не найден"
-            ).model_dump(),
+            detail=ErrorDetail(code="GEOCODING_NOT_FOUND", message="Адрес не найден").model_dump(),
         )
     return result
 

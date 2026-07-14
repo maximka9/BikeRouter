@@ -10,12 +10,12 @@ from __future__ import annotations
 import ast
 import json
 import math
-import os
 from collections import OrderedDict
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any
 
 import geopandas as gpd
 import joblib
@@ -69,7 +69,7 @@ except Exception:
     TQDM_AVAILABLE = False
 
 
-SURFACE_GROUP_MAP: Dict[str, str] = {
+SURFACE_GROUP_MAP: dict[str, str] = {
     "asphalt": "paved_good",
     "concrete": "paved_good",
     "paved": "paved_rough",
@@ -91,14 +91,14 @@ SURFACE_GROUP_MAP: Dict[str, str] = {
     "mud": "unpaved_soft",
 }
 
-SURFACE_GROUPS: Tuple[str, ...] = (
+SURFACE_GROUPS: tuple[str, ...] = (
     "paved_good",
     "paved_rough",
     "unpaved_hard",
     "unpaved_soft",
 )
 
-OSM_TAG_COLUMNS: Tuple[str, ...] = (
+OSM_TAG_COLUMNS: tuple[str, ...] = (
     "highway",
     "surface",
     "service",
@@ -113,7 +113,7 @@ OSM_TAG_COLUMNS: Tuple[str, ...] = (
     "lanes",
 )
 
-OSM_CATEGORICAL_FEATURES: Tuple[str, ...] = (
+OSM_CATEGORICAL_FEATURES: tuple[str, ...] = (
     "highway",
     "service",
     "tracktype",
@@ -127,7 +127,7 @@ OSM_CATEGORICAL_FEATURES: Tuple[str, ...] = (
     "lanes",
 )
 
-GEOMETRY_FEATURES: Tuple[str, ...] = (
+GEOMETRY_FEATURES: tuple[str, ...] = (
     "edge_length_m",
     "edge_bearing_deg",
     "edge_sinuosity",
@@ -136,7 +136,7 @@ GEOMETRY_FEATURES: Tuple[str, ...] = (
     "edge_bbox_height_m",
 )
 
-SATELLITE_FEATURES: Tuple[str, ...] = (
+SATELLITE_FEATURES: tuple[str, ...] = (
     "rgb_mean_r",
     "rgb_mean_g",
     "rgb_mean_b",
@@ -159,9 +159,9 @@ SATELLITE_FEATURES: Tuple[str, ...] = (
     "sampled_pixel_count",
 )
 
-NUMERIC_FEATURES: Tuple[str, ...] = GEOMETRY_FEATURES + SATELLITE_FEATURES
+NUMERIC_FEATURES: tuple[str, ...] = GEOMETRY_FEATURES + SATELLITE_FEATURES
 
-PREDICTION_COLUMNS: Tuple[str, ...] = (
+PREDICTION_COLUMNS: tuple[str, ...] = (
     "edge_id",
     "u",
     "v",
@@ -195,7 +195,7 @@ PREDICTION_COLUMNS: Tuple[str, ...] = (
     "geometry_wkt",
 )
 
-SURFACE_COLORS: Dict[str, str] = {
+SURFACE_COLORS: dict[str, str] = {
     "paved_good": "#0B4F9C",
     "paved_rough": "#7B3294",
     "unpaved_hard": "#E08214",
@@ -203,7 +203,7 @@ SURFACE_COLORS: Dict[str, str] = {
     "unknown": "#8A8A8A",
 }
 
-ProgressFactory = Callable[[Iterable[Any], str, Optional[int]], Iterable[Any]]
+ProgressFactory = Callable[[Iterable[Any], str, int | None], Iterable[Any]]
 
 
 @dataclass(frozen=True)
@@ -240,7 +240,7 @@ class ExperimentArtifacts:
 def progress_iter(
     iterable: Iterable[Any],
     desc: str,
-    total: Optional[int] = None,
+    total: int | None = None,
 ) -> Iterable[Any]:
     if TQDM_AVAILABLE and tqdm is not None:
         return tqdm(iterable, total=total, desc=desc)
@@ -250,7 +250,7 @@ def progress_iter(
 def no_progress(
     iterable: Iterable[Any],
     desc: str,
-    total: Optional[int] = None,
+    total: int | None = None,
 ) -> Iterable[Any]:
     return iterable
 
@@ -290,7 +290,7 @@ def _first_osm_value(value: Any) -> Any:
     return value
 
 
-def normalize_osm_tag(value: Any) -> Optional[str]:
+def normalize_osm_tag(value: Any) -> str | None:
     v = _first_osm_value(value)
     if v is None:
         return None
@@ -331,16 +331,14 @@ def _as_float(value: Any) -> float:
         return float("nan")
 
 
-def _ensure_line_geometry(geom: Any) -> Optional[Any]:
+def _ensure_line_geometry(geom: Any) -> Any | None:
     if geom is None or getattr(geom, "is_empty", True):
         return None
     if isinstance(geom, (LineString, MultiLineString)):
         return geom
     if isinstance(geom, GeometryCollection):
         lines = [
-            g
-            for g in geom.geoms
-            if isinstance(g, (LineString, MultiLineString)) and not g.is_empty
+            g for g in geom.geoms if isinstance(g, (LineString, MultiLineString)) and not g.is_empty
         ]
         if not lines:
             return None
@@ -350,7 +348,7 @@ def _ensure_line_geometry(geom: Any) -> Optional[Any]:
     return None
 
 
-def _line_parts(geom: Any) -> List[LineString]:
+def _line_parts(geom: Any) -> list[LineString]:
     geom = _ensure_line_geometry(geom)
     if geom is None:
         return []
@@ -365,7 +363,7 @@ def _coord_count(geom: Any) -> int:
     return sum(len(part.coords) for part in _line_parts(geom))
 
 
-def _endpoints_wgs84(geom: Any) -> Optional[Tuple[float, float, float, float]]:
+def _endpoints_wgs84(geom: Any) -> tuple[float, float, float, float] | None:
     parts = _line_parts(geom)
     if not parts:
         return None
@@ -405,9 +403,9 @@ def _utm_crs_for(gdf: gpd.GeoDataFrame) -> Any:
     return "EPSG:3857"
 
 
-def _tile_fraction(lat: float, lon: float, zoom: int) -> Tuple[int, int, int, int]:
+def _tile_fraction(lat: float, lon: float, zoom: int) -> tuple[int, int, int, int]:
     lat = max(-85.05112878, min(85.05112878, float(lat)))
-    n = 2**int(zoom)
+    n = 2 ** int(zoom)
     xt = (float(lon) + 180.0) / 360.0 * n
     lat_rad = math.radians(lat)
     yt = (1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n
@@ -433,7 +431,7 @@ class ExistingTileReader:
         self.server = str(server)
         self.zoom = int(zoom)
         self.max_items = max(1, int(max_items))
-        self._cache: OrderedDict[Tuple[int, int], Optional[np.ndarray]] = OrderedDict()
+        self._cache: OrderedDict[tuple[int, int], np.ndarray | None] = OrderedDict()
 
     def _tile_path(self, x: int, y: int) -> Path:
         stem = f"{self.server}_{self.zoom}_{x}_{y}"
@@ -443,13 +441,13 @@ class ExistingTileReader:
                 return p
         return self.tiles_dir / f"{stem}.jpg"
 
-    def read(self, x: int, y: int) -> Optional[np.ndarray]:
+    def read(self, x: int, y: int) -> np.ndarray | None:
         key = (int(x), int(y))
         if key in self._cache:
             value = self._cache.pop(key)
             self._cache[key] = value
             return value
-        value: Optional[np.ndarray] = None
+        value: np.ndarray | None = None
         p = self._tile_path(x, y)
         if PIL_AVAILABLE and p.is_file() and Image is not None:
             try:
@@ -463,12 +461,12 @@ class ExistingTileReader:
         return value
 
 
-def load_edges_for_precache_area(settings: Settings) -> Tuple[gpd.GeoDataFrame, Dict[str, Any]]:
+def load_edges_for_precache_area(settings: Settings) -> tuple[gpd.GeoDataFrame, dict[str, Any]]:
     if not settings.has_precache_area_polygon:
         raise ValueError("PRECACHE_AREA_POLYGON_WKT is empty or not a polygon")
 
     poly = parse_precache_polygon(settings)
-    meta: Dict[str, Any] = {
+    meta: dict[str, Any] = {
         "precache_polygon_bounds_lonlat": tuple(float(x) for x in poly.bounds),
         "graph_source": None,
         "graph_path": None,
@@ -532,7 +530,9 @@ def filter_edges_to_polygon(
     projected = gdf.to_crs(projected_crs)
     length_m = projected.geometry.length.astype(float)
     gdf["length_m"] = length_m.values
-    gdf["length"] = np.where(np.isfinite(gdf["length"].map(_as_float)), gdf["length"], gdf["length_m"])
+    gdf["length"] = np.where(
+        np.isfinite(gdf["length"].map(_as_float)), gdf["length"], gdf["length_m"]
+    )
     gdf = gdf[np.isfinite(gdf["length_m"]) & (gdf["length_m"] > 0.0)].copy()
     gdf = gdf[gdf["highway"].map(normalize_osm_tag).notna()].copy()
     gdf = gdf.reset_index()
@@ -542,9 +542,7 @@ def filter_edges_to_polygon(
         gdf["v"] = None
     if "key" not in gdf.columns:
         gdf["key"] = 0
-    gdf["edge_id"] = [
-        f"{row.u}_{row.v}_{row.key}_{i}" for i, row in enumerate(gdf.itertuples())
-    ]
+    gdf["edge_id"] = [f"{row.u}_{row.v}_{row.key}_{i}" for i, row in enumerate(gdf.itertuples())]
     gdf["surface_osm_raw"] = gdf["surface"].map(_first_osm_value)
     gdf["surface_osm_norm"] = gdf["surface"].map(normalize_surface)
     gdf["surface_group_true"] = gdf["surface_osm_norm"].map(
@@ -556,7 +554,7 @@ def filter_edges_to_polygon(
 
 def limit_edges_for_experiment(
     edges_gdf: gpd.GeoDataFrame,
-    max_edges: Optional[int],
+    max_edges: int | None,
     *,
     random_state: int,
     min_known_edges: int = 100,
@@ -578,7 +576,7 @@ def limit_edges_for_experiment(
         )
     unknown_target = max(0, max_edges - known_target)
 
-    selected_known_parts: List[pd.DataFrame] = []
+    selected_known_parts: list[pd.DataFrame] = []
     if known_target > 0:
         groups = list(known.groupby("surface_group_true", sort=True))
         base_each = max(1, min(10, known_target // max(1, len(groups))))
@@ -636,7 +634,7 @@ def limit_edges_for_experiment(
     return out.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
 
 
-def _geometry_feature_row(row: Any, projected_geom: Any) -> Dict[str, Any]:
+def _geometry_feature_row(row: Any, projected_geom: Any) -> dict[str, Any]:
     length_m = float(getattr(projected_geom, "length", float("nan")))
     endpoints = _endpoints_wgs84(row.geometry)
     if endpoints is None:
@@ -670,12 +668,12 @@ def build_osm_geometry_dataset(
 ) -> pd.DataFrame:
     projected_crs = _utm_crs_for(edges_gdf)
     projected = edges_gdf.to_crs(projected_crs)
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     iterator = zip(edges_gdf.itertuples(index=False), projected.geometry.values)
     for row, projected_geom in progress(
         iterator, "[3/7] OSM/geometry features", total=len(edges_gdf)
     ):
-        item: Dict[str, Any] = {
+        item: dict[str, Any] = {
             "edge_id": row.edge_id,
             "u": str(row.u),
             "v": str(row.v),
@@ -696,9 +694,9 @@ def build_osm_geometry_dataset(
     return pd.DataFrame(rows)
 
 
-def _sample_projected_points(geom: Any, step_m: float) -> List[Point]:
+def _sample_projected_points(geom: Any, step_m: float) -> list[Point]:
     parts = _line_parts(geom)
-    points: List[Point] = []
+    points: list[Point] = []
     step_m = max(1.0, float(step_m))
     for part in parts:
         length = float(part.length)
@@ -716,7 +714,7 @@ def _sample_projected_points(geom: Any, step_m: float) -> List[Point]:
     return points
 
 
-def _rgb_to_hsv(rgb: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _rgb_to_hsv(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rgb_f = rgb.astype(np.float64) / 255.0
     r = rgb_f[:, 0]
     g = rgb_f[:, 1]
@@ -743,7 +741,7 @@ def _nan_tile_features(
     *,
     samples_count: int = 0,
     missing_share: float = 1.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     out = {name: float("nan") for name in SATELLITE_FEATURES}
     out["tile_samples_count"] = int(samples_count)
     out["sampled_pixel_count"] = 0
@@ -753,11 +751,11 @@ def _nan_tile_features(
 
 
 def _tile_features_from_pixels(
-    pixels: List[np.ndarray],
+    pixels: list[np.ndarray],
     *,
     samples_count: int,
     missing_count: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if not pixels:
         return _nan_tile_features(
             samples_count=samples_count,
@@ -785,8 +783,12 @@ def _tile_features_from_pixels(
         "saturation_mean": float(np.nanmean(s)),
         "saturation_std": float(np.nanstd(s)),
         "gray_pixel_share": float(np.mean((s < 0.18) & (v > 0.18) & (v < 0.92))),
-        "brown_pixel_share": float(np.mean((hue >= 15.0) & (hue <= 55.0) & (s > 0.20) & (v > 0.15))),
-        "green_pixel_share": float(np.mean((hue >= 70.0) & (hue <= 170.0) & (s > 0.20) & (v > 0.12))),
+        "brown_pixel_share": float(
+            np.mean((hue >= 15.0) & (hue <= 55.0) & (s > 0.20) & (v > 0.15))
+        ),
+        "green_pixel_share": float(
+            np.mean((hue >= 70.0) & (hue <= 170.0) & (s > 0.20) & (v > 0.12))
+        ),
         "dark_pixel_share": float(np.mean(v < 0.22)),
         "texture_std": float(np.nanstd(gray)),
         "tile_missing_share": missing_share,
@@ -808,7 +810,9 @@ def extract_tile_features_for_edges(
     projected = edges_gdf.to_crs(projected_crs)
     if Transformer is None:
         rows = []
-        for row in progress(edges_gdf.itertuples(index=False), "[4/7] Tile features", total=len(edges_gdf)):
+        for row in progress(
+            edges_gdf.itertuples(index=False), "[4/7] Tile features", total=len(edges_gdf)
+        ):
             item = {"edge_id": row.edge_id}
             item.update(_nan_tile_features())
             rows.append(item)
@@ -823,11 +827,11 @@ def extract_tile_features_for_edges(
         max_items=config.max_tile_cache_items,
     )
     half = max(0, int(config.pixel_window) // 2)
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     iterator = zip(edges_gdf.itertuples(index=False), projected.geometry.values)
     for row, projected_geom in progress(iterator, "[4/7] Tile features", total=len(edges_gdf)):
         try:
-            pixels: List[np.ndarray] = []
+            pixels: list[np.ndarray] = []
             sample_points = _sample_projected_points(projected_geom, config.sample_step_m)
             missing = 0
             for point in sample_points:
@@ -935,8 +939,7 @@ def validate_training_data(dataset: pd.DataFrame, config: SurfaceMLConfig) -> No
     class_count = int(known["surface_group_true"].nunique())
     if class_count < 2:
         raise ValueError(
-            f"Not enough surface classes for training: found {class_count}. "
-            "Need at least 2."
+            f"Not enough surface classes for training: found {class_count}. Need at least 2."
         )
 
 
@@ -947,11 +950,13 @@ def spatial_train_test_split(
     grid_m: float,
     test_share: float,
     random_state: int,
-) -> Tuple[np.ndarray, np.ndarray, pd.Series]:
+) -> tuple[np.ndarray, np.ndarray, pd.Series]:
     known_edge_ids = set(known_df["edge_id"].astype(str))
     known_edges = edges_gdf[edges_gdf["edge_id"].astype(str).isin(known_edge_ids)].copy()
     if len(known_edges) != len(known_df):
-        known_edges = known_edges.set_index("edge_id").loc[known_df["edge_id"].astype(str)].reset_index()
+        known_edges = (
+            known_edges.set_index("edge_id").loc[known_df["edge_id"].astype(str)].reset_index()
+        )
     projected = known_edges.to_crs(_utm_crs_for(known_edges))
     cent = projected.geometry.centroid
     gx = np.floor(cent.x.to_numpy() / max(1.0, float(grid_m))).astype(np.int64)
@@ -1031,7 +1036,7 @@ def _classification_metrics(
     y_pred: Sequence[str],
     *,
     labels: Sequence[str],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     report = classification_report(
         y_true,
         y_pred,
@@ -1081,7 +1086,7 @@ def train_surface_model(
     config: SurfaceMLConfig,
     *,
     progress: ProgressFactory = no_progress,
-) -> Tuple[Pipeline, Dict[str, Any], pd.DataFrame]:
+) -> tuple[Pipeline, dict[str, Any], pd.DataFrame]:
     validate_training_data(dataset, config)
     known = dataset[dataset["is_surface_known"]].copy().reset_index(drop=True)
     train_mask, test_mask, cells = spatial_train_test_split(
@@ -1101,7 +1106,10 @@ def train_surface_model(
     metrics = _classification_metrics(y.loc[test_mask].tolist(), test_pred.tolist(), labels=labels)
     metrics.update(
         {
-            "class_distribution_all_known": known["surface_group_true"].value_counts().sort_index().to_dict(),
+            "class_distribution_all_known": known["surface_group_true"]
+            .value_counts()
+            .sort_index()
+            .to_dict(),
             "class_distribution_train": y.loc[train_mask].value_counts().sort_index().to_dict(),
             "class_distribution_test": y.loc[test_mask].value_counts().sort_index().to_dict(),
             "known_edges_count": int(len(known)),
@@ -1155,7 +1163,7 @@ def apply_prediction_policy(
     true_group: str,
     has_features: bool,
     config: SurfaceMLConfig,
-) -> Tuple[str, str, str, float]:
+) -> tuple[str, str, str, float]:
     if is_surface_known:
         group = true_group if true_group in SURFACE_GROUPS else "unknown"
         return group, group, "osm", 1.0
@@ -1188,11 +1196,11 @@ def predict_all_edges(
     out["surface_pred_proba_paved_rough"] = out["proba_paved_rough"]
     out["surface_pred_proba_unpaved_hard"] = out["proba_unpaved_hard"]
     out["surface_pred_proba_unpaved_soft"] = out["proba_unpaved_soft"]
-    pred_groups: List[str] = []
-    effective_groups: List[str] = []
-    sources: List[str] = []
-    final_conf: List[float] = []
-    has_features_col: List[bool] = []
+    pred_groups: list[str] = []
+    effective_groups: list[str] = []
+    sources: list[str] = []
+    final_conf: list[float] = []
+    has_features_col: list[bool] = []
     for idx, row in out.iterrows():
         has_features = _has_any_model_features(row)
         pred, eff, src, conf = apply_prediction_policy(
@@ -1216,7 +1224,7 @@ def predict_all_edges(
     return out
 
 
-def experiment_output_dir(settings: Settings, output_dir: Optional[Path] = None) -> Path:
+def experiment_output_dir(settings: Settings, output_dir: Path | None = None) -> Path:
     if output_dir is not None:
         out = Path(output_dir)
     else:
@@ -1277,7 +1285,9 @@ def write_predictions_geojson(
     path: Path,
 ) -> None:
     base = edges_gdf[["edge_id", "geometry"]].copy()
-    gdf = base.merge(predictions.drop(columns=["geometry"], errors="ignore"), on="edge_id", how="left")
+    gdf = base.merge(
+        predictions.drop(columns=["geometry"], errors="ignore"), on="edge_id", how="left"
+    )
     gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs="EPSG:4326")
     path.parent.mkdir(parents=True, exist_ok=True)
     gdf.to_file(path, driver="GeoJSON")
@@ -1317,8 +1327,7 @@ def plot_surface_map(
     for group in list(SURFACE_GROUPS) + ["unknown"]:
         for source, style in source_styles.items():
             subset = gdf[
-                (gdf["surface_group_effective"] == group)
-                & (gdf["surface_source"] == source)
+                (gdf["surface_group_effective"] == group) & (gdf["surface_source"] == source)
             ]
             if subset.empty:
                 continue
@@ -1354,10 +1363,12 @@ def plot_surface_map(
     plt.close(fig)
 
 
-def plot_confusion_matrix_png(metrics: Dict[str, Any], path: Path) -> None:
+def plot_confusion_matrix_png(metrics: dict[str, Any], path: Path) -> None:
     plt = _import_pyplot()
     labels = list(metrics.get("confusion_matrix_labels") or SURFACE_GROUPS)
-    cm = np.asarray(metrics.get("confusion_matrix") or np.zeros((len(labels), len(labels))), dtype=float)
+    cm = np.asarray(
+        metrics.get("confusion_matrix") or np.zeros((len(labels), len(labels))), dtype=float
+    )
     fig, ax = plt.subplots(figsize=(7, 6))
     im = ax.imshow(cm, cmap="Blues")
     ax.set_xticks(np.arange(len(labels)), labels=labels, rotation=35, ha="right")
@@ -1373,7 +1384,9 @@ def plot_confusion_matrix_png(metrics: Dict[str, Any], path: Path) -> None:
     plt.close(fig)
 
 
-def plot_feature_importance_png(feature_importance: pd.DataFrame, path: Path, *, top_n: int = 25) -> None:
+def plot_feature_importance_png(
+    feature_importance: pd.DataFrame, path: Path, *, top_n: int = 25
+) -> None:
     plt = _import_pyplot()
     df = feature_importance.head(top_n).iloc[::-1].copy()
     fig_h = max(4.0, min(12.0, 0.35 * max(1, len(df))))
@@ -1386,7 +1399,7 @@ def plot_feature_importance_png(feature_importance: pd.DataFrame, path: Path, *,
     plt.close(fig)
 
 
-def write_metrics_json(metrics: Dict[str, Any], path: Path) -> None:
+def write_metrics_json(metrics: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(_json_safe(metrics), f, ensure_ascii=False, indent=2)
@@ -1395,7 +1408,7 @@ def write_metrics_json(metrics: Dict[str, Any], path: Path) -> None:
 def write_model_joblib(
     pipeline: Pipeline,
     feature_importance: pd.DataFrame,
-    metrics: Dict[str, Any],
+    metrics: dict[str, Any],
     config: SurfaceMLConfig,
     path: Path,
 ) -> None:
@@ -1416,9 +1429,9 @@ def write_model_info_xlsx(
     path: Path,
     *,
     config: SurfaceMLConfig,
-    metrics: Dict[str, Any],
+    metrics: dict[str, Any],
     feature_importance: pd.DataFrame,
-    run_meta: Dict[str, Any],
+    run_meta: dict[str, Any],
     artifacts: ExperimentArtifacts,
 ) -> None:
     rows = []
@@ -1474,7 +1487,7 @@ def write_model_info_xlsx(
         files.to_excel(writer, sheet_name="artifacts", index=False)
 
 
-def dataset_summary(dataset: pd.DataFrame) -> Dict[str, Any]:
+def dataset_summary(dataset: pd.DataFrame) -> dict[str, Any]:
     total = int(len(dataset))
     known = int(dataset["is_surface_known"].sum()) if total else 0
     unknown = total - known
@@ -1483,7 +1496,9 @@ def dataset_summary(dataset: pd.DataFrame) -> Dict[str, Any]:
         "known_surface_edges": known,
         "unknown_surface_edges": unknown,
         "unknown_share": float(unknown / total) if total else 0.0,
-        "surface_group_distribution": dataset["surface_group_true"].value_counts(dropna=False).to_dict(),
+        "surface_group_distribution": dataset["surface_group_true"]
+        .value_counts(dropna=False)
+        .to_dict(),
         "highway_distribution": dataset["highway"].value_counts(dropna=False).head(50).to_dict(),
     }
 
@@ -1492,9 +1507,9 @@ def write_report(
     path: Path,
     *,
     config: SurfaceMLConfig,
-    summary: Dict[str, Any],
-    metrics: Dict[str, Any],
-    run_meta: Dict[str, Any],
+    summary: dict[str, Any],
+    metrics: dict[str, Any],
+    run_meta: dict[str, Any],
     artifacts: ExperimentArtifacts,
 ) -> None:
     lines = [
@@ -1549,17 +1564,17 @@ def write_report(
 
 def run_surface_ml_experiment(
     *,
-    settings: Optional[Settings] = None,
-    config: Optional[SurfaceMLConfig] = None,
-    max_edges: Optional[int] = None,
-    output_dir: Optional[Path] = None,
+    settings: Settings | None = None,
+    config: SurfaceMLConfig | None = None,
+    max_edges: int | None = None,
+    output_dir: Path | None = None,
     progress: ProgressFactory = progress_iter,
 ) -> ExperimentArtifacts:
     settings = settings or Settings()
     config = config or SurfaceMLConfig()
     out_dir = experiment_output_dir(settings, output_dir)
     artifacts = artifact_paths(out_dir)
-    run_meta: Dict[str, Any] = {
+    run_meta: dict[str, Any] = {
         "tiles_dir": str(Path(settings.cache_dir) / "tiles"),
         "satellite_zoom": int(settings.satellite_zoom),
         "tms_server": str(settings.tms_server),
@@ -1627,4 +1642,3 @@ def run_surface_ml_experiment(
         artifacts=artifacts,
     )
     return artifacts
-

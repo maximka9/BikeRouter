@@ -1,4 +1,4 @@
-﻿"""Общие функции пакетных экспериментов маршрутов (Excel, точки, сводки).
+"""Общие функции пакетных экспериментов маршрутов (Excel, точки, сводки).
 
 Используется ``route_variants_experiment``, ``heat_weather_experiment``, ``route_batch_experiment``
 и ``run_variants_over_weather_cases`` (см. ``_run_variants_weather_batch``).
@@ -8,22 +8,19 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
-import os
 import re
-import sys
-import time
-import uuid
 import types
-from pathlib import Path
 from collections import Counter, defaultdict
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from datetime import time as dt_time
 from math import asin, cos, radians, sin, sqrt
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any
 
 try:
     from zoneinfo import ZoneInfo
@@ -60,7 +57,7 @@ def _set_quiet_mode_for_batch(verbose: bool) -> None:
 
 
 # Порядок как в engine._UNIFIED_ROUTE_ORDER
-EXPECTED_VARIANTS: Tuple[str, ...] = (
+EXPECTED_VARIANTS: tuple[str, ...] = (
     "shortest",
     "full",
     "green",
@@ -69,10 +66,10 @@ EXPECTED_VARIANTS: Tuple[str, ...] = (
     "heat_stress",
 )
 
-PROFILES: Tuple[str, ...] = ("cyclist", "pedestrian")
+PROFILES: tuple[str, ...] = ("cyclist", "pedestrian")
 
 # Перебор буфера коридора в этом эксперименте; дальше — пропуск пары (см. RouteNotFoundError).
-EXPERIMENT_CORRIDOR_EXPAND_M: Tuple[float, ...] = (10.0, 100.0)
+EXPERIMENT_CORRIDOR_EXPAND_M: tuple[float, ...] = (10.0, 100.0)
 
 # Часовой пояс для «локального часа» в multi-day Open-Meteo (можно переопределить BATCH_WEATHER_TZ).
 _DEFAULT_BATCH_WEATHER_TZ = "Europe/Samara"
@@ -95,7 +92,7 @@ def _sanitize_experiment_xlsx_suffix(raw: str) -> str:
 def experiment_output_xlsx_path(
     *,
     script_stem: str,
-    filename_suffix: Optional[str] = None,
+    filename_suffix: str | None = None,
 ) -> str:
     """Путь к .xlsx в ``bike_router/experiment_outputs``.
 
@@ -111,8 +108,10 @@ def experiment_output_xlsx_path(
             safe = "run"
         fn = f"{script_stem}_{safe}.xlsx"
     else:
-        fn = datetime.now(timezone.utc).strftime(f"{script_stem}_%Y%m%d_%H%M%S.xlsx")
+        fn = datetime.now(UTC).strftime(f"{script_stem}_%Y%m%d_%H%M%S.xlsx")
     return str(out_dir / fn)
+
+
 # Режим ``past``: столько дней архива, каждый день — 14:00 локально.
 PAST_ARCHIVE_DAYS = 10
 PAST_ARCHIVE_LOCAL_HOUR = 14
@@ -132,23 +131,23 @@ class SyntheticWeatherCase:
     humidity_pct: float
     shortwave_radiation_wm2: float
     # Ощущаемая температура °C (Open-Meteo); None — как температура воздуха.
-    apparent_temperature_c: Optional[float] = None
+    apparent_temperature_c: float | None = None
     # ISO для сезонного профиля (зима / апрель / лето); по умолчанию — летний synthetic.
     weather_time_iso: str = SYNTHETIC_TEST_WEATHER_ISO
     snowfall_cm_h: float = 0.0
     snow_depth_m: float = 0.0
-    weather_code: Optional[int] = None
+    weather_code: int | None = None
     # Метео ° — откуда дует (Open-Meteo); None — без direction-aware ветра.
-    wind_direction_deg: Optional[float] = None
+    wind_direction_deg: float | None = None
 
 
-def weather_windows_test_grid() -> List[SyntheticWeatherCase]:
+def weather_windows_test_grid() -> list[SyntheticWeatherCase]:
     """3×2×2×3 = 36 синтетических сценариев (температура × дождь × ветер × облачность)."""
     temps = (0.0, 12.5, 25.0)
     rains = ((False, 0.0), (True, 1.5))
     winds = ((False, 2.0, 3.0), (True, 9.0, 14.0))
     clouds = ((0.0, 750.0), (50.0, 400.0), (100.0, 80.0))
-    out: List[SyntheticWeatherCase] = []
+    out: list[SyntheticWeatherCase] = []
     for T in temps:
         for rain_on, precip in rains:
             for wind_flag, w_ms, g_ms in winds:
@@ -172,11 +171,11 @@ def weather_windows_test_grid() -> List[SyntheticWeatherCase]:
     return out
 
 
-def weather_summer_test_grid_with_wind_dirs() -> List[SyntheticWeatherCase]:
+def weather_summer_test_grid_with_wind_dirs() -> list[SyntheticWeatherCase]:
     """36 летних × 4 направления = 144 (полный обход углов; для батча см. ``weather_summer_heat_grid``)."""
     base = weather_windows_test_grid()
     dirs = (0.0, 90.0, 180.0, 270.0)
-    out: List[SyntheticWeatherCase] = []
+    out: list[SyntheticWeatherCase] = []
     for c in base:
         for d in dirs:
             out.append(
@@ -200,7 +199,7 @@ def weather_summer_test_grid_with_wind_dirs() -> List[SyntheticWeatherCase]:
     return out
 
 
-def weather_summer_heat_grid() -> List[SyntheticWeatherCase]:
+def weather_summer_heat_grid() -> list[SyntheticWeatherCase]:
     """95 летних synthetic: базовая сетка 90 + 5 кейсов apparent temperature.
 
     3×2×3 базовых по темп/дождь/облачность × (9 calm + 18 strong wind rows) = 90;
@@ -210,7 +209,7 @@ def weather_summer_heat_grid() -> List[SyntheticWeatherCase]:
     rains = ((False, 0.0), (True, 1.5))
     winds = ((False, 2.0, 3.0), (True, 9.0, 14.0))
     clouds = ((0.0, 750.0), (50.0, 400.0), (100.0, 80.0))
-    out: List[SyntheticWeatherCase] = []
+    out: list[SyntheticWeatherCase] = []
     for T in temps:
         for rain_on, precip in rains:
             for wind_flag, w_ms, g_ms in winds:
@@ -305,7 +304,7 @@ WINTER_SYNTH_WEATHER_ISO = "2000-02-15T12:00:00+00:00"
 EARLY_SPRING_SYNTH_WEATHER_ISO = "2000-04-05T12:00:00+00:00"
 
 
-def weather_winter_synthetic_grid() -> List[SyntheticWeatherCase]:
+def weather_winter_synthetic_grid() -> list[SyntheticWeatherCase]:
     """3×3×3×2 = 54: температура × снегопад × глубина снега на земле × ветер (зимние synthetic-кейсы)."""
     temps = (-20.0, -10.0, 0.0)
     fresh_levels = (
@@ -315,7 +314,7 @@ def weather_winter_synthetic_grid() -> List[SyntheticWeatherCase]:
     )
     depths_m = (0.0, 0.10, 0.22)
     winds = ((2.0, 3.0, "W0"), (11.0, 15.0, "W1"))
-    out: List[SyntheticWeatherCase] = []
+    out: list[SyntheticWeatherCase] = []
     for T in temps:
         for sf, ftag in fresh_levels:
             for dm in depths_m:
@@ -344,11 +343,11 @@ def weather_winter_synthetic_grid() -> List[SyntheticWeatherCase]:
     return out
 
 
-def weather_winter_synthetic_grid_with_wind_dirs() -> List[SyntheticWeatherCase]:
+def weather_winter_synthetic_grid_with_wind_dirs() -> list[SyntheticWeatherCase]:
     """54 зимних × 4 направления = 216 (полный обход; для батча см. ``weather_winter_heat_grid``)."""
     base = weather_winter_synthetic_grid()
     dirs = (0.0, 90.0, 180.0, 270.0)
-    out: List[SyntheticWeatherCase] = []
+    out: list[SyntheticWeatherCase] = []
     for c in base:
         for d in dirs:
             out.append(
@@ -372,13 +371,13 @@ def weather_winter_synthetic_grid_with_wind_dirs() -> List[SyntheticWeatherCase]
     return out
 
 
-def weather_winter_heat_grid() -> List[SyntheticWeatherCase]:
+def weather_winter_heat_grid() -> list[SyntheticWeatherCase]:
     """135 зимних synthetic: W0 (слабый ветер) — одно направление; W1 — четыре.
 
     27 пространственных комбинаций × (1 + 4) направлений по силе ветра = 135.
     """
     base = weather_winter_synthetic_grid()
-    out: List[SyntheticWeatherCase] = []
+    out: list[SyntheticWeatherCase] = []
     for c in base:
         strong = float(c.wind_speed_ms) >= 9.0
         wind_dirs = (0.0, 90.0, 180.0, 270.0) if strong else (0.0,)
@@ -404,7 +403,7 @@ def weather_winter_heat_grid() -> List[SyntheticWeatherCase]:
     return out
 
 
-def _batch_profiles_from_arg(arg: str) -> Tuple[str, ...]:
+def _batch_profiles_from_arg(arg: str) -> tuple[str, ...]:
     v = (arg or "both").strip().lower()
     if v == "both":
         return ("cyclist", "pedestrian")
@@ -417,12 +416,10 @@ def _batch_profiles_from_arg(arg: str) -> Tuple[str, ...]:
 
 def _batch_output_xlsx_path() -> str:
     """Уникальное имя: route_experiment_batch_YYYYMMDD_HHMMSS.xlsx (UTC)."""
-    return datetime.now(timezone.utc).strftime(
-        "route_experiment_batch_%Y%m%d_%H%M%S.xlsx"
-    )
+    return datetime.now(UTC).strftime("route_experiment_batch_%Y%m%d_%H%M%S.xlsx")
 
 
-def centroid_lat_lon_for_weather(poly: Any) -> Tuple[float, float]:
+def centroid_lat_lon_for_weather(poly: Any) -> tuple[float, float]:
     """Центр bounds полигона: (lat, lon) для одного запроса погоды."""
     minx, miny, maxx, maxy = poly.bounds
     lon_mid = (float(minx) + float(maxx)) * 0.5
@@ -433,11 +430,9 @@ def centroid_lat_lon_for_weather(poly: Any) -> Tuple[float, float]:
 def kwargs_fixed_snapshot_from_case(
     case: SyntheticWeatherCase,
     *,
-    weather_time_iso: Optional[str] = None,
-) -> Dict[str, Any]:
-    wt = weather_time_iso or getattr(
-        case, "weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO
-    )
+    weather_time_iso: str | None = None,
+) -> dict[str, Any]:
+    wt = weather_time_iso or getattr(case, "weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO)
     return {
         "weather_mode": "fixed-snapshot",
         "use_live_weather": False,
@@ -461,17 +456,15 @@ def resolve_live_weather_once_for_polygon(
     poly: Any,
     *,
     settings: Any,
-    departure_iso: Optional[str] = None,
-) -> Tuple[Any, str, Any, str, float, float]:
+    departure_iso: str | None = None,
+) -> tuple[Any, str, Any, str, float, float]:
     """Один вызов Open-Meteo в центре полигона; возвращает snap, src, wp, dep, lat, lon."""
     from bike_router.engine import _resolve_route_weather
 
     lat_c, lon_c = centroid_lat_lon_for_weather(poly)
     start = (lat_c, lon_c)
     end = (lat_c, lon_c)
-    dep = departure_iso or datetime.now(timezone.utc).replace(
-        microsecond=0
-    ).isoformat()
+    dep = departure_iso or datetime.now(UTC).replace(microsecond=0).isoformat()
     _thermal = {
         "hot_tree": float(settings.heat_hot_tree_bonus_scale),
         "hot_open": float(settings.heat_hot_open_sky_penalty_scale),
@@ -501,7 +494,7 @@ def resolve_live_weather_once_for_polygon(
 
 
 def meta_append_batch_weather_snapshot(
-    base: List[Tuple[str, Any]],
+    base: list[tuple[str, Any]],
     *,
     snap: Any,
     source: str,
@@ -510,7 +503,7 @@ def meta_append_batch_weather_snapshot(
     center_lon: float,
     experiment_kind: str,
     wp: Any = None,
-) -> List[Tuple[str, Any]]:
+) -> list[tuple[str, Any]]:
     """Поля снимка погоды для листа «Метаданные» (сырые величины).
 
     Если передан ``wp`` (WeatherWeightParams после build), добавляются сезон и сила snow-модели.
@@ -536,9 +529,7 @@ def meta_append_batch_weather_snapshot(
     )
     out.append(("snapshot_wind_speed_ms", getattr(snap, "wind_speed_ms", None)))
     out.append(("snapshot_wind_gusts_ms", getattr(snap, "wind_gusts_ms", None)))
-    out.append(
-        ("snapshot_wind_direction_deg", getattr(snap, "wind_direction_deg", None))
-    )
+    out.append(("snapshot_wind_direction_deg", getattr(snap, "wind_direction_deg", None)))
     out.append(("snapshot_cloud_cover_pct", getattr(snap, "cloud_cover_pct", None)))
     out.append(("snapshot_humidity_pct", getattr(snap, "humidity_pct", None)))
     out.append(
@@ -554,9 +545,7 @@ def meta_append_batch_weather_snapshot(
     out.append(("snapshot_weather_code", getattr(snap, "weather_code", None)))
     out.append(("weather_snapshot_source", source))
     if wp is not None and bool(getattr(wp, "enabled", False)):
-        out.append(
-            ("snapshot_routing_season", str(getattr(wp, "routing_season", "") or ""))
-        )
+        out.append(("snapshot_routing_season", str(getattr(wp, "routing_season", "") or "")))
         out.append(
             (
                 "snapshot_routing_season_calendar",
@@ -586,9 +575,7 @@ def meta_append_batch_weather_snapshot(
 
 def _zoneinfo_or_raise(name: str) -> Any:
     if ZoneInfo is None:
-        raise RuntimeError(
-            "Нужен Python 3.9+ с tzdata для часового пояса погоды (zoneinfo)."
-        )
+        raise RuntimeError("Нужен Python 3.9+ с tzdata для часового пояса погоды (zoneinfo).")
     return ZoneInfo(name)
 
 
@@ -597,7 +584,7 @@ def weather_windows_past_local_days(
     past_days: int,
     local_hour: int,
     tz_name: str,
-) -> List[Tuple[str, str]]:
+) -> list[tuple[str, str]]:
     """Календарные даты в прошлом (вчера, позавчера, …) и ISO-время для Open-Meteo.
 
     Возвращает список из ``past_days`` пар
@@ -606,7 +593,7 @@ def weather_windows_past_local_days(
     tz = _zoneinfo_or_raise(tz_name)
     if not (0 <= int(local_hour) <= 23):
         raise ValueError("local_hour должен быть 0..23")
-    out: List[Tuple[str, str]] = []
+    out: list[tuple[str, str]] = []
     today = datetime.now(tz).date()
     for k in range(1, int(past_days) + 1):
         d = today - timedelta(days=k)
@@ -746,7 +733,7 @@ def _surface_report_norm(val: Any) -> str:
     return str(val).strip().lower()
 
 
-def _surface_report_raw_osm_surface(edge_data: Dict[str, Any]) -> str:
+def _surface_report_raw_osm_surface(edge_data: dict[str, Any]) -> str:
     for key in ("surface_osm", "surface"):
         s = _surface_report_norm(edge_data.get(key))
         if s and s != "nan":
@@ -754,7 +741,7 @@ def _surface_report_raw_osm_surface(edge_data: Dict[str, Any]) -> str:
     return ""
 
 
-def _surface_report_effective_surface(edge_data: Dict[str, Any]) -> str:
+def _surface_report_effective_surface(edge_data: dict[str, Any]) -> str:
     s = _surface_report_norm(edge_data.get("surface_effective"))
     if s and s != "nan":
         return s
@@ -801,12 +788,17 @@ def _surface_report_source_category(
     src = _surface_report_norm(source_value)
     if src == "osm" or src.startswith("osm_"):
         return "osm"
-    if src == "ml" or src.startswith("ml_") or src in {
-        "ai",
-        "model",
-        "surface_ai",
-        "surface-ml",
-    }:
+    if (
+        src == "ml"
+        or src.startswith("ml_")
+        or src
+        in {
+            "ai",
+            "model",
+            "surface_ai",
+            "surface-ml",
+        }
+    ):
         return "ml"
     if (
         src == "heuristic"
@@ -824,7 +816,7 @@ def _surface_report_source_category(
     return "heuristic" if effective_surface else "unknown"
 
 
-def route_surface_source_report_metrics(G: Any, route: Any) -> Dict[str, float]:
+def route_surface_source_report_metrics(G: Any, route: Any) -> dict[str, float]:
     """Доли источников покрытия вдоль маршрута по сумме длин рёбер, в процентах."""
     meters = {
         "osm_surface_missing": 0.0,
@@ -882,7 +874,7 @@ def route_surface_source_report_metrics(G: Any, route: Any) -> Dict[str, float]:
 def call_with_route_surface_source_report(
     engine: Any,
     call: Callable[[], Any],
-) -> Tuple[Any, Dict[str, Dict[str, float]]]:
+) -> tuple[Any, dict[str, dict[str, float]]]:
     """Выполнить вызов движка и снять route-level surface metrics без изменения API."""
     engine_dict = getattr(engine, "__dict__", {})
     had_instance_attr = "_build_route_response" in engine_dict
@@ -891,12 +883,12 @@ def call_with_route_surface_source_report(
     if original is None:
         return call(), {}
 
-    report_by_mode: Dict[str, Dict[str, float]] = {}
+    report_by_mode: dict[str, dict[str, float]] = {}
 
     def wrapped(
         self: Any,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         mode: str,
         route: Any,
@@ -915,11 +907,7 @@ def call_with_route_surface_source_report(
             **kwargs,
         )
         try:
-            G = (
-                kwargs.get("graph")
-                or getattr(self, "graph", None)
-                or getattr(self, "_graph", None)
-            )
+            G = kwargs.get("graph") or getattr(self, "graph", None) or getattr(self, "_graph", None)
             report_by_mode[str(getattr(response, "mode", mode) or mode)] = (
                 route_surface_source_report_metrics(G, route)
             )
@@ -931,12 +919,12 @@ def call_with_route_surface_source_report(
             )
         return response
 
-    setattr(engine, "_build_route_response", types.MethodType(wrapped, engine))
+    engine._build_route_response = types.MethodType(wrapped, engine)
     try:
         result = call()
     finally:
         if had_instance_attr:
-            setattr(engine, "_build_route_response", original_instance_attr)
+            engine._build_route_response = original_instance_attr
         else:
             try:
                 delattr(engine, "_build_route_response")
@@ -945,10 +933,10 @@ def call_with_route_surface_source_report(
     return result, report_by_mode
 
 
-def _surface_ml_report_row(metrics: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _surface_ml_report_row(metrics: dict[str, Any] | None) -> dict[str, Any]:
     if metrics is None:
         return {}
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for key in SURFACE_ML_REPORT_KEYS:
         v = metrics.get(key)
         if v is None or v == "":
@@ -964,20 +952,16 @@ def _surface_ml_report_row(metrics: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def add_surface_ml_report_summary_means(
-    summary_variant: List[Dict[str, Any]],
-    raw_rows: List[Dict[str, Any]],
+    summary_variant: list[dict[str, Any]],
+    raw_rows: list[dict[str, Any]],
 ) -> None:
     """Добавить в блок «Средние по варианту» средние ML surface доли, в процентах."""
-    if not raw_rows or not any(
-        k in row for row in raw_rows for k in SURFACE_ML_REPORT_KEYS
-    ):
+    if not raw_rows or not any(k in row for row in raw_rows for k in SURFACE_ML_REPORT_KEYS):
         return
 
-    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in raw_rows:
-        groups[
-            (str(row.get("profile") or ""), str(row.get("variant_key") or ""))
-        ].append(row)
+        groups[(str(row.get("profile") or ""), str(row.get("variant_key") or ""))].append(row)
 
     for srow in summary_variant:
         rs = groups.get(
@@ -988,7 +972,7 @@ def add_surface_ml_report_summary_means(
             [],
         )
         for key in SURFACE_ML_REPORT_KEYS:
-            vals: List[float] = []
+            vals: list[float] = []
             for row in rs:
                 v = row.get(key)
                 if v is None or v == "":
@@ -1003,9 +987,9 @@ def add_surface_ml_report_summary_means(
             srow[f"mean_{key}"] = round(m, 2) if m is not None else None
 
 
-def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
+def _weather_metrics_from_route(r: Any) -> dict[str, Any]:
     """Числовые поля снимка Open-Meteo из ответа движка (для Excel и сводок)."""
-    empty: Dict[str, Any] = {
+    empty: dict[str, Any] = {
         "weather_temperature_c": None,
         "weather_apparent_temperature_c": None,
         "weather_effective_heat_temperature_c": None,
@@ -1065,7 +1049,7 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
     if s is None:
         return empty
 
-    def _f(name: str) -> Optional[float]:
+    def _f(name: str) -> float | None:
         v = getattr(s, name, None)
         if v is None:
             return None
@@ -1089,27 +1073,19 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "weather_wind_speed_ms": _f("wind_speed_ms"),
         "weather_wind_gusts_ms": _f("wind_gusts_ms"),
         "weather_wind_direction_deg": _f("wind_direction_deg"),
-        "weather_wind_direction_aware": bool(
-            getattr(w, "wind_direction_available", False)
-        ),
+        "weather_wind_direction_aware": bool(getattr(w, "wind_direction_available", False)),
         "weather_cloud_cover_pct": _f("cloud_cover_pct"),
         "weather_humidity_pct": _f("humidity_pct"),
         "weather_shortwave_radiation_wm2": _f("shortwave_radiation_wm2"),
         "weather_snowfall_cm_h": _f("snowfall_cm_h"),
         "weather_snow_depth_m": _f("snow_depth_m"),
-        "weather_weather_code": int(getattr(s, "weather_code"))
+        "weather_weather_code": int(s.weather_code)
         if getattr(s, "weather_code", None) is not None
         else None,
         "weather_routing_season": str(getattr(w, "routing_season", "") or ""),
-        "weather_routing_season_calendar": str(
-            getattr(w, "routing_season_calendar", "") or ""
-        ),
-        "weather_routing_season_source": str(
-            getattr(w, "routing_season_source", "") or ""
-        ),
-        "weather_season_green_mult": float(
-            getattr(w, "season_green_route_mult", 1.0) or 1.0
-        ),
+        "weather_routing_season_calendar": str(getattr(w, "routing_season_calendar", "") or ""),
+        "weather_routing_season_source": str(getattr(w, "routing_season_source", "") or ""),
+        "weather_season_green_mult": float(getattr(w, "season_green_route_mult", 1.0) or 1.0),
         "weather_season_tree_heat_mult": float(
             getattr(w, "season_tree_heat_route_mult", 1.0) or 1.0
         ),
@@ -1125,18 +1101,10 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
         "weather_stress_route_regime_factor": float(
             getattr(w, "stress_route_regime_factor", 1.0) or 1.0
         ),
-        "weather_snow_model_strength": float(
-            getattr(w, "snow_model_strength", 0.0) or 0.0
-        ),
-        "weather_snow_export_phys_amp": float(
-            getattr(w, "snow_export_phys_amp", 1.0) or 1.0
-        ),
-        "weather_snow_export_stress_amp": float(
-            getattr(w, "snow_export_stress_amp", 1.0) or 1.0
-        ),
-        "weather_snow_export_surface_amp": float(
-            getattr(w, "snow_export_surface_amp", 1.0) or 1.0
-        ),
+        "weather_snow_model_strength": float(getattr(w, "snow_model_strength", 0.0) or 0.0),
+        "weather_snow_export_phys_amp": float(getattr(w, "snow_export_phys_amp", 1.0) or 1.0),
+        "weather_snow_export_stress_amp": float(getattr(w, "snow_export_stress_amp", 1.0) or 1.0),
+        "weather_snow_export_surface_amp": float(getattr(w, "snow_export_surface_amp", 1.0) or 1.0),
         "weather_heat_continuous": bool(getattr(w, "heat_continuous", False)),
         "heat_tree_shade_bonus": None,
         "heat_open_sky_penalty": None,
@@ -1198,8 +1166,6 @@ def _weather_metrics_from_route(r: Any) -> Dict[str, Any]:
     return out
 
 
-
-
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Расстояние по поверхности сферы (м)."""
     r = 6371000.0
@@ -1222,7 +1188,7 @@ class SampledPoint:
     nearest_node_id: int
 
 
-def _iter_directed_pairs(n: int) -> Iterator[Tuple[int, int]]:
+def _iter_directed_pairs(n: int) -> Iterator[tuple[int, int]]:
     for i in range(n):
         for j in range(n):
             if i == j:
@@ -1230,7 +1196,7 @@ def _iter_directed_pairs(n: int) -> Iterator[Tuple[int, int]]:
             yield i, j
 
 
-def _iter_undirected_pairs(n: int) -> Iterator[Tuple[int, int]]:
+def _iter_undirected_pairs(n: int) -> Iterator[tuple[int, int]]:
     """Пары i<j — один раз на неориентированную пару точек (для heat synthetic)."""
     for i in range(n):
         for j in range(i + 1, n):
@@ -1249,16 +1215,15 @@ def sample_points_in_polygon(
     engine: Any,
     min_spacing_m: float,
     max_attempts: int,
-) -> List[SampledPoint]:
+) -> list[SampledPoint]:
     """Случайные точки в полигоне: уникальность, min_spacing_m, валидация на графе."""
-    from shapely.geometry import Point
-
     import osmnx as ox
+    from shapely.geometry import Point
 
     from bike_router.exceptions import PointOutsideZoneError
 
     minx, miny, maxx, maxy = poly.bounds
-    out: List[SampledPoint] = []
+    out: list[SampledPoint] = []
     attempts = 0
     while len(out) < n_target and attempts < max_attempts:
         attempts += 1
@@ -1268,9 +1233,7 @@ def sample_points_in_polygon(
         if not poly.contains(p):
             continue
         lat, lon = y, x
-        if any(
-            haversine_m(lat, lon, sp.lat, sp.lon) < min_spacing_m for sp in out
-        ):
+        if any(haversine_m(lat, lon, sp.lat, sp.lon) < min_spacing_m for sp in out):
             continue
         try:
             engine._validate_point((lat, lon), "sample")  # noqa: SLF001
@@ -1296,7 +1259,7 @@ def sample_points_in_polygon(
     return out
 
 
-def _warnings_text(r: Any) -> Tuple[int, str]:
+def _warnings_text(r: Any) -> tuple[int, str]:
     qh = r.quality_hints
     if not qh or not qh.warnings:
         return 0, ""
@@ -1304,9 +1267,9 @@ def _warnings_text(r: Any) -> Tuple[int, str]:
     return len(w), " | ".join(str(x) for x in w)
 
 
-def _stress_fields(r: Any) -> Dict[str, Any]:
+def _stress_fields(r: Any) -> dict[str, Any]:
     hs = r.heat_stress
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "stress_cost_total": float(r.stress_cost_total or 0.0),
         "avg_stress_lts": None,
         "max_stress_lts": None,
@@ -1320,17 +1283,12 @@ def _stress_fields(r: Any) -> Dict[str, Any]:
             out["stress_cost_total"] = float(hs.stress_cost_total)
         if not out["high_stress_segments_count"] and hs.high_stress_segments_count:
             out["high_stress_segments_count"] = int(hs.high_stress_segments_count)
-        if (
-            not out["stressful_intersections_count"]
-            and hs.stressful_intersections_count
-        ):
-            out["stressful_intersections_count"] = int(
-                hs.stressful_intersections_count
-            )
+        if not out["stressful_intersections_count"] and hs.stressful_intersections_count:
+            out["stressful_intersections_count"] = int(hs.stressful_intersections_count)
     return out
 
 
-def _combined_cost_fields(r: Any) -> Dict[str, Any]:
+def _combined_cost_fields(r: Any) -> dict[str, Any]:
     hs = getattr(r, "heat_stress", None)
     br = getattr(hs, "combined_breakdown", None) if hs else None
     keys = (
@@ -1345,7 +1303,7 @@ def _combined_cost_fields(r: Any) -> Dict[str, Any]:
         "combined_cost",
         "combined_cost_norm",
     )
-    out: Dict[str, Any] = {k: None for k in keys}
+    out: dict[str, Any] = {k: None for k in keys}
     if br is None:
         return out
     for k in keys:
@@ -1371,9 +1329,9 @@ def route_to_raw_row(
     r: Any,
     baseline_full: Any = None,
     weather_date: str = "",
-    test_weather_meta: Optional[Dict[str, Any]] = None,
-    surface_ml_report_metrics: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    test_weather_meta: dict[str, Any] | None = None,
+    surface_ml_report_metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     st = _stress_fields(r)
     cc = _combined_cost_fields(r)
     wn, wt = _warnings_text(r)
@@ -1384,7 +1342,7 @@ def route_to_raw_row(
     geom = r.geometry or []
     geom_json = json.dumps(geom, ensure_ascii=False, separators=(",", ":"))
 
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "route_id": route_id,
         "experiment_id": experiment_id,
         "seed": seed,
@@ -1394,9 +1352,7 @@ def route_to_raw_row(
         "origin_point_id": _point_id_fmt(origin_id),
         "destination_point_id": _point_id_fmt(dest_id),
         "direction_key": _direction_key(origin_id, dest_id),
-        "direction_order": "forward"
-        if origin_id < dest_id
-        else "reverse",
+        "direction_order": "forward" if origin_id < dest_id else "reverse",
         "origin_lat": o_lat,
         "origin_lon": o_lon,
         "destination_lat": d_lat,
@@ -1431,12 +1387,10 @@ def route_to_raw_row(
         "surface_na_fraction": float(getattr(r.surfaces, "na_fraction", 0.0) or 0.0),
         **_surface_ml_report_row(surface_ml_report_metrics),
         "surface_inferred_fraction": float(
-            getattr(getattr(r, "quality_hints", None), "inferred_surface_fraction", 0.0)
-            or 0.0
+            getattr(getattr(r, "quality_hints", None), "inferred_surface_fraction", 0.0) or 0.0
         ),
         "highway_inferred_fraction": float(
-            getattr(getattr(r, "quality_hints", None), "inferred_highway_fraction", 0.0)
-            or 0.0
+            getattr(getattr(r, "quality_hints", None), "inferred_highway_fraction", 0.0) or 0.0
         ),
         "mode": r.mode,
         "warnings_count": wn,
@@ -1468,10 +1422,7 @@ def route_to_raw_row(
         ),
         "route_winter_open_stress_proxy": round(
             float(getattr(r, "route_open_sky_share", 0.0))
-            * float(
-                getattr(getattr(r, "weather", None), "snow_model_strength", 0.0)
-                or 0.0
-            ),
+            * float(getattr(getattr(r, "weather", None), "snow_model_strength", 0.0) or 0.0),
             4,
         ),
         "route_wind_direction_aware": round(
@@ -1571,12 +1522,8 @@ def route_to_raw_row(
     if baseline_full is not None:
         out["full_baseline_length_m"] = round(float(baseline_full.length_m), 2)
         be = baseline_full.elevation
-        out["delta_length_vs_full_m"] = round(
-            float(r.length_m) - float(baseline_full.length_m), 2
-        )
-        out["delta_climb_vs_full_m"] = round(
-            float(elev.climb_m) - float(be.climb_m), 2
-        )
+        out["delta_length_vs_full_m"] = round(float(r.length_m) - float(baseline_full.length_m), 2)
+        out["delta_climb_vs_full_m"] = round(float(elev.climb_m) - float(be.climb_m), 2)
     else:
         out["full_baseline_length_m"] = None
         out["delta_length_vs_full_m"] = None
@@ -1584,15 +1531,13 @@ def route_to_raw_row(
     return out
 
 
-def _mean(xs: List[float]) -> Optional[float]:
+def _mean(xs: list[float]) -> float | None:
     if not xs:
         return None
     return sum(xs) / len(xs)
 
 
-def _write_sheet_table(
-    ws: Any, headers: Sequence[str], rows: List[Dict[str, Any]]
-) -> None:
+def _write_sheet_table(ws: Any, headers: Sequence[str], rows: list[dict[str, Any]]) -> None:
     for c, h in enumerate(headers, start=1):
         ws.cell(row=1, column=c, value=h)
     for ri, row in enumerate(rows, start=2):
@@ -1601,10 +1546,10 @@ def _write_sheet_table(
             ws.cell(row=ri, column=c, value=v)
 
 
-def _make_summary_row(prefix: Dict[str, Any], rs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _make_summary_row(prefix: dict[str, Any], rs: list[dict[str, Any]]) -> dict[str, Any]:
     row = dict(prefix)
     for k in SUMMARY_NUM_KEYS:
-        vals: List[float] = []
+        vals: list[float] = []
         for r in rs:
             v = r.get(k)
             if v is None or v == "":
@@ -1620,16 +1565,16 @@ def _make_summary_row(prefix: Dict[str, Any], rs: List[Dict[str, Any]]) -> Dict[
 
 
 def build_summaries(
-    raw_rows: List[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    raw_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """SummaryByVariant, SummaryByProfile, SummaryDirection."""
 
-    def make_row(prefix: Dict[str, Any], rs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def make_row(prefix: dict[str, Any], rs: list[dict[str, Any]]) -> dict[str, Any]:
         return _make_summary_row(prefix, rs)
 
-    by_pv: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
-    by_prof: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    by_dir: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    by_pv: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    by_prof: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_dir: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     for r in raw_rows:
         by_pv[(str(r["profile"]), str(r["variant_key"]))].append(r)
@@ -1637,36 +1582,30 @@ def build_summaries(
         by_dir[str(r["direction_order"])].append(r)
 
     s_var = [
-        make_row({"profile": pk, "variant_key": vk}, rs)
-        for (pk, vk), rs in sorted(by_pv.items())
+        make_row({"profile": pk, "variant_key": vk}, rs) for (pk, vk), rs in sorted(by_pv.items())
     ]
     s_prof = [make_row({"profile": pk}, rs) for pk, rs in sorted(by_prof.items())]
-    s_dir = [
-        make_row({"direction_order": dk}, rs) for dk, rs in sorted(by_dir.items())
-    ]
+    s_dir = [make_row({"direction_order": dk}, rs) for dk, rs in sorted(by_dir.items())]
     return s_var, s_prof, s_dir
 
 
 def build_summaries_by_weather_date(
-    raw_rows: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    raw_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Средние по календарной дате погоды (multi-day)."""
-    by_d: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    by_d: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         wd = str(r.get("weather_date") or "").strip()
         if wd:
             by_d[wd].append(r)
-    return [
-        _make_summary_row({"weather_date": d}, rs)
-        for d, rs in sorted(by_d.items())
-    ]
+    return [_make_summary_row({"weather_date": d}, rs) for d, rs in sorted(by_d.items())]
 
 
 def build_summaries_by_weather_date_and_variant(
-    raw_rows: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    raw_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Средние по паре (дата погоды, вариант маршрута)."""
-    g: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    g: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         wd = str(r.get("weather_date") or "").strip()
         vk = str(r.get("variant_key") or "")
@@ -1679,12 +1618,12 @@ def build_summaries_by_weather_date_and_variant(
 
 
 def build_pair_comparison(
-    raw_rows: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    raw_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Сводка по (origin, dest, profile[, дата погоды[, synthetic case]]): min/max/avg."""
     has_wd = bool(raw_rows and str(raw_rows[0].get("weather_date") or "").strip())
     has_tc = bool(raw_rows and str(raw_rows[0].get("weather_test_case_id") or "").strip())
-    groups: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         base = (
             r["origin_point_id"],
@@ -1692,7 +1631,7 @@ def build_pair_comparison(
             str(r["profile"]),
             str(r["direction_key"]),
         )
-        el: List[Any] = list(base)
+        el: list[Any] = list(base)
         if has_wd:
             el.append(str(r.get("weather_date") or "").strip())
         if has_tc:
@@ -1700,7 +1639,7 @@ def build_pair_comparison(
         key = tuple(el)
         groups[key].append(r)
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for key in sorted(groups.keys()):
         rs = groups[key]
         o, d, prof, dk = key[0], key[1], key[2], key[3]
@@ -1711,7 +1650,7 @@ def build_pair_comparison(
         case_id = str(key[ii]) if has_tc else ""
         lengths = [float(x["length_m"]) for x in rs]
         times = [float(x["time_s"]) for x in rs]
-        row: Dict[str, Any] = {
+        row: dict[str, Any] = {
             "origin_point_id": o,
             "destination_point_id": d,
             "profile": prof,
@@ -1744,32 +1683,29 @@ def mp_resolve_pool_workers(max_workers: int, *, task_count: int = 10**9) -> int
     return max(1, int(max_workers))
 
 
-def mp_split_weather_grid_chunks(grid: List[Any], wchunk: int) -> List[List[Any]]:
+def mp_split_weather_grid_chunks(grid: list[Any], wchunk: int) -> list[list[Any]]:
     w = max(1, int(wchunk))
     return [grid[k : k + w] for k in range(0, len(grid), w)]
 
 
 def build_summaries_by_weather_case_id(
-    raw_rows: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    raw_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Средние по ``weather_test_case_id`` (все варианты и профили вместе)."""
-    by_c: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    by_c: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         cid = r.get("weather_test_case_id")
         if not cid:
             continue
         by_c[str(cid)].append(r)
-    return [
-        _make_summary_row({"weather_test_case_id": k}, rs)
-        for k, rs in sorted(by_c.items())
-    ]
+    return [_make_summary_row({"weather_test_case_id": k}, rs) for k, rs in sorted(by_c.items())]
 
 
 def build_summaries_by_weather_case_and_variant(
-    raw_rows: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    raw_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Средние по (synthetic-кейс, вариант маршрута)."""
-    g: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    g: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         cid = r.get("weather_test_case_id")
         if not cid:
@@ -1782,7 +1718,7 @@ def build_summaries_by_weather_case_and_variant(
     ]
 
 
-def _mean_finite(xs: List[float]) -> Optional[float]:
+def _mean_finite(xs: list[float]) -> float | None:
     vals = [x for x in xs if isinstance(x, (int, float)) and math.isfinite(float(x))]
     if not vals:
         return None
@@ -1790,22 +1726,20 @@ def _mean_finite(xs: List[float]) -> Optional[float]:
 
 
 def build_heat_weather_influence_rows(
-    raw_rows: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    raw_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """По каждому synthetic-кейсу: средние по heat и средние дельты heat−full по совпадающим O–D×профиль."""
-    by_case: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    by_case: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         cid = r.get("weather_test_case_id")
         if not cid:
             continue
         by_case[str(cid)].append(r)
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for cid in sorted(by_case.keys()):
         rows = by_case[cid]
-        trip_modes: Dict[Tuple[str, str, str], Dict[str, Dict[str, Any]]] = (
-            defaultdict(dict)
-        )
+        trip_modes: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = defaultdict(dict)
         for r in rows:
             o = str(r.get("origin_point_id") or "")
             d = str(r.get("destination_point_id") or "")
@@ -1819,15 +1753,13 @@ def build_heat_weather_influence_rows(
         mean_climb_h = _mean_finite([float(r["climb_m"]) for r in heat_rows])
         mean_green_h = _mean_finite([float(r["green_percent"]) for r in heat_rows])
         mean_trees_h = _mean_finite([float(r["avg_trees_pct"]) for r in heat_rows])
-        mean_stress_h = _mean_finite(
-            [float(r["stress_cost_total"]) for r in heat_rows]
-        )
+        mean_stress_h = _mean_finite([float(r["stress_cost_total"]) for r in heat_rows])
 
-        dlen: List[float] = []
-        dtime: List[float] = []
-        dgreen: List[float] = []
-        dtrees: List[float] = []
-        dstress: List[float] = []
+        dlen: list[float] = []
+        dtime: list[float] = []
+        dgreen: list[float] = []
+        dtrees: list[float] = []
+        dstress: list[float] = []
         for _k, modes in trip_modes.items():
             h = modes.get("heat")
             f = modes.get("full")
@@ -1840,7 +1772,7 @@ def build_heat_weather_influence_rows(
             dstress.append(float(h["stress_cost_total"]) - float(f["stress_cost_total"]))
 
         sample = heat_rows[0] if heat_rows else rows[0]
-        row: Dict[str, Any] = {
+        row: dict[str, Any] = {
             "weather_test_case_id": cid,
             "weather_test_temperature_c": sample.get("weather_test_temperature_c"),
             "weather_test_precipitation_mm": sample.get("weather_test_precipitation_mm"),
@@ -1852,12 +1784,8 @@ def build_heat_weather_influence_rows(
             "mean_green_heat_pct": round(mean_green_h, 4) if mean_green_h is not None else None,
             "mean_trees_heat_pct": round(mean_trees_h, 4) if mean_trees_h is not None else None,
             "mean_stress_cost_heat": round(mean_stress_h, 4) if mean_stress_h is not None else None,
-            "mean_delta_length_heat_minus_full_m": round(_mean_finite(dlen), 4)
-            if dlen
-            else None,
-            "mean_delta_time_heat_minus_full_s": round(_mean_finite(dtime), 4)
-            if dtime
-            else None,
+            "mean_delta_length_heat_minus_full_m": round(_mean_finite(dlen), 4) if dlen else None,
+            "mean_delta_time_heat_minus_full_s": round(_mean_finite(dtime), 4) if dtime else None,
             "mean_delta_green_heat_minus_full_pct": round(_mean_finite(dgreen), 4)
             if dgreen
             else None,
@@ -1874,22 +1802,20 @@ def build_heat_weather_influence_rows(
 
 
 def build_heat_vs_green_by_weather_rows(
-    raw_rows: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    raw_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """По synthetic-кейсу: средние дельты heat−green (длина, время, стресс, зелень)."""
-    by_case: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    by_case: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         cid = r.get("weather_test_case_id")
         if not cid:
             continue
         by_case[str(cid)].append(r)
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for cid in sorted(by_case.keys()):
         rows = by_case[cid]
-        trip_modes: Dict[Tuple[str, str, str], Dict[str, Dict[str, Any]]] = (
-            defaultdict(dict)
-        )
+        trip_modes: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = defaultdict(dict)
         for r in rows:
             o = str(r.get("origin_point_id") or "")
             d = str(r.get("destination_point_id") or "")
@@ -1897,10 +1823,10 @@ def build_heat_vs_green_by_weather_rows(
             v = str(r.get("variant_key") or "")
             trip_modes[(o, d, p)][v] = r
 
-        dlen: List[float] = []
-        dtime: List[float] = []
-        dgreen: List[float] = []
-        dstress: List[float] = []
+        dlen: list[float] = []
+        dtime: list[float] = []
+        dgreen: list[float] = []
+        dstress: list[float] = []
         for _k, modes in trip_modes.items():
             h = modes.get("heat")
             g = modes.get("green")
@@ -1934,7 +1860,7 @@ def build_heat_vs_green_by_weather_rows(
     return out
 
 
-def _heat_row_float(r: Dict[str, Any], key: str) -> float:
+def _heat_row_float(r: dict[str, Any], key: str) -> float:
     v = r.get(key)
     if v is None or v == "":
         return float("nan")
@@ -1944,21 +1870,21 @@ def _heat_row_float(r: Dict[str, Any], key: str) -> float:
         return float("nan")
 
 
-def _heat_row_rain_flag(r: Dict[str, Any]) -> int:
+def _heat_row_rain_flag(r: dict[str, Any]) -> int:
     pr = _heat_row_float(r, "weather_test_precipitation_mm")
     if not math.isfinite(pr):
         return 0
     return 1 if pr > 0.5 else 0
 
 
-def _heat_row_wind_strong(r: Dict[str, Any]) -> int:
+def _heat_row_wind_strong(r: dict[str, Any]) -> int:
     ws = _heat_row_float(r, "weather_test_wind_speed_ms")
     if not math.isfinite(ws):
         return 0
     return 1 if ws >= 6.0 else 0
 
 
-def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_heat_weather_kpi_rows(raw_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Сводные KPI для heat_weather (36 synthetic): геометрия vs погода."""
     if not raw_rows:
         return [
@@ -1975,14 +1901,14 @@ def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str
             }
         ]
 
-    def od_prof(r: Dict[str, Any]) -> Tuple[str, str, str]:
+    def od_prof(r: dict[str, Any]) -> tuple[str, str, str]:
         return (
             str(r["origin_point_id"]),
             str(r["destination_point_id"]),
             str(r["profile"]),
         )
 
-    by_pair: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    by_pair: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         cid = r.get("weather_test_case_id")
         if not cid:
@@ -1990,7 +1916,7 @@ def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str
         by_pair[od_prof(r)].append(r)
 
     n_groups = len(by_pair)
-    unique_counts: List[int] = []
+    unique_counts: list[int] = []
     changed = 0
     for _k, lst in by_pair.items():
         geoms = {str(x.get("geometry_json") or "") for x in lst}
@@ -1998,28 +1924,26 @@ def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str
         unique_counts.append(u)
         if u > 1:
             changed += 1
-    mean_unique = (
-        sum(unique_counts) / len(unique_counts) if unique_counts else None
-    )
+    mean_unique = sum(unique_counts) / len(unique_counts) if unique_counts else None
     changed_share = (changed / n_groups) if n_groups else None
 
-    geom_ctr: Dict[Tuple[str, str, str], Counter] = defaultdict(Counter)
+    geom_ctr: dict[tuple[str, str, str], Counter] = defaultdict(Counter)
     for r in raw_rows:
         if not r.get("weather_test_case_id"):
             continue
         g = str(r.get("geometry_json") or "")
         geom_ctr[od_prof(r)][g] += 1
-    modal: Dict[Tuple[str, str, str], str] = {}
+    modal: dict[tuple[str, str, str], str] = {}
     for k, ctr in geom_ctr.items():
         modal[k] = ctr.most_common(1)[0][0] if ctr else ""
 
-    by_case: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    by_case: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         cid = r.get("weather_test_case_id")
         if cid:
             by_case[str(cid)].append(r)
 
-    scenario_rates: List[float] = []
+    scenario_rates: list[float] = []
     for cid, lst in by_case.items():
         alt = 0
         tot = 0
@@ -2034,14 +1958,14 @@ def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str
     scen_min = min(scenario_rates) if scenario_rates else None
     scen_max = max(scenario_rates) if scenario_rates else None
 
-    bucket_t: Dict[Tuple[int, int, int, str, str, str], Dict[float, Dict[str, Any]]] = (
-        defaultdict(dict)
+    bucket_t: dict[tuple[int, int, int, str, str, str], dict[float, dict[str, Any]]] = defaultdict(
+        dict
     )
-    bucket_r: Dict[Tuple[float, int, int, str, str, str], Dict[int, Dict[str, Any]]] = (
-        defaultdict(dict)
+    bucket_r: dict[tuple[float, int, int, str, str, str], dict[int, dict[str, Any]]] = defaultdict(
+        dict
     )
-    bucket_w: Dict[Tuple[float, int, int, str, str, str], Dict[int, Dict[str, Any]]] = (
-        defaultdict(dict)
+    bucket_w: dict[tuple[float, int, int, str, str, str], dict[int, dict[str, Any]]] = defaultdict(
+        dict
     )
 
     for r in raw_rows:
@@ -2069,9 +1993,7 @@ def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str
             dcw = bucket_w[kw]
             dcw[wf] = r
 
-    def _pair_open_lower(
-        d: Dict[Any, Dict[Any, Dict[str, Any]]], hi: Any, lo: Any
-    ) -> Optional[float]:
+    def _pair_open_lower(d: dict[Any, dict[Any, dict[str, Any]]], hi: Any, lo: Any) -> float | None:
         ok = 0
         good = 0
         for _bk, dct in d.items():
@@ -2091,11 +2013,7 @@ def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str
     rain_share = _pair_open_lower(bucket_r, 1, 0)
     wind_share = _pair_open_lower(bucket_w, 1, 0)
 
-    cov_ok = sum(
-        1
-        for r in raw_rows
-        if _heat_row_float(r, "route_covered_share") > 1e-6
-    )
+    cov_ok = sum(1 for r in raw_rows if _heat_row_float(r, "route_covered_share") > 1e-6)
     covered_share = cov_ok / len(raw_rows) if raw_rows else None
 
     row = {
@@ -2104,23 +2022,15 @@ def build_heat_weather_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str
         "mean_unique_geometries": round(mean_unique, 6) if mean_unique is not None else None,
         "scenario_alt_rate_min": round(scen_min, 6) if scen_min is not None else None,
         "scenario_alt_rate_max": round(scen_max, 6) if scen_max is not None else None,
-        "temp25_vs_0_open_lower_share": round(temp_share, 6)
-        if temp_share is not None
-        else None,
-        "rain_vs_dry_open_lower_share": round(rain_share, 6)
-        if rain_share is not None
-        else None,
-        "wind_vs_calm_open_lower_share": round(wind_share, 6)
-        if wind_share is not None
-        else None,
-        "covered_nonzero_share": round(covered_share, 6)
-        if covered_share is not None
-        else None,
+        "temp25_vs_0_open_lower_share": round(temp_share, 6) if temp_share is not None else None,
+        "rain_vs_dry_open_lower_share": round(rain_share, 6) if rain_share is not None else None,
+        "wind_vs_calm_open_lower_share": round(wind_share, 6) if wind_share is not None else None,
+        "covered_nonzero_share": round(covered_share, 6) if covered_share is not None else None,
     }
     return [row]
 
 
-def _heat_od_prof(r: Dict[str, Any]) -> Tuple[str, str, str]:
+def _heat_od_prof(r: dict[str, Any]) -> tuple[str, str, str]:
     return (
         str(r.get("origin_point_id") or ""),
         str(r.get("destination_point_id") or ""),
@@ -2135,8 +2045,8 @@ def _weather_case_wind_stem(case_id: str) -> str:
     return s[: m.start()] if m else s
 
 
-def _col_finite_floats(rows: List[Dict[str, Any]], key: str) -> List[float]:
-    out: List[float] = []
+def _col_finite_floats(rows: list[dict[str, Any]], key: str) -> list[float]:
+    out: list[float] = []
     for r in rows:
         x = _heat_row_float(r, key)
         if math.isfinite(x):
@@ -2144,9 +2054,9 @@ def _col_finite_floats(rows: List[Dict[str, Any]], key: str) -> List[float]:
     return out
 
 
-def build_heat_weather_kpi_extras_dict(raw_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def build_heat_weather_kpi_extras_dict(raw_rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Поля для merge в первую строку Heat-weather KPI: зелёный критерий, ветер, покрытие, surface."""
-    ex: Dict[str, Any] = {}
+    ex: dict[str, Any] = {}
     if not raw_rows:
         return ex
 
@@ -2156,9 +2066,9 @@ def build_heat_weather_kpi_extras_dict(raw_rows: List[Dict[str, Any]]) -> Dict[s
         ex["green_route_factor_max"] = round(max(gr), 6)
         ex["green_route_factor_mean"] = round(sum(gr) / len(gr), 6)
         mu = sum(gr) / len(gr)
-        ex["green_route_factor_std"] = round(
-            math.sqrt(sum((x - mu) ** 2 for x in gr) / len(gr)), 6
-        ) if len(gr) > 1 else 0.0
+        ex["green_route_factor_std"] = (
+            round(math.sqrt(sum((x - mu) ** 2 for x in gr) / len(gr)), 6) if len(gr) > 1 else 0.0
+        )
     else:
         ex["green_route_factor_min"] = None
         ex["green_route_factor_max"] = None
@@ -2173,7 +2083,7 @@ def build_heat_weather_kpi_extras_dict(raw_rows: List[Dict[str, Any]]) -> Dict[s
         "низкой доле деревьев на пути он остаётся ≈1.0 без ошибки расчёта."
     )
 
-    by_stem_od: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    by_stem_od: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         cid = r.get("weather_test_case_id")
         if not cid:
@@ -2192,10 +2102,10 @@ def build_heat_weather_kpi_extras_dict(raw_rows: List[Dict[str, Any]]) -> Dict[s
             wind_geom_groups += 1
     ex["wind_dir_only_geometry_change_groups"] = int(wind_geom_groups)
 
-    orient_ranges: List[float] = []
+    orient_ranges: list[float] = []
     orient_notable_pairs = 0
     n_pairs_measured = 0
-    by_od: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    by_od: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         if not r.get("weather_test_case_id"):
             continue
@@ -2216,9 +2126,9 @@ def build_heat_weather_kpi_extras_dict(raw_rows: List[Dict[str, Any]]) -> Dict[s
         round(orient_notable_pairs / n_pairs_measured, 6) if n_pairs_measured else None
     )
 
-    stairs_spreads: List[float] = []
-    harsh_spreads: List[float] = []
-    shade_spreads: List[float] = []
+    stairs_spreads: list[float] = []
+    harsh_spreads: list[float] = []
+    shade_spreads: list[float] = []
     for _od, lst in by_od.items():
         if len(lst) < 2:
             continue
@@ -2271,7 +2181,7 @@ def build_heat_weather_kpi_extras_dict(raw_rows: List[Dict[str, Any]]) -> Dict[s
         ex["bad_wet_surface_share_max"] = None
         ex["bad_wet_surface_share_mean"] = None
 
-    parts: List[str] = []
+    parts: list[str] = []
     if ex.get("coverage_any_row_covered_share_positive"):
         parts.append("есть ненулевой covered_share")
     if ex.get("coverage_any_pair_stairs_spread_ge_0p002"):
@@ -2287,14 +2197,14 @@ def build_heat_weather_kpi_extras_dict(raw_rows: List[Dict[str, Any]]) -> Dict[s
     return ex
 
 
-def build_heat_qa_warning_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_heat_qa_warning_rows(raw_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Автоматические QA-предупреждения по константности и «невидимому» reroute."""
-    warns: List[Dict[str, Any]] = []
+    warns: list[dict[str, Any]] = []
     if not raw_rows:
         warns.append({"severity": "info", "code": "empty", "message": "нет строк маршрутов"})
         return warns
 
-    by_trip_case: Dict[Tuple[str, str, str, str], Dict[str, Dict[str, Any]]] = defaultdict(dict)
+    by_trip_case: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = defaultdict(dict)
     for r in raw_rows:
         key = (
             str(r.get("origin_point_id") or ""),
@@ -2304,13 +2214,17 @@ def build_heat_qa_warning_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str,
         )
         by_trip_case[key][str(r.get("variant_key") or "")] = r
 
-    def _same_geom(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> bool:
-        return bool(a and b and str(a.get("geometry_json") or "") == str(b.get("geometry_json") or ""))
+    def _same_geom(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
+        return bool(
+            a and b and str(a.get("geometry_json") or "") == str(b.get("geometry_json") or "")
+        )
 
     heat_full_same = sum(
         1 for modes in by_trip_case.values() if _same_geom(modes.get("heat"), modes.get("full"))
     )
-    heat_full_total = sum(1 for modes in by_trip_case.values() if modes.get("heat") and modes.get("full"))
+    heat_full_total = sum(
+        1 for modes in by_trip_case.values() if modes.get("heat") and modes.get("full")
+    )
     if heat_full_total and heat_full_same:
         warns.append(
             {
@@ -2370,7 +2284,7 @@ def build_heat_qa_warning_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str,
             }
         )
 
-    heat_app: Dict[Tuple[str, str, str], Dict[float, Dict[str, Any]]] = defaultdict(dict)
+    heat_app: dict[tuple[str, str, str], dict[float, dict[str, Any]]] = defaultdict(dict)
     for r in raw_rows:
         if str(r.get("variant_key") or "") != "heat":
             continue
@@ -2390,9 +2304,7 @@ def build_heat_qa_warning_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str,
                 str(r.get("profile") or ""),
             )
         ][atf] = r
-    same_32_38 = sum(
-        1 for d in heat_app.values() if _same_geom(d.get(32.0), d.get(38.0))
-    )
+    same_32_38 = sum(1 for d in heat_app.values() if _same_geom(d.get(32.0), d.get(38.0)))
     total_32_38 = sum(1 for d in heat_app.values() if 32.0 in d and 38.0 in d)
     if total_32_38 and same_32_38:
         warns.append(
@@ -2497,7 +2409,7 @@ def build_heat_qa_warning_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str,
             }
         )
 
-    by_od: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    by_od: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for r in raw_rows:
         if r.get("weather_test_case_id"):
             by_od[_heat_od_prof(r)].append(r)
@@ -2549,13 +2461,9 @@ def build_heat_qa_warning_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str,
     return warns
 
 
-def build_winter_reroute_explain_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_winter_reroute_explain_rows(raw_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """По зимним строкам: для пар с >1 геометрией — диапазоны метрик и сильнейший относительный сигнал."""
-    wrows = [
-        r
-        for r in raw_rows
-        if str(r.get("weather_test_case_id") or "").startswith("winter_")
-    ]
+    wrows = [r for r in raw_rows if str(r.get("weather_test_case_id") or "").startswith("winter_")]
     if not wrows:
         return [
             {
@@ -2563,7 +2471,7 @@ def build_winter_reroute_explain_rows(raw_rows: List[Dict[str, Any]]) -> List[Di
             }
         ]
 
-    by_pair: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    by_pair: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for r in wrows:
         by_pair[_heat_od_prof(r)].append(r)
 
@@ -2574,12 +2482,12 @@ def build_winter_reroute_explain_rows(raw_rows: List[Dict[str, Any]]) -> List[Di
         ("building_shade", "route_building_shade_share"),
         ("stress_weather", "route_mean_stress_weather_factor"),
     )
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for key, lst in by_pair.items():
         geoms = {str(x.get("geometry_json") or "") for x in lst if x.get("geometry_json")}
         if len(geoms) < 2:
             continue
-        row: Dict[str, Any] = {
+        row: dict[str, Any] = {
             "origin_point_id": key[0],
             "destination_point_id": key[1],
             "profile": key[2],
@@ -2613,16 +2521,19 @@ def build_winter_reroute_explain_rows(raw_rows: List[Dict[str, Any]]) -> List[Di
 
 
 def build_heat_experiment_extra_sheet_blocks(
-    raw_rows: List[Dict[str, Any]],
-) -> List[Tuple[str, List[Dict[str, Any]]]]:
+    raw_rows: list[dict[str, Any]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
     """Доп. блоки для листа «Сводка» (только heat-эксперимент)."""
     return [
         ("QA — предупреждения", build_heat_qa_warning_rows(raw_rows)),
-        ("Зима: объяснение reroute (диапазоны метрик)", build_winter_reroute_explain_rows(raw_rows)),
+        (
+            "Зима: объяснение reroute (диапазоны метрик)",
+            build_winter_reroute_explain_rows(raw_rows),
+        ),
     ]
 
 
-def build_winter_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_winter_kpi_rows(raw_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Сводные KPI по зимним synthetic-строкам (``weather_test_case_id``)."""
     wr = [r for r in raw_rows if str(r.get("weather_test_case_id") or "").strip()]
     if not wr:
@@ -2633,8 +2544,8 @@ def build_winter_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]
             }
         ]
 
-    def _avg(rows: List[Dict[str, Any]], key: str) -> Optional[float]:
-        xs: List[float] = []
+    def _avg(rows: list[dict[str, Any]], key: str) -> float | None:
+        xs: list[float] = []
         for r in rows:
             v = r.get(key)
             if v is None or v == "":
@@ -2663,7 +2574,7 @@ def build_winter_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]
         )
     ]
 
-    def _cpkm(r: Dict[str, Any]) -> float:
+    def _cpkm(r: dict[str, Any]) -> float:
         return float(r.get("cost") or 0.0) / max(float(r.get("length_km") or 1e-9), 1e-9)
 
     c_list = [_cpkm(r) for r in high_snow if str(r.get("profile")) == "cyclist"]
@@ -2684,17 +2595,9 @@ def build_winter_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]
         if "2000-04-25" in str(r.get("weather_test_time_iso") or "")
         and float(r.get("weather_season_green_mult") or 0.0) > 0.85
     )
-    april_rows_early = [
-        r
-        for r in wr
-        if "2000-04-05" in str(r.get("weather_test_time_iso") or "")
-    ]
-    april_rows_late = [
-        r
-        for r in wr
-        if "2000-04-25" in str(r.get("weather_test_time_iso") or "")
-    ]
-    mixed_slip_wc: List[Dict[str, Any]] = []
+    april_rows_early = [r for r in wr if "2000-04-05" in str(r.get("weather_test_time_iso") or "")]
+    april_rows_late = [r for r in wr if "2000-04-25" in str(r.get("weather_test_time_iso") or "")]
+    mixed_slip_wc: list[dict[str, Any]] = []
     for r in wr:
         wcv = r.get("weather_test_weather_code")
         if wcv is None or wcv == "":
@@ -2769,7 +2672,7 @@ def build_winter_kpi_rows(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]
     ]
 
 
-def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
+def _meta_rows_ru(rows: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
     ru = {
         "experiment_id": "ID эксперимента",
         "started_at_utc": "Время старта (UTC)",
@@ -2842,7 +2745,7 @@ def _meta_rows_ru(rows: List[Tuple[str, Any]]) -> List[Tuple[str, Any]]:
     return [(ru.get(str(k), str(k)), v) for k, v in rows]
 
 
-_ROUTE_COL_RU: Dict[str, str] = {
+_ROUTE_COL_RU: dict[str, str] = {
     "route_id": "ID маршрута",
     "experiment_id": "ID эксперимента",
     "seed": "Seed",
@@ -3003,11 +2906,11 @@ _ROUTE_COL_RU: Dict[str, str] = {
 }
 
 
-def _rename_row_keys_ru(row: Dict[str, Any]) -> Dict[str, Any]:
+def _rename_row_keys_ru(row: dict[str, Any]) -> dict[str, Any]:
     return {_ROUTE_COL_RU.get(k, k): v for k, v in row.items()}
 
 
-def write_route_vertices_csv_gzip(path: str, vertices: List[Dict[str, Any]]) -> None:
+def write_route_vertices_csv_gzip(path: str, vertices: list[dict[str, Any]]) -> None:
     import csv
     import gzip
 
@@ -3027,21 +2930,21 @@ def write_route_vertices_csv_gzip(path: str, vertices: List[Dict[str, Any]]) -> 
 def write_xlsx(
     path: str,
     *,
-    meta_rows: List[Tuple[str, Any]],
-    points: List[SampledPoint],
-    raw_rows: List[Dict[str, Any]],
-    vertices: List[Dict[str, Any]],
-    failures: List[Dict[str, Any]],
-    summary_variant: List[Dict[str, Any]],
-    summary_profile: List[Dict[str, Any]],
-    summary_direction: List[Dict[str, Any]],
-    pair_cmp: List[Dict[str, Any]],
+    meta_rows: list[tuple[str, Any]],
+    points: list[SampledPoint],
+    raw_rows: list[dict[str, Any]],
+    vertices: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    summary_variant: list[dict[str, Any]],
+    summary_profile: list[dict[str, Any]],
+    summary_direction: list[dict[str, Any]],
+    pair_cmp: list[dict[str, Any]],
     legacy_multisheet: bool = False,
-    summary_by_weather_date: Optional[List[Dict[str, Any]]] = None,
-    summary_by_weather_date_variant: Optional[List[Dict[str, Any]]] = None,
-    summary_heat_kpi: Optional[List[Dict[str, Any]]] = None,
-    summary_winter_kpi: Optional[List[Dict[str, Any]]] = None,
-    summary_extra_blocks: Optional[Sequence[Tuple[str, List[Dict[str, Any]]]]] = None,
+    summary_by_weather_date: list[dict[str, Any]] | None = None,
+    summary_by_weather_date_variant: list[dict[str, Any]] | None = None,
+    summary_heat_kpi: list[dict[str, Any]] | None = None,
+    summary_winter_kpi: list[dict[str, Any]] | None = None,
+    summary_extra_blocks: Sequence[tuple[str, list[dict[str, Any]]]] | None = None,
 ) -> None:
     from openpyxl import Workbook
 
@@ -3055,7 +2958,7 @@ def write_xlsx(
             wm.cell(row=i, column=1, value=k)
             wm.cell(row=i, column=2, value=v)
 
-        def add_sheet(name: str, headers: List[str], rows: List[Dict[str, Any]]) -> None:
+        def add_sheet(name: str, headers: list[str], rows: list[dict[str, Any]]) -> None:
             ws = wb.create_sheet(title=name)
             _write_sheet_table(ws, headers, rows)
 
@@ -3154,7 +3057,7 @@ def write_xlsx(
     rr = 1
     s_wd = summary_by_weather_date or []
     s_wdv = summary_by_weather_date_variant or []
-    blocks: List[Tuple[str, List[Dict[str, Any]]]] = []
+    blocks: list[tuple[str, list[dict[str, Any]]]] = []
     if summary_heat_kpi:
         blocks.append(("Heat-weather KPI (synthetic)", summary_heat_kpi))
     if summary_winter_kpi:
@@ -3225,4 +3128,3 @@ def run_variants_over_weather_cases(*args: Any, **kwargs: Any) -> str:
     )
 
     return _run_impl(*args, **kwargs)
-

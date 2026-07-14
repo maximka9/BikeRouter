@@ -1,14 +1,1 @@
-README.md
-CHANGELOG.md
-AUTHORS.md
-COPYRIGHT.md
-THIRD_PARTY_NOTICES.md
-requirements.txt
-pyproject.toml
-Dockerfile
-docker-compose.yml
-docker-entrypoint.sh
-bike_router/
-registration/abstract.md
-registration/manifest.txt
-registration/scripts/
+registration/source_selection.yml controls the author-owned files included in the archive.

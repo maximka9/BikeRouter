@@ -8,9 +8,10 @@
 from __future__ import annotations
 
 import importlib
-from typing import Any, List
+from typing import Any
 
-from .__about__ import __version__
+from .__about__ import __version__ as __version__
+
 __all__ = [
     "Application",
     "RouteEngine",
@@ -38,5 +39,5 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def __dir__() -> List[str]:
+def __dir__() -> list[str]:
     return sorted(list(__all__) + ["__version__"])

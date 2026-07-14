@@ -82,9 +82,7 @@ def test_osm_surface_has_priority_over_ml(tmp_path, monkeypatch) -> None:
     assert stats.surface_source_osm_count == 1
 
 
-def test_surface_runtime_logs_loaded_and_use_ml(
-    tmp_path, monkeypatch, caplog
-) -> None:
+def test_surface_runtime_logs_loaded_and_use_ml(tmp_path, monkeypatch, caplog) -> None:
     csv_path = tmp_path / "p.csv"
     _write_runtime_csv(csv_path)
     monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
@@ -113,13 +111,16 @@ def test_surface_runtime_logs_loaded_and_use_ml(
 def test_route_batch_suffix_includes_ml_marker() -> None:
     from bike_router.tools.route_batch_experiment import _route_batch_output_xlsx_suffix
 
-    assert _route_batch_output_xlsx_suffix(
-        n_points=10,
-        directed_pairs=True,
-        weather_grid="all",
-        profiles_mode="both",
-        surface_ai_runtime_marker="ml_on",
-    ) == "n10_directed_AB_BA_all_both_ml_on"
+    assert (
+        _route_batch_output_xlsx_suffix(
+            n_points=10,
+            directed_pairs=True,
+            weather_grid="all",
+            profiles_mode="both",
+            surface_ai_runtime_marker="ml_on",
+        )
+        == "n10_directed_AB_BA_all_both_ml_on"
+    )
 
 
 def test_route_batch_ml_marker_when_store_loaded(tmp_path, monkeypatch) -> None:
@@ -134,9 +135,7 @@ def test_route_batch_ml_marker_when_store_loaded(tmp_path, monkeypatch) -> None:
     assert _surface_ai_runtime_filename_marker() == "ml_on"
 
 
-def test_ml_surface_effective_maps_to_different_profile_coefficient(
-    tmp_path, monkeypatch
-) -> None:
+def test_ml_surface_effective_maps_to_different_profile_coefficient(tmp_path, monkeypatch) -> None:
     """Группа paved_rough → compacted в профиле; коэффициент отличается от unknown."""
     from bike_router.config import CYCLIST, DEFAULT_COEFFICIENT
 
@@ -262,8 +261,20 @@ def test_prediction_store_rejects_missing_columns(tmp_path, monkeypatch) -> None
 def test_prediction_store_rejects_duplicate_edge_ids(tmp_path, monkeypatch) -> None:
     p = tmp_path / "d.csv"
     rows = [
-        {"edge_id": "1_2_0", "surface_pred_group": "paved_rough", "surface_pred_confidence": 0.9, "surface_pred_margin": 0.3, "surface_ml_safe": "true"},
-        {"edge_id": "1_2_0", "surface_pred_group": "unpaved_soft", "surface_pred_confidence": 0.9, "surface_pred_margin": 0.3, "surface_ml_safe": "true"},
+        {
+            "edge_id": "1_2_0",
+            "surface_pred_group": "paved_rough",
+            "surface_pred_confidence": 0.9,
+            "surface_pred_margin": 0.3,
+            "surface_ml_safe": "true",
+        },
+        {
+            "edge_id": "1_2_0",
+            "surface_pred_group": "unpaved_soft",
+            "surface_pred_confidence": 0.9,
+            "surface_pred_margin": 0.3,
+            "surface_ml_safe": "true",
+        },
     ]
     pd.DataFrame(rows).to_csv(p, index=False)
     monkeypatch.setenv("SURFACE_AI_RUNTIME_ENABLED", "true")
@@ -408,5 +419,3 @@ def test_runtime_matches_graph_multiindex_by_undirected_key_despite_legacy_hash(
 def test_parse_runtime_json_graph_fingerprint() -> None:
     blob = json.dumps({"predict": {"graph_hash": "abc123def4567890"}, "train": {}})
     assert parse_runtime_artifact_graph_hash(blob) == "abc123def4567890"
-
-

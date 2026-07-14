@@ -26,9 +26,7 @@ class PointOutsideZoneError(BikeRouterError):
 
     code = "POINT_OUTSIDE_ZONE"
 
-    def __init__(
-        self, lat: float, lon: float, label: str = "", snap_m: float = 0
-    ):
+    def __init__(self, lat: float, lon: float, label: str = "", snap_m: float = 0):
         self.lat = lat
         self.lon = lon
         self.label = label
@@ -39,9 +37,7 @@ class PointOutsideZoneError(BikeRouterError):
                 f"дорожной сети ({snap_m:.0f} м)"
             )
         else:
-            msg = (
-                f"Точка {label}({lat:.5f}, {lon:.5f}) вне зоны покрытия графа"
-            )
+            msg = f"Точка {label}({lat:.5f}, {lon:.5f}) вне зоны покрытия графа"
         super().__init__(msg)
 
 
@@ -70,8 +66,7 @@ class RouteTooLongError(BikeRouterError):
         self.length_m = length_m
         self.max_m = max_m
         super().__init__(
-            f"Маршрут слишком длинный: {length_m / 1000:.1f} км "
-            f"(макс. {max_m / 1000:.0f} км)"
+            f"Маршрут слишком длинный: {length_m / 1000:.1f} км (макс. {max_m / 1000:.0f} км)"
         )
 
 

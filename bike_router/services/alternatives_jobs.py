@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..job_status import AlternativesJobStatus
 from ..metrics import inc_green_job_failed
@@ -24,12 +24,12 @@ def new_job_id() -> str:
 class JobRecord:
     job_id: str
     status: str
-    routes: List[Dict[str, Any]] = field(default_factory=list)
-    pending: List[str] = field(default_factory=list)
-    error: Optional[Dict[str, Any]] = None
-    green_warning: Optional[str] = None
+    routes: list[dict[str, Any]] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)
+    error: dict[str, Any] | None = None
+    green_warning: str | None = None
     """Сериализованный criteria_bundle (JSON-маршруты по ключам критериев)."""
-    criteria_bundle: Optional[Dict[str, List[Dict[str, Any]]]] = None
+    criteria_bundle: dict[str, list[dict[str, Any]]] | None = None
     created_at: float = field(default_factory=time.time)
     mut: threading.Lock = field(default_factory=threading.Lock)
 
@@ -39,16 +39,12 @@ class AlternativesJobStore:
 
     def __init__(self, ttl_sec: float = 1800.0) -> None:
         self._ttl = float(ttl_sec)
-        self._jobs: Dict[str, JobRecord] = {}
+        self._jobs: dict[str, JobRecord] = {}
         self._lock = threading.Lock()
 
     def _purge_stale_unlocked(self) -> None:
         now = time.time()
-        dead = [
-            jid
-            for jid, rec in self._jobs.items()
-            if now - rec.created_at > self._ttl
-        ]
+        dead = [jid for jid, rec in self._jobs.items() if now - rec.created_at > self._ttl]
         for jid in dead:
             del self._jobs[jid]
             logger.info("alternatives_job expired job_id=%s", jid)
@@ -58,12 +54,12 @@ class AlternativesJobStore:
             self._purge_stale_unlocked()
             self._jobs[job_id] = record
 
-    def get(self, job_id: str) -> Optional[JobRecord]:
+    def get(self, job_id: str) -> JobRecord | None:
         with self._lock:
             self._purge_stale_unlocked()
             return self._jobs.get(job_id)
 
-    def complete_green_success(self, job_id: str, route_dump: Dict[str, Any]) -> None:
+    def complete_green_success(self, job_id: str, route_dump: dict[str, Any]) -> None:
         rec = self.get(job_id)
         if rec is None:
             return
@@ -77,8 +73,8 @@ class AlternativesJobStore:
         self,
         job_id: str,
         *,
-        error: Dict[str, Any],
-        green_warning: Optional[str] = None,
+        error: dict[str, Any],
+        green_warning: str | None = None,
     ) -> None:
         rec = self.get(job_id)
         if rec is None:
@@ -95,11 +91,11 @@ class AlternativesJobStore:
         self,
         job_id: str,
         *,
-        routes: List[Dict[str, Any]],
-        pending: List[str],
+        routes: list[dict[str, Any]],
+        pending: list[str],
         status: str,
-        error: Optional[Dict[str, Any]] = None,
-        green_warning: Optional[str] = None,
+        error: dict[str, Any] | None = None,
+        green_warning: str | None = None,
     ) -> None:
         """Итог progressive 2.0: полный список маршрутов и статус (done / failed)."""
         with self._lock:

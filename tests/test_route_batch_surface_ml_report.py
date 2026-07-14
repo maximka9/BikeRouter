@@ -59,10 +59,7 @@ def test_route_surface_source_report_metrics_are_length_weighted() -> None:
     )
     assert abs(checksum - 100.0) <= 0.05
     assert metrics["surface_from_ml_share_pct"] <= metrics["osm_surface_missing_share_pct"]
-    assert (
-        metrics["surface_unknown_after_ml_share_pct"]
-        <= metrics["osm_surface_missing_share_pct"]
-    )
+    assert metrics["surface_unknown_after_ml_share_pct"] <= metrics["osm_surface_missing_share_pct"]
 
 
 def test_call_with_route_surface_source_report_captures_engine_route() -> None:

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Iterable, Iterator, List, Sequence, TypeVar
+from collections.abc import Iterable, Iterator, Sequence
+from typing import TypeVar
 
 T = TypeVar("T")
 
@@ -38,7 +39,7 @@ def auto_worker_count(task_count: int, *, memory_heavy: bool = False) -> int:
     return max(1, min(cap_cpu, tc))
 
 
-def chunked(items: Sequence[T], chunk_size: int) -> Iterator[List[T]]:
+def chunked(items: Sequence[T], chunk_size: int) -> Iterator[list[T]]:
     """Непересекающиеся чанки фиксированного размера (последний может быть короче)."""
     sz = max(1, int(chunk_size))
     seq = list(items)
@@ -46,10 +47,10 @@ def chunked(items: Sequence[T], chunk_size: int) -> Iterator[List[T]]:
         yield seq[i : i + sz]
 
 
-def chunked_iterable(items: Iterable[T], chunk_size: int) -> Iterator[List[T]]:
+def chunked_iterable(items: Iterable[T], chunk_size: int) -> Iterator[list[T]]:
     """Чанки из произвольного итерируемого (материализует элементы по мере чтения)."""
     sz = max(1, int(chunk_size))
-    buf: List[T] = []
+    buf: list[T] = []
     for x in items:
         buf.append(x)
         if len(buf) >= sz:

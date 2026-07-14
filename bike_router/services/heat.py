@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-from ..config import HEAT_COST_SCALE, TimeSlotDef, TIME_SLOTS
+from ..config import HEAT_COST_SCALE, TIME_SLOTS, TimeSlotDef
 from .policy_data import load_heat_season_policy
 
 # ---------------------------------------------------------------------------
@@ -24,9 +24,7 @@ def bearing_deg_from_lonlat(
     lat1r = math.radians(lat1)
     lat2r = math.radians(lat2)
     x = math.sin(dlon) * math.cos(lat2r)
-    y = math.cos(lat1r) * math.sin(lat2r) - math.sin(lat1r) * math.cos(
-        lat2r
-    ) * math.cos(dlon)
+    y = math.cos(lat1r) * math.sin(lat2r) - math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon)
     brng = math.degrees(math.atan2(x, y))
     return (brng + 360.0) % 360.0
 
@@ -36,7 +34,7 @@ def edge_bearing_deg_from_geom(geom: Any) -> float:
     if geom is None:
         return 0.0
     gt = getattr(geom, "geom_type", "") or ""
-    coords: List[Tuple[float, float]] = []
+    coords: list[tuple[float, float]] = []
     try:
         if gt in ("LineString", "LinearRing"):
             coords = list(geom.coords)
@@ -85,7 +83,7 @@ def vegetation_shade_share(trees_pct: float, grass_pct: float) -> float:
     return float(min(0.95, (t / 100.0) * 0.92 + (g / 100.0) * 0.25))
 
 
-def covered_share(tags: Dict[str, Any]) -> float:
+def covered_share(tags: dict[str, Any]) -> float:
     """Доля укрытия / навеса / прохода [0..1] по OSM (covered, tunnel, indoor)."""
     if not tags:
         return 0.0
@@ -107,7 +105,7 @@ def covered_share(tags: Dict[str, Any]) -> float:
     return 0.0
 
 
-def _parse_float_tag(raw: Any) -> Optional[float]:
+def _parse_float_tag(raw: Any) -> float | None:
     if raw is None:
         return None
     try:
@@ -116,7 +114,7 @@ def _parse_float_tag(raw: Any) -> Optional[float]:
         return None
 
 
-def street_width_proxy_m(tags: Dict[str, Any]) -> float:
+def street_width_proxy_m(tags: dict[str, Any]) -> float:
     """Прокси ширины улицы по OSM width/lanes/highway, если нет building footprints."""
     if not tags:
         return 18.0
@@ -145,7 +143,7 @@ def street_width_proxy_m(tags: Dict[str, Any]) -> float:
     return float(defaults.get(hw, 18.0))
 
 
-def urban_canyon_score(tags: Dict[str, Any]) -> float:
+def urban_canyon_score(tags: dict[str, Any]) -> float:
     """0..1: узкая улица/пешеходный коридор как прокси городского каньона."""
     w = street_width_proxy_m(tags)
     width_score = max(0.0, min(1.0, (28.0 - w) / 24.0))
@@ -154,7 +152,7 @@ def urban_canyon_score(tags: Dict[str, Any]) -> float:
     return float(max(0.0, min(1.0, width_score + hw_boost)))
 
 
-def building_shade_share(tags: Dict[str, Any]) -> float:
+def building_shade_share(tags: dict[str, Any]) -> float:
     """Прокси тени зданий по ширине проезда [0..1]."""
     canyon = urban_canyon_score(tags)
     return float(min(0.82, max(0.05, 0.12 + 0.70 * canyon)))
@@ -256,8 +254,8 @@ def thermal_edge_features(
     bearing_deg: float,
     trees_pct: float,
     grass_pct: float,
-    tags: Dict[str, Any],
-) -> Tuple[float, float, float, float, float]:
+    tags: dict[str, Any],
+) -> tuple[float, float, float, float, float]:
     """O, V, B, C (укрытие), tree_mit — для тепловой маршрутизации."""
     O = open_sky_fraction(trees_pct, grass_pct)
     V = vegetation_shade_share(trees_pct, grass_pct)
@@ -271,24 +269,20 @@ def exposure_units_detailed_all_slots(
     bearing_deg: float,
     trees_pct: float,
     grass_pct: float,
-    tags: Dict[str, Any],
+    tags: dict[str, Any],
     *,
     use_fallback: bool,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Безразмерная тепловая нагрузка по слотам (детально или прокси)."""
-    O, V, B, _c, _tm = thermal_edge_features(
-        bearing_deg, trees_pct, grass_pct, tags
-    )
-    out: Dict[str, float] = {}
+    O, V, B, _c, _tm = thermal_edge_features(bearing_deg, trees_pct, grass_pct, tags)
+    out: dict[str, float] = {}
     for slot in TIME_SLOTS:
         D = direct_sun_factor(bearing_deg, slot)
         if use_fallback:
             open_frac = O
             tree_mit = min(0.85, (float(trees_pct or 0) / 100.0) * 0.9)
             b_mit = B
-            out[slot.key] = legacy_exposure_unit(
-                bearing_deg, slot, open_frac, tree_mit, b_mit
-            )
+            out[slot.key] = legacy_exposure_unit(bearing_deg, slot, open_frac, tree_mit, b_mit)
         else:
             out[slot.key] = open_unfavorable_unit(O, V, B, D)
     return out
@@ -297,9 +291,9 @@ def exposure_units_detailed_all_slots(
 def heat_context_multiplier(
     season: str,
     time_slot_key: str,
-    air_temperature_c: Optional[float],
+    air_temperature_c: float | None,
     *,
-    policy: Optional[Dict[str, Any]] = None,
+    policy: dict[str, Any] | None = None,
 ) -> float:
     """Множитель к уже посчитанному heat_cost на ребре (сезон + опционально T воздуха)."""
     pol = policy if policy is not None else load_heat_season_policy()
@@ -329,10 +323,10 @@ def heat_costs_for_all_slots(
     bearing_deg: float,
     trees_pct: float,
     grass_pct: float,
-    tags: Dict[str, Any],
+    tags: dict[str, Any],
     *,
     use_fallback: bool = False,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     exps = exposure_units_detailed_all_slots(
         bearing_deg, trees_pct, grass_pct, tags, use_fallback=use_fallback
     )
@@ -345,7 +339,7 @@ def heat_metrics_for_route(
     exposure_units: list[float],
     *,
     exposure_threshold: float = 0.45,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     if not lengths:
         return {
             "total_heat_cost": 0.0,
@@ -354,15 +348,9 @@ def heat_metrics_for_route(
         }
     total_m = sum(lengths)
     th = sum(heat_values)
-    hi_len = sum(
-        ln
-        for ln, eu in zip(lengths, exposure_units)
-        if eu >= exposure_threshold
-    )
+    hi_len = sum(ln for ln, eu in zip(lengths, exposure_units) if eu >= exposure_threshold)
     w_exp = (
-        sum(ln * eu for ln, eu in zip(lengths, exposure_units)) / total_m
-        if total_m > 0
-        else 0.0
+        sum(ln * eu for ln, eu in zip(lengths, exposure_units)) / total_m if total_m > 0 else 0.0
     )
     return {
         "total_heat_cost": float(th),

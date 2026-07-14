@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from bike_router.config import Settings
 from bike_router.engine import _resolve_season_for_heat_alternatives
-from bike_router.services.routing import continuous_heat_edge_weather_factor, weather_edge_stress_factor
+from bike_router.services.routing import (
+    continuous_heat_edge_weather_factor,
+    weather_edge_stress_factor,
+)
 from bike_router.services.seasonal import (
     resolve_season_routing_context,
     routing_season_label,
@@ -179,7 +182,7 @@ def test_snow_depth_multiplier_monotone() -> None:
 
 
 def test_heat_season_resolution_override() -> None:
-    now = datetime(2026, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 15, 12, 0, 0, tzinfo=UTC)
     assert (
         _resolve_season_for_heat_alternatives(
             season_override="spring_autumn",

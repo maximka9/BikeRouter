@@ -1,4 +1,4 @@
-﻿"""Скрипт сравнения режимов маршрутизации для отчёта / диплома.
+"""Скрипт сравнения режимов маршрутизации для отчёта / диплома.
 
 Запуск (после ``python -m bike_router`` или из кода с загруженным движком)::
 
@@ -11,16 +11,12 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
-from typing import Any, Dict, List
-
-
+from typing import Any
 
 
 def main() -> None:
-    from bike_router.engine import RouteEngine
     from bike_router.config import Settings
+    from bike_router.engine import RouteEngine
 
     s = Settings()
     start = (s.start_lat, s.start_lon)
@@ -30,7 +26,7 @@ def main() -> None:
 
     slots = ["morning", "noon", "evening"]
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for slot in slots:
         try:
             out = eng.compute_alternatives(
@@ -66,4 +62,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

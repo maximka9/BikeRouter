@@ -8,7 +8,7 @@
 CLI вроде ``precache_area`` не зависал без вывода на минуты при холодном старте.
 """
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from .config import Settings
 from .services.cache import CacheService
@@ -19,7 +19,6 @@ from .services.tiles import TileService
 if TYPE_CHECKING:
     from .services.graph import GraphBuilder
     from .services.green import GreenAnalyzer
-    from .services.surface_prediction_store import SurfacePredictionStore
 
 
 class Application:
@@ -29,16 +28,14 @@ class Application:
     веб-интерфейс обслуживается через ``bike_router.api``.
     """
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings()
         self.cache = CacheService(self.settings.base_dir)
         self.tiles = TileService(self.cache, self.settings)
-        self.elevation = ElevationService(
-            srtm_cache_dir=self.settings.srtm_local_cache_dir
-        )
-        self._green: Optional["GreenAnalyzer"] = None
-        self._graph_builder: Optional["GraphBuilder"] = None
-        self._surface_prediction_store: Optional[Any] = None
+        self.elevation = ElevationService(srtm_cache_dir=self.settings.srtm_local_cache_dir)
+        self._green: GreenAnalyzer | None = None
+        self._graph_builder: GraphBuilder | None = None
+        self._surface_prediction_store: Any | None = None
         self.router = RouteService()
 
     @property

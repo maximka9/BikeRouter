@@ -6,15 +6,14 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Dict, Optional, Set, Tuple
+from typing import Optional
 
-import numpy as np
 import requests
 from requests.adapters import HTTPAdapter
 
 from ..config import TMS_SERVERS, Settings
-from .cache import CacheService
 from ..metrics import inc_tile_fail
+from .cache import CacheService
 from .retry import is_transient_http, retry_call
 
 logger = logging.getLogger(__name__)
@@ -26,8 +25,7 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
     logger.warning(
-        "Pillow не установлен (pip install pillow). "
-        "Анализ спутниковых снимков недоступен."
+        "Pillow не установлен (pip install pillow). Анализ спутниковых снимков недоступен."
     )
 
 try:
@@ -68,12 +66,7 @@ class TileService:
         self._session.mount("https://", _adapter)
         self._session.mount("http://", _adapter)
         self._session.headers.update(
-            {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36"
-                )
-            }
+            {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")}
         )
 
     @property
@@ -85,7 +78,7 @@ class TileService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def lat_lon_to_tile(lat: float, lon: float, zoom: int) -> Tuple[int, int]:
+    def lat_lon_to_tile(lat: float, lon: float, zoom: int) -> tuple[int, int]:
         """Географические координаты → номер тайла."""
         lat_rad = math.radians(lat)
         n = 2**zoom
@@ -94,7 +87,7 @@ class TileService:
         return x, y
 
     @staticmethod
-    def tile_to_lat_lon(x: int, y: int, zoom: int) -> Tuple[float, float]:
+    def tile_to_lat_lon(x: int, y: int, zoom: int) -> tuple[float, float]:
         """Номер тайла → географические координаты (верхний левый угол)."""
         n = 2**zoom
         lon = x / n * 360.0 - 180.0
@@ -102,9 +95,7 @@ class TileService:
         return math.degrees(lat_rad), lon
 
     @staticmethod
-    def get_tile_bounds(
-        x: int, y: int, zoom: int
-    ) -> Tuple[float, float, float, float]:
+    def get_tile_bounds(x: int, y: int, zoom: int) -> tuple[float, float, float, float]:
         """Границы тайла: ``(min_lon, min_lat, max_lon, max_lat)``."""
         lat1, lon1 = TileService.tile_to_lat_lon(x, y, zoom)
         lat2, lon2 = TileService.tile_to_lat_lon(x + 1, y + 1, zoom)
@@ -114,7 +105,7 @@ class TileService:
     # Загрузка
     # ------------------------------------------------------------------
 
-    def download(self, x: int, y: int, zoom: int) -> Tuple[Optional["Image.Image"], str]:
+    def download(self, x: int, y: int, zoom: int) -> tuple[Optional["Image.Image"], str]:
         """Скачать один тайл.
 
         Второе значение: ``cache`` | ``network`` | ``fail``.
@@ -123,6 +114,9 @@ class TileService:
             return None, "fail"
 
         server = self._settings.tms_server
+        if not server or server not in TMS_SERVERS:
+            logger.warning("TMS_SERVER is not configured or unknown: %r", server)
+            return None, "fail"
         cache_file = self._cache.tile_path(server, zoom, x, y)
 
         if self._settings.cache_satellite:
@@ -134,13 +128,9 @@ class TileService:
                         pic = im.copy()
                     return pic, "cache"
                 except Exception as exc:
-                    logger.debug(
-                        "Битый кэш тайла (%d,%d,z=%d): %s", x, y, zoom, exc
-                    )
+                    logger.debug("Битый кэш тайла (%d,%d,z=%d): %s", x, y, zoom, exc)
 
-        url = TMS_SERVERS.get(server, TMS_SERVERS["google"]).format(
-            x=x, y=y, z=zoom
-        )
+        url = TMS_SERVERS[server].format(x=x, y=y, z=zoom)
         try:
             st = self._settings
             rk = {
@@ -204,23 +194,21 @@ class TileService:
                             exc,
                         )
                 return img, "network"
-            logger.debug(
-                "HTTP %s для тайла (%d,%d,z=%d)", resp.status_code, x, y, zoom
-            )
+            logger.debug("HTTP %s для тайла (%d,%d,z=%d)", resp.status_code, x, y, zoom)
         except Exception as exc:
             logger.debug("Ошибка загрузки тайла (%d,%d,z=%d): %s", x, y, zoom, exc)
 
         return None, "fail"
 
     def download_batch(
-        self, tiles: Set[Tuple[int, int]], zoom: int
-    ) -> Tuple[Dict[Tuple[int, int], "Image.Image"], TileBatchStats]:
+        self, tiles: set[tuple[int, int]], zoom: int
+    ) -> tuple[dict[tuple[int, int], "Image.Image"], TileBatchStats]:
         """Параллельная подготовка набора тайлов (чтение JPEG с диска и/или HTTP).
 
         Даже при полном попадании в ``cache/tiles`` каждый файл открывается PIL
         и копируется в память для зелени — это не «лишняя» сеть, а обязательный шаг.
         """
-        result: Dict[Tuple[int, int], "Image.Image"] = {}
+        result: dict[tuple[int, int], Image.Image] = {}
         if not PIL_AVAILABLE or not tiles:
             return result, TileBatchStats(
                 requested=0,
@@ -238,7 +226,7 @@ class TileService:
             threads,
         )
 
-        def _dl(xy: Tuple[int, int]):
+        def _dl(xy: tuple[int, int]):
             img, src = self.download(xy[0], xy[1], zoom)
             return xy, img, src
 

@@ -14,7 +14,7 @@ import math
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 from .services.seasonal_params import DEFAULT_SEASONAL_SNOW_PARAMS, SeasonalSnowParams
 from .services.weather_params import DEFAULT_HEAT_WEATHER_PARAMS, HeatWeatherParams
@@ -83,8 +83,8 @@ class ModeProfile:
     # Множитель влияния озеленения (>1 — сильнее реагирует на зелень)
     green_sensitivity: float
     # Предпочтения по типам дорог и покрытий
-    highway: Dict[str, float] = field(default_factory=dict)
-    surface: Dict[str, float] = field(default_factory=dict)
+    highway: dict[str, float] = field(default_factory=dict)
+    surface: dict[str, float] = field(default_factory=dict)
     # Цвета маршрутов на карте
     color_full: str = "#3498DB"
     color_green: str = "#27AE60"
@@ -107,22 +107,22 @@ CYCLIST = ModeProfile(
     # Озеленение влияет наравне с физикой; дифференциация — через highway-штрафы
     green_sensitivity=1.0,
     highway={
-        "cycleway": 0.3,       # выделенные велодорожки — идеал
-        "path": 0.7,           # тропинки — приемлемо
+        "cycleway": 0.3,  # выделенные велодорожки — идеал
+        "path": 0.7,  # тропинки — приемлемо
         "living_street": 0.9,  # жилые зоны — тихо
         "residential": 1.0,
         "service": 1.1,
         "unclassified": 1.1,
-        "pedestrian": 1.2,     # пешеходные зоны — конфликт с пешеходами
+        "pedestrian": 1.2,  # пешеходные зоны — конфликт с пешеходами
         "tertiary": 1.2,
         "tertiary_link": 1.2,
-        "footway": 1.3,        # тротуары — не для велосипеда
+        "footway": 1.3,  # тротуары — не для велосипеда
         "track": 1.3,
-        "secondary": 1.4,      # трафик
+        "secondary": 1.4,  # трафик
         "secondary_link": 1.4,
-        "primary": 1.6,        # интенсивный трафик — опасно
+        "primary": 1.6,  # интенсивный трафик — опасно
         "primary_link": 1.6,
-        "steps": 10.0,         # лестницы — непроезжаемо
+        "steps": 10.0,  # лестницы — непроезжаемо
         "construction": 100.0,
     },
     surface={
@@ -143,10 +143,10 @@ CYCLIST = ModeProfile(
     },
     color_full="#3498DB",
     color_green="#27AE60",
-    base_speed_ms=5.0,       # 18 км/ч
+    base_speed_ms=5.0,  # 18 км/ч
     uphill_penalty=5.0,
     downhill_bonus=3.0,
-    stairs_speed_ms=0.3,     # нужно вести велосипед
+    stairs_speed_ms=0.3,  # нужно вести велосипед
 )
 
 PEDESTRIAN = ModeProfile(
@@ -162,21 +162,21 @@ PEDESTRIAN = ModeProfile(
     # Пешеходу важнее тень, зелень, комфорт среды
     green_sensitivity=1.3,
     highway={
-        "footway": 0.5,        # тротуары — идеал
-        "pedestrian": 0.5,     # пешеходные зоны
+        "footway": 0.5,  # тротуары — идеал
+        "pedestrian": 0.5,  # пешеходные зоны
         "path": 0.7,
         "living_street": 0.8,
         "residential": 1.0,
         "service": 1.1,
         "unclassified": 1.2,
-        "cycleway": 1.3,       # велодорожка — не для пешехода
+        "cycleway": 1.3,  # велодорожка — не для пешехода
         "track": 1.4,
-        "tertiary": 1.5,       # опасность при переходе
+        "tertiary": 1.5,  # опасность при переходе
         "tertiary_link": 1.5,
         "secondary": 1.8,
         "secondary_link": 1.8,
-        "steps": 2.0,          # лестницы — утомительно, но проходимо
-        "primary": 2.5,        # очень опасный переход
+        "steps": 2.0,  # лестницы — утомительно, но проходимо
+        "primary": 2.5,  # очень опасный переход
         "primary_link": 2.5,
         "construction": 100.0,
     },
@@ -191,14 +191,14 @@ PEDESTRIAN = ModeProfile(
         "fine_gravel": 1.3,
         "gravel": 1.5,
         "unpaved": 1.8,
-        "grass": 1.8,          # трава — проходимо для пешехода
+        "grass": 1.8,  # трава — проходимо для пешехода
         "dirt": 2.0,
         "ground": 2.0,
         "sand": 2.5,
     },
     color_full="#E67E22",
     color_green="#8E44AD",
-    base_speed_ms=1.39,      # 5 км/ч
+    base_speed_ms=1.39,  # 5 км/ч
     uphill_penalty=3.0,
     downhill_bonus=1.5,
     stairs_speed_ms=0.5,
@@ -231,7 +231,7 @@ class RoutingPreferenceProfile:
     delta: float
 
 
-ROUTING_PREFERENCE_PROFILES: Dict[str, RoutingPreferenceProfile] = {
+ROUTING_PREFERENCE_PROFILES: dict[str, RoutingPreferenceProfile] = {
     "balanced": RoutingPreferenceProfile(
         key="balanced",
         label="Сбалансированный",
@@ -317,7 +317,7 @@ class TimeSlotDef:
     insolation_scale: float  # 0..1 — общая интенсивность для слота
 
 
-TIME_SLOTS: Tuple[TimeSlotDef, ...] = (
+TIME_SLOTS: tuple[TimeSlotDef, ...] = (
     TimeSlotDef(
         "morning",
         "Утро",
@@ -409,9 +409,7 @@ class Settings:
     # При NO_PATH: подряд пробовать буферы коридора (м), напр. 10,100,1000,5000.
     # Пустая строка — одна попытка только с CORRIDOR_BUFFER_METERS (>0), иначе без буфера (BUFFER в °).
     corridor_buffer_expand_schedule: str = field(
-        default_factory=lambda: _env(
-            "CORRIDOR_BUFFER_EXPAND_SCHEDULE", "10,100,1000,5000", str
-        )
+        default_factory=lambda: _env("CORRIDOR_BUFFER_EXPAND_SCHEDULE", "10,100,1000,5000", str)
     )
 
     # --- Область покрытия графа (для API) ---
@@ -424,9 +422,7 @@ class Settings:
     # WKT полигона/мультиполигона (координаты lon lat). Если задан — граф OSM режется по нему,
     # значения AREA_* для формы области игнорируются (см. engine.warmup).
     # default_factory: чтение env при каждом Settings(), не при import (как у остальных полей dataclass).
-    area_polygon_wkt: str = field(
-        default_factory=lambda: _env("AREA_POLYGON_WKT", "", str)
-    )
+    area_polygon_wkt: str = field(default_factory=lambda: _env("AREA_POLYGON_WKT", "", str))
     # Граф и спутниковая зелень только в прямоугольнике между точками запроса ± BUFFER.
     # Работает только если нет AREA_POLYGON_WKT и нет полного AREA_*; иначе игнорируется.
     graph_corridor_mode: bool = _env_bool("GRAPH_CORRIDOR_MODE", False)
@@ -441,7 +437,7 @@ class Settings:
     # Сколько тайлов обрабатывать за один проход (скачивание + маски T/G). Меньше — меньше RAM.
     # 0 — без разбиения (как раньше; на огромном полигоне возможен OOM).
     green_tile_batch_size: int = _env("GREEN_TILE_BATCH_SIZE", 4096, int)
-    tms_server: str = _env("TMS_SERVER", "google")
+    tms_server: str = _env("TMS_SERVER", "")
 
     # --- Лимиты маршрутизации ---
     max_route_km: float = _env("MAX_ROUTE_KM", 50.0, float)
@@ -452,13 +448,11 @@ class Settings:
     seasonal_snow_params: SeasonalSnowParams = field(default_factory=SeasonalSnowParams)
 
     # --- Кэш ---
-    cache_satellite: bool = _env_bool("CACHE_SATELLITE", True)
-    cache_tile_analysis: bool = _env_bool("CACHE_TILE_ANALYSIS", True)
+    cache_satellite: bool = _env_bool("CACHE_SATELLITE", False)
+    cache_tile_analysis: bool = _env_bool("CACHE_TILE_ANALYSIS", False)
     force_recalculate: bool = _env_bool("FORCE_RECALCULATE", False)
     # green_edges: не доверять pickle, где у всех рёбер нулевая зелень (часто после сбоя тайлов).
-    green_edge_reject_all_zero_cache: bool = _env_bool(
-        "GREEN_EDGE_REJECT_ALL_ZERO_CACHE", True
-    )
+    green_edge_reject_all_zero_cache: bool = _env_bool("GREEN_EDGE_REJECT_ALL_ZERO_CACHE", True)
     # Персистентный кэш ответов Nominatim (forward/reverse) на диске
     geocode_disk_cache: bool = _env_bool("GEOCODE_DISK_CACHE", True)
     # Кэш JSON ответов POST /alternatives (инвалидация: узлы/рёбра + отпечаток весов)
@@ -479,32 +473,24 @@ class Settings:
         default_factory=lambda: _env("PRECACHE_AREA_NAME", "default", str)
     )
     # Сохранять/ожидать graph_green.graphml (со спутником); иначе только phase1 base.
-    precache_area_use_green_graph: bool = _env_bool(
-        "PRECACHE_AREA_USE_GREEN_GRAPH", True
-    )
+    precache_area_use_green_graph: bool = _env_bool("PRECACHE_AREA_USE_GREEN_GRAPH", True)
 
     # --- Legacy: было base + AUTO_EXPAND_STEP *(...) до AUTO_EXPAND_MAX_METERS;
     # сейчас приоритет у CORRIDOR_BUFFER_EXPAND_SCHEDULE (см. corridor_expand_schedule_meters).
     auto_expand_step_meters: float = _env("AUTO_EXPAND_STEP_METERS", 1000.0, float)
     auto_expand_max_meters: float = _env("AUTO_EXPAND_MAX_METERS", 5000.0, float)
-    auto_expand_max_attempts: int = int(
-        max(1, round(_env("AUTO_EXPAND_MAX_ATTEMPTS", 5.0, float)))
-    )
+    auto_expand_max_attempts: int = int(max(1, round(_env("AUTO_EXPAND_MAX_ATTEMPTS", 5.0, float))))
 
     # --- Progressive alternatives / TTL job store ---
     alternatives_job_ttl_sec: float = _env("ALTERNATIVES_JOB_TTL_SEC", 1800.0, float)
-    progressive_alternatives_enabled: bool = _env_bool(
-        "PROGRESSIVE_ALTERNATIVES_ENABLED", False
-    )
+    progressive_alternatives_enabled: bool = _env_bool("PROGRESSIVE_ALTERNATIVES_ENABLED", False)
     progressive_background_variants: str = _env(
         "PROGRESSIVE_BACKGROUND_VARIANTS",
         "green,heat,stress,heat_stress",
         str,
     )
     # --- HTTP retry (Overpass через OSMnx, Nominatim, TMS; см. services/retry.py) ---
-    http_retry_max_attempts: int = int(
-        max(1, round(_env("HTTP_RETRY_MAX_ATTEMPTS", 4.0, float)))
-    )
+    http_retry_max_attempts: int = int(max(1, round(_env("HTTP_RETRY_MAX_ATTEMPTS", 4.0, float))))
     http_retry_base_delay_sec: float = _env("HTTP_RETRY_BASE_DELAY_SEC", 0.5, float)
     http_retry_max_delay_sec: float = _env("HTTP_RETRY_MAX_DELAY_SEC", 30.0, float)
     http_retry_jitter: float = _env("HTTP_RETRY_JITTER", 0.25, float)
@@ -521,9 +507,7 @@ class Settings:
     osm_requests_timeout: float = _env("OSM_REQUESTS_TIMEOUT", 180.0, float)
     # Первая sub-попытка к каждому Overpass URL — короткий таймаут (сек), затем повторы с OSM_REQUESTS_TIMEOUT
     # и следующие зеркала из OSM_OVERPASS_URLS. Работает и при одном endpoint. 0 — везде только OSM_REQUESTS_TIMEOUT.
-    osm_overpass_first_attempt_timeout: float = _env(
-        "OSM_OVERPASS_FIRST_TIMEOUT", 30.0, float
-    )
+    osm_overpass_first_attempt_timeout: float = _env("OSM_OVERPASS_FIRST_TIMEOUT", 30.0, float)
     # Несколько URL через запятую — последовательные попытки (без параллельного fan-out).
     # Приоритет: OSM_OVERPASS_URLS → OSM_OVERPASS_URL → https://overpass-api.de/api
     osm_overpass_urls: str = _env("OSM_OVERPASS_URLS", "", str)
@@ -557,17 +541,15 @@ class Settings:
             return getattr(hw, name)
         if hasattr(ss, name):
             return getattr(ss, name)
-        raise AttributeError(
-            f"{type(self).__name__!r} object has no attribute {name!r}"
-        )
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     @property
-    def start_coords(self) -> Tuple[float, float]:
+    def start_coords(self) -> tuple[float, float]:
         """Координаты старта (lat, lon)."""
         return (self.start_lat, self.start_lon)
 
     @property
-    def end_coords(self) -> Tuple[float, float]:
+    def end_coords(self) -> tuple[float, float]:
         """Координаты финиша (lat, lon)."""
         return (self.end_lat, self.end_lon)
 
@@ -614,19 +596,12 @@ class Settings:
     def has_area_polygon(self) -> bool:
         """True если в .env задан непустой WKT полигона для загрузки графа."""
         w = self.area_polygon_wkt_stripped.upper()
-        return bool(w) and (
-            w.startswith("POLYGON")
-            or w.startswith("MULTIPOLYGON")
-        )
+        return bool(w) and (w.startswith("POLYGON") or w.startswith("MULTIPOLYGON"))
 
     @property
     def use_dynamic_corridor_graph(self) -> bool:
         """Динамический bbox по координатам POST (без фиксированной зоны в .env)."""
-        return (
-            self.graph_corridor_mode
-            and not self.has_area_polygon
-            and not self.has_area_bbox
-        )
+        return self.graph_corridor_mode and not self.has_area_polygon and not self.has_area_bbox
 
     @property
     def precache_area_polygon_wkt_stripped(self) -> str:
@@ -635,19 +610,17 @@ class Settings:
     @property
     def has_precache_area_polygon(self) -> bool:
         w = self.precache_area_polygon_wkt_stripped.upper()
-        return bool(w) and (
-            w.startswith("POLYGON") or w.startswith("MULTIPOLYGON")
-        )
+        return bool(w) and (w.startswith("POLYGON") or w.startswith("MULTIPOLYGON"))
 
     @property
-    def corridor_expand_schedule_meters(self) -> List[float]:
+    def corridor_expand_schedule_meters(self) -> list[float]:
         """Список буферов коридора (м) по возрастанию попыток при NO_PATH.
 
         Читается из ``CORRIDOR_BUFFER_EXPAND_SCHEDULE`` (числа через запятую).
         Если строка пустая — одна попытка с ``CORRIDOR_BUFFER_METERS``, если оно > 0.
         """
         raw = (self.corridor_buffer_expand_schedule or "").strip()
-        out: List[float] = []
+        out: list[float] = []
         for part in raw.split(","):
             p = part.strip()
             if not p:
@@ -663,11 +636,11 @@ class Settings:
         b = float(self.corridor_buffer_meters)
         return [b] if b > 0 else []
 
-    def resolved_overpass_endpoints(self) -> List[str]:
+    def resolved_overpass_endpoints(self) -> list[str]:
         """Цепочка Overpass: зеркало(а) и основной инстанс — по очереди, не параллельно."""
         raw = (self.osm_overpass_urls or "").strip()
         if raw:
-            urls: List[str] = []
+            urls: list[str] = []
             for part in raw.split(","):
                 u = part.strip().rstrip("/")
                 if u:
@@ -695,7 +668,7 @@ class Settings:
 
 DEFAULT_COEFFICIENT: float = 1.0
 
-TMS_SERVERS: Dict[str, str] = {
+TMS_SERVERS: dict[str, str] = {
     "google": "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
     "esri": (
         "https://server.arcgisonline.com/ArcGIS/rest/services/"
@@ -725,9 +698,7 @@ def routing_engine_cache_fingerprint() -> str:
         d["highway"] = dict(sorted(d["highway"].items()))
         d["surface"] = dict(sorted(d["surface"].items()))
         profs.append(d)
-    pref_profiles = {
-        k: asdict(v) for k, v in sorted(ROUTING_PREFERENCE_PROFILES.items())
-    }
+    pref_profiles = {k: asdict(v) for k, v in sorted(ROUTING_PREFERENCE_PROFILES.items())}
     slots = [
         {
             "key": s.key,

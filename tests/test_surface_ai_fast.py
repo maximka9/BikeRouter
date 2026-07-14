@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
 import pytest
-from dataclasses import replace
-
 from shapely.geometry import LineString, box
 
 from bike_router.config import Settings
-
 from bike_router.services.surface_prediction_store import (
     REQUIRED_RUNTIME_COLUMNS,
     write_runtime_predictions_csv,
@@ -120,7 +118,11 @@ def test_neighbor_features_no_leak_from_predict_holdout_labels() -> None:
 
 
 def test_tile_usage_report_writes_csv_and_png(tmp_path: Path) -> None:
-    from bike_router.services.surface_ai import artifact_paths, scan_cached_tiles, write_tile_usage_report
+    from bike_router.services.surface_ai import (
+        artifact_paths,
+        scan_cached_tiles,
+        write_tile_usage_report,
+    )
 
     tile_path = tmp_path / "google_20_1_2.jpg"
     tile_path.write_bytes(b"x")

@@ -1,4 +1,4 @@
-﻿"""CLI for final experimental AI recovery of concrete OSM surface values.
+"""CLI for final experimental AI recovery of concrete OSM surface values.
 
 Example:
 
@@ -9,11 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-import sys
 from pathlib import Path
-
-
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,4 +128,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

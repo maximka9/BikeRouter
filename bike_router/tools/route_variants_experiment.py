@@ -1,4 +1,4 @@
-﻿"""Сравнение шести вариантов маршрута при текущей погоде (один снимок Open-Meteo).
+"""Сравнение шести вариантов маршрута при текущей погоде (один снимок Open-Meteo).
 
 Один запрос погоды в центре полигона на момент запуска. Выход:
 ``bike_router/experiment_outputs/route_variants_experiment_YYYYMMDD_HHMMSS.xlsx`` (UTC в имени).
@@ -15,13 +15,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-import sys
-from typing import Any, Dict
+from typing import Any
 
 _log = logging.getLogger(__name__)
-
-
 
 
 def run_variants_experiment(
@@ -34,7 +30,6 @@ def run_variants_experiment(
 
     from bike_router.config import Settings
     from bike_router.services.area_graph_cache import parse_precache_polygon
-
     from bike_router.tools._experiment_common import (
         mp_resolve_pool_workers,
         resolve_live_weather_once_for_polygon,
@@ -55,7 +50,7 @@ def run_variants_experiment(
         lon_c,
     )
 
-    fixed_kw: Dict[str, Any] = {
+    fixed_kw: dict[str, Any] = {
         "weather_mode": "fixed-snapshot",
         "use_live_weather": False,
         "weather_time": dep_iso,
@@ -130,4 +125,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -7,7 +7,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import pandas as pd
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 RUNTIME_PREDICTIONS_SCHEMA_VERSION = "1"
 
 # Минимум для сопоставления и safety; остальные колонки опциональны.
-REQUIRED_RUNTIME_COLUMNS: Tuple[str, ...] = (
+REQUIRED_RUNTIME_COLUMNS: tuple[str, ...] = (
     "edge_id",
     "surface_pred_group",
     "surface_pred_confidence",
@@ -103,7 +103,9 @@ def _rounded_geometry_hash(geometry: Any, precision: int = 6) -> str:
             return ""
         parts = []
         for x, y in coords:
-            parts.append(f"{round(float(x), precision):.{precision}f},{round(float(y), precision):.{precision}f}")
+            parts.append(
+                f"{round(float(x), precision):.{precision}f},{round(float(y), precision):.{precision}f}"
+            )
         body = "|".join(parts)
         import hashlib
 
@@ -122,14 +124,14 @@ def _first_osm_scalar(val: Any) -> Any:
 class SurfacePrediction:
     edge_id: str
     surface_group: str
-    surface_concrete: Optional[str]
+    surface_concrete: str | None
     confidence: float
     margin: float
     source_model: str
     artifact_id: str
     is_safe: bool
-    reject_reason: Optional[str] = None
-    surface_effective_ml: Optional[str] = None
+    reject_reason: str | None = None
+    surface_effective_ml: str | None = None
 
 
 class SurfacePredictionStore:
@@ -138,13 +140,13 @@ class SurfacePredictionStore:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._loaded = False
-        self._failure_reason: Optional[str] = None
+        self._failure_reason: str | None = None
         self._artifact_graph_hash: str = ""
         self._ml_graph_ok: bool = True
         self._has_explicit_undirected_keys: bool = False
-        self._by_edge_id: Dict[str, SurfacePrediction] = {}
-        self._by_undirected: Dict[str, SurfacePrediction] = {}
-        self._by_way_geom: Dict[str, SurfacePrediction] = {}
+        self._by_edge_id: dict[str, SurfacePrediction] = {}
+        self._by_undirected: dict[str, SurfacePrediction] = {}
+        self._by_way_geom: dict[str, SurfacePrediction] = {}
 
     @property
     def loaded(self) -> bool:
@@ -155,7 +157,7 @@ class SurfacePredictionStore:
         return self._ml_graph_ok
 
     @property
-    def failure_reason(self) -> Optional[str]:
+    def failure_reason(self) -> str | None:
         return self._failure_reason
 
     def load(self) -> None:
@@ -258,9 +260,9 @@ class SurfacePredictionStore:
 
             try:
                 poly = parse_precache_polygon(self._settings)
-                cur = hashlib.sha256(
-                    getattr(poly, "wkt", str(poly)).encode("utf-8")
-                ).hexdigest()[:24]
+                cur = hashlib.sha256(getattr(poly, "wkt", str(poly)).encode("utf-8")).hexdigest()[
+                    :24
+                ]
                 if cur and area_fp != cur:
                     msg = f"area_fingerprint mismatch (csv={area_fp!r} current={cur!r})"
                     self._failure_reason = msg
@@ -397,7 +399,11 @@ class SurfacePredictionStore:
         rej = row.get("surface_ml_reject_reason")
         rej_s = str(rej).strip() if rej is not None and str(rej).strip() != "" else None
         eff_ml = row.get("surface_effective_ml")
-        eff_s = str(eff_ml).strip().lower() if eff_ml is not None and str(eff_ml).strip() != "" else None
+        eff_s = (
+            str(eff_ml).strip().lower()
+            if eff_ml is not None and str(eff_ml).strip() != ""
+            else None
+        )
         mk = str(row.get("model_key") or "").strip()
         mt = str(row.get("model_target") or "").strip()
         art = str(row.get("artifact_created_at") or row.get("artifact_id") or "").strip()
@@ -414,7 +420,7 @@ class SurfacePredictionStore:
             surface_effective_ml=eff_s,
         )
 
-    def get_for_edge(self, row: pd.Series) -> Optional[SurfacePrediction]:
+    def get_for_edge(self, row: pd.Series) -> SurfacePrediction | None:
         if not self._loaded or not self._ml_graph_ok:
             return None
         modes = [

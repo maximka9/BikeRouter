@@ -1,0 +1,39 @@
+name: Docker registration check
+
+on:
+  push:
+    branches:
+      - main
+      - registration-prep
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build Docker image
+        run: docker build --no-cache -t bikerouter:3.0.0-registration .
+
+      - name: Check excluded files
+        run: |
+          if docker run --rm bikerouter:3.0.0-registration sh -c 'test -f /app/.env'; then
+            echo ".env is present in the image"
+            exit 1
+          fi
+
+      - name: Start container
+        run: |
+          docker run -d --name bikerouter-test -p 8000:8000 bikerouter:3.0.0-registration
+          sleep 20
+
+      - name: Check health
+        run: curl --fail http://127.0.0.1:8000/health
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs bikerouter-test || true

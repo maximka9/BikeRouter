@@ -12,7 +12,6 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Optional, Tuple
 
 import networkx as nx
 import osmnx as ox
@@ -48,7 +47,7 @@ def quantize_corridor_bbox_expanding(
     max_lon: float,
     max_lat: float,
     step_deg: float,
-) -> Tuple[float, float, float, float]:
+) -> tuple[float, float, float, float]:
     """Расширить bbox до ячеек сетки (floor минимумов, ceil максимумов) — безопасно для повторного использования графа."""
     if step_deg <= 0.0 or not math.isfinite(step_deg):
         return min_lon, min_lat, max_lon, max_lat
@@ -104,7 +103,7 @@ class CorridorGraphDiskCache:
     def path(self, key_hash: str) -> Path:
         return self._dir / f"{key_hash}.graphml"
 
-    def load(self, key_hash: str) -> Optional[nx.MultiDiGraph]:
+    def load(self, key_hash: str) -> nx.MultiDiGraph | None:
         if not self._enabled:
             return None
         path = self.path(key_hash)

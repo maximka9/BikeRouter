@@ -1,4 +1,4 @@
-﻿"""Только маршрут ``heat`` на synthetic-сетке погоды (fixed-snapshot, без Open-Meteo).
+"""Только маршрут ``heat`` на synthetic-сетке погоды (fixed-snapshot, без Open-Meteo).
 
 Выход: ``bike_router/experiment_outputs/heat_weather_experiment_YYYYMMDD_HHMMSS.xlsx`` (UTC в имени).
 
@@ -39,16 +39,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
-import os
-import sys
 import time
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 _log = logging.getLogger(__name__)
-
-
 
 
 def run_heat_weather_experiment(
@@ -67,21 +63,19 @@ def run_heat_weather_experiment(
     import gc
     from multiprocessing import Pool
 
+    import numpy as np
+    from tqdm import tqdm
+
     from bike_router.config import ROUTING_ALGO_VERSION, Settings, routing_engine_cache_fingerprint
     from bike_router.engine import RouteEngine
     from bike_router.exceptions import BikeRouterError, RouteNotFoundError
     from bike_router.services.area_graph_cache import parse_precache_polygon
-
     from bike_router.tools._experiment_common import (
         DEFAULT_MAX_SAMPLE_ATTEMPTS,
         DEFAULT_MIN_SPACING_M,
         DEFAULT_ROUTE_BATCH_SEED,
         EXPERIMENT_CORRIDOR_EXPAND_M,
         SYNTHETIC_TEST_WEATHER_ISO,
-        mp_resolve_pool_workers,
-        mp_split_weather_grid_chunks,
-        weather_summer_heat_grid,
-        weather_winter_heat_grid,
         _batch_profiles_from_arg,
         _direction_key,
         _iter_directed_pairs,
@@ -91,24 +85,23 @@ def run_heat_weather_experiment(
         build_heat_experiment_extra_sheet_blocks,
         build_heat_weather_kpi_extras_dict,
         build_heat_weather_kpi_rows,
-        build_winter_kpi_rows,
         build_pair_comparison,
         build_summaries,
+        build_winter_kpi_rows,
         experiment_output_xlsx_path,
         kwargs_fixed_snapshot_from_case,
+        mp_resolve_pool_workers,
+        mp_split_weather_grid_chunks,
         route_to_raw_row,
         sample_points_in_polygon,
+        weather_summer_heat_grid,
+        weather_winter_heat_grid,
         write_xlsx,
     )
 
-    import numpy as np
-    from tqdm import tqdm
-
     settings = Settings()
     if not settings.has_precache_area_polygon:
-        raise SystemExit(
-            "В .env должен быть задан PRECACHE_AREA_POLYGON_WKT (полигон арены)."
-        )
+        raise SystemExit("В .env должен быть задан PRECACHE_AREA_POLYGON_WKT (полигон арены).")
 
     seed = int(DEFAULT_ROUTE_BATCH_SEED)
     min_spacing_m = float(DEFAULT_MIN_SPACING_M)
@@ -155,16 +148,18 @@ def run_heat_weather_experiment(
         grid_name = "95 летних (90 базовых + 5 apparent)"
     assert len(grid) in (95, 135, 230)
 
-    pair_iter = _iter_directed_pairs(n_points) if directed_pairs else _iter_undirected_pairs(n_points)
-    route_tasks: List[Tuple[int, int, str]] = [
+    pair_iter = (
+        _iter_directed_pairs(n_points) if directed_pairs else _iter_undirected_pairs(n_points)
+    )
+    route_tasks: list[tuple[int, int, str]] = [
         (i, j, prof) for i, j in pair_iter for prof in profile_tuple
     ]
     n_od_tracks = len(route_tasks)
 
     expected_routes = len(route_tasks) * len(grid)
-    raw_rows: List[Dict[str, Any]] = []
-    vertices: List[Dict[str, Any]] = []
-    failures: List[Dict[str, Any]] = []
+    raw_rows: list[dict[str, Any]] = []
+    vertices: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     n_ok = 0
     n_fail = 0
     n_skip = 0
@@ -376,18 +371,16 @@ def run_heat_weather_experiment(
         winter_kpi = build_winter_kpi_rows(raw_rows)
     elif wg == "all":
         wrows = [
-            r
-            for r in raw_rows
-            if str(r.get("weather_test_case_id") or "").startswith("winter_")
+            r for r in raw_rows if str(r.get("weather_test_case_id") or "").startswith("winter_")
         ]
         winter_kpi = build_winter_kpi_rows(wrows) if wrows else None
     else:
         winter_kpi = None
     out = experiment_output_xlsx_path(script_stem="heat_weather_experiment")
     wkt_fp = routing_engine_cache_fingerprint()
-    meta_rows: List[Tuple[str, Any]] = [
+    meta_rows: list[tuple[str, Any]] = [
         ("experiment_id", experiment_id),
-        ("started_at_utc", datetime.now(timezone.utc).isoformat()),
+        ("started_at_utc", datetime.now(UTC).isoformat()),
         ("seed", seed),
         ("n_points", n_points),
         ("heat_route_tasks", n_od_tracks),
@@ -517,4 +510,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

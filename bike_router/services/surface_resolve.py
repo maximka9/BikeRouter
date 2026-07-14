@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 
-from ..config import DEFAULT_COEFFICIENT, Settings
+from ..config import Settings
 from .surface_runtime_constants import (
     SURFACE_AI_RUNTIME_FALLBACK_TO_HEURISTIC,
     SURFACE_AI_RUNTIME_LOG_STATS,
@@ -55,7 +55,7 @@ _HIGHWAY_SURFACE = {
 }
 
 # Группа Surface AI → строка для ``ModeProfile.surface`` (ключи CYCLIST/PEDESTRIAN).
-ML_GROUP_TO_ROUTING_PROFILE_SURFACE: Dict[str, str] = {
+ML_GROUP_TO_ROUTING_PROFILE_SURFACE: dict[str, str] = {
     "paved_good": "asphalt",
     "paved_rough": "compacted",
     "unpaved_soft": "unpaved",
@@ -95,9 +95,7 @@ def _norm_tag(val: Any) -> str:
     return s
 
 
-def infer_surface_from_tracktype_highway(
-    highway: Any, tracktype: Any
-) -> Optional[str]:
+def infer_surface_from_tracktype_highway(highway: Any, tracktype: Any) -> str | None:
     """Эвристика, если в OSM нет тега ``surface``."""
     tt = _norm_tag(tracktype)
     if tt in _TRACKTYPE_SURFACE:
@@ -129,9 +127,7 @@ def build_surface_effective_column(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFr
     """Добавить ``surface_osm`` (нормализованный тег OSM или пусто)."""
     gdf = edges_gdf.copy()
     if "surface" in gdf.columns:
-        gdf["surface_osm"] = gdf["surface"].map(
-            lambda x: _norm_tag(_first_value(x))
-        )
+        gdf["surface_osm"] = gdf["surface"].map(lambda x: _norm_tag(_first_value(x)))
     else:
         gdf["surface_osm"] = ""
 
@@ -165,7 +161,7 @@ def _ensure_edge_id_column(gdf: gpd.GeoDataFrame) -> None:
     )
 
 
-def _ml_surface_string(pred: "SurfacePrediction") -> str:
+def _ml_surface_string(pred: SurfacePrediction) -> str:
     """Строка surface_effective для весов (ключ словаря profile.surface)."""
     if pred.surface_effective_ml:
         s = pred.surface_effective_ml.strip().lower()
@@ -197,12 +193,10 @@ class SurfaceResolutionStats:
     ml_predictions_rejected_missing_match: int = 0
     ml_confidence_sum_used: float = 0.0
 
-    def to_api_summary(self) -> Dict[str, Any]:
+    def to_api_summary(self) -> dict[str, Any]:
         n = max(1, int(self.edge_count))
         used = int(self.ml_predictions_used_count)
-        avg_conf = (
-            float(self.ml_confidence_sum_used) / used if used > 0 else 0.0
-        )
+        avg_conf = float(self.ml_confidence_sum_used) / used if used > 0 else 0.0
         rejected = (
             int(self.ml_predictions_rejected_low_confidence)
             + int(self.ml_predictions_rejected_low_margin)
@@ -223,8 +217,8 @@ class SurfaceResolutionStats:
 def apply_surface_resolution(
     edges_gdf: gpd.GeoDataFrame,
     *,
-    prediction_store: Optional["SurfacePredictionStore"] = None,
-    settings: Optional[Settings] = None,
+    prediction_store: SurfacePredictionStore | None = None,
+    settings: Settings | None = None,
 ) -> tuple[gpd.GeoDataFrame, SurfaceResolutionStats]:
     """Колонка ``surface_effective`` и диагностика источника покрытия.
 
@@ -255,25 +249,21 @@ def apply_surface_resolution(
         else:
             reason = "prediction_store_missing"
             if prediction_store is not None and not prediction_store.loaded:
-                reason = (
-                    getattr(prediction_store, "failure_reason", None)
-                    or "store_not_loaded"
-                )
+                reason = getattr(prediction_store, "failure_reason", None) or "store_not_loaded"
             logger.warning(
-                "surface_resolution: use_ml=False "
-                "(SURFACE_AI_RUNTIME_ENABLED=True, reason=%s)",
+                "surface_resolution: use_ml=False (SURFACE_AI_RUNTIME_ENABLED=True, reason=%s)",
                 reason,
             )
 
     n = len(gdf)
-    surf_eff: List[str] = []
-    surf_src: List[str] = []
-    ml_grp: List[str] = []
-    ml_conc: List[str] = []
-    ml_conf: List[float] = []
-    ml_marg: List[float] = []
-    ml_rej: List[str] = []
-    res_reason: List[str] = []
+    surf_eff: list[str] = []
+    surf_src: list[str] = []
+    ml_grp: list[str] = []
+    ml_conc: list[str] = []
+    ml_conf: list[float] = []
+    ml_marg: list[float] = []
+    ml_rej: list[str] = []
+    res_reason: list[str] = []
 
     for idx in range(n):
         row = gdf.iloc[idx]
@@ -294,7 +284,7 @@ def apply_surface_resolution(
             stats.surface_source_osm_count += 1
             continue
 
-        pred: Optional["SurfacePrediction"] = None
+        pred: SurfacePrediction | None = None
         if use_ml:
             assert prediction_store is not None
             pred = prediction_store.get_for_edge(row)
@@ -302,7 +292,7 @@ def apply_surface_resolution(
                 stats.ml_predictions_available_count += 1
 
         ml_accepted = False
-        reject_reason: Optional[str] = None
+        reject_reason: str | None = None
 
         if use_ml and pred is not None:
             if float(pred.confidence) < float(SURFACE_AI_RUNTIME_MIN_CONFIDENCE):
@@ -314,10 +304,8 @@ def apply_surface_resolution(
             elif SURFACE_AI_RUNTIME_USE_ONLY_SAFE and not pred.is_safe:
                 reject_reason = "unsafe"
                 stats.ml_predictions_rejected_unsafe += 1
-            elif (
-                pred.surface_group == "paved_good"
-                and float(pred.confidence)
-                < float(SURFACE_AI_RUNTIME_PAVED_GOOD_MIN_CONFIDENCE)
+            elif pred.surface_group == "paved_good" and float(pred.confidence) < float(
+                SURFACE_AI_RUNTIME_PAVED_GOOD_MIN_CONFIDENCE
             ):
                 reject_reason = "paved_good_low_confidence"
                 stats.ml_predictions_rejected_paved_good_conf += 1
@@ -365,9 +353,7 @@ def apply_surface_resolution(
                 surf_eff.append(inf)
                 surf_src.append("heuristic")
                 res_reason.append(
-                    f"heuristic_after_ml_reject:{reject_reason}"
-                    if reject_reason
-                    else "heuristic"
+                    f"heuristic_after_ml_reject:{reject_reason}" if reject_reason else "heuristic"
                 )
                 stats.surface_source_heuristic_count += 1
                 continue

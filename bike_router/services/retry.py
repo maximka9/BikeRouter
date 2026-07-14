@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import random
 import time
-from typing import Any, Callable, List, Optional, Tuple, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def retry_call(
     label: str = "call",
 ) -> T:
     """Выполнить ``fn`` до ``max_attempts`` раз при временных ошибках."""
-    last: Optional[Exception] = None
+    last: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
             return fn()
@@ -62,11 +63,11 @@ def retry_call(
     raise last
 
 
-def _exception_chain(exc: BaseException) -> List[Any]:
+def _exception_chain(exc: BaseException) -> list[Any]:
     """Цепочка __cause__ / __context__ без зацикливания."""
-    out: List[Any] = []
+    out: list[Any] = []
     seen: set[int] = set()
-    e: Optional[BaseException] = exc
+    e: BaseException | None = exc
     while e is not None and id(e) not in seen:
         seen.add(id(e))
         out.append(e)

@@ -10,10 +10,11 @@ from __future__ import annotations
 import logging
 import math
 import threading
+from collections.abc import Sequence
 from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 import networkx as nx
 import osmnx as ox
@@ -35,6 +36,11 @@ from .exceptions import (
     RouteNotFoundError,
     RouteTooLongError,
 )
+from .metrics import (
+    inc_corridor_disk_hit,
+    inc_route_disk_hit,
+    inc_route_disk_miss,
+)
 from .models import (
     AlternativesResponse,
     CombinedCostBreakdown,
@@ -51,7 +57,6 @@ from .models import (
     WeatherRouteContext,
     WeatherSnapshotValues,
 )
-from .services.heat import heat_context_multiplier
 from .services.area_graph_cache import (
     graph_base_path,
     load_graphml_path,
@@ -68,19 +73,15 @@ from .services.corridor_graph_cache import (
     corridor_bbox_cache_key,
     quantize_corridor_bbox_expanding,
 )
+from .services.heat import heat_context_multiplier
 from .services.route_cache import RouteAlternativesDiskCache
-from .metrics import (
-    inc_corridor_disk_hit,
-    inc_route_disk_hit,
-    inc_route_disk_miss,
-)
-from .services.routing_criteria import CRITERION_KEYS
 from .services.routing import (
     RouteResult,
     RouteService,
     _first_value,
     sanitize_multidigraph_routing_weights,
 )
+from .services.routing_criteria import CRITERION_KEYS
 from .services.weather import (
     WeatherSnapshot,
     WeatherWeightParams,
@@ -123,7 +124,7 @@ _WEATHER_PHYSICAL_ROUTING_PREF = RoutingPreferenceProfile(
 )
 
 
-def _engine_weather_mode(request_mode: Optional[str], use_live_weather: bool) -> str:
+def _engine_weather_mode(request_mode: str | None, use_live_weather: bool) -> str:
     if use_live_weather:
         return "auto"
     m = (request_mode or "none").strip().lower()
@@ -154,7 +155,7 @@ def _weather_summary_ru(snap: WeatherSnapshot, wp: WeatherWeightParams) -> str:
     if not wp.enabled:
         return "Погода не учитывалась при выборе путей."
     m = wp.mults
-    lines: List[str] = []
+    lines: list[str] = []
     if m.physical > 1.02:
         lines.append(f"рельеф и покрытие дороже на {_pct_deviation(m.physical)}%")
     elif m.physical < 0.98:
@@ -188,17 +189,17 @@ def _build_weather_route_context(
     *,
     request_mode: str,
     use_live_weather: bool,
-    weather_time: Optional[str],
-    departure_time: Optional[str],
+    weather_time: str | None,
+    departure_time: str | None,
     snap: WeatherSnapshot,
     source: str,
     wp: WeatherWeightParams,
 ) -> WeatherRouteContext:
-    mults: Dict[str, float] = {}
+    mults: dict[str, float] = {}
     if wp.enabled:
         mults = {k: round(float(v), 4) for k, v in asdict(wp.mults).items()}
     wt = weather_time or departure_time
-    hm: Dict[str, float] = {}
+    hm: dict[str, float] = {}
     hc = False
     if wp.enabled and getattr(wp, "heat_continuous", False):
         hc = True
@@ -209,9 +210,7 @@ def _build_weather_route_context(
             "covered_bonus": float(getattr(wp, "covered_bonus", 1.0)),
             "wind_open_penalty": float(getattr(wp, "wind_open_penalty", 1.0)),
             "wet_surface_penalty": float(getattr(wp, "wet_surface_penalty", 1.0)),
-            "heat_extreme_route_mult": float(
-                getattr(wp, "heat_extreme_route_mult", 1.0)
-            ),
+            "heat_extreme_route_mult": float(getattr(wp, "heat_extreme_route_mult", 1.0)),
         }
         ns = getattr(wp, "normalized_signals", None) or {}
         for k, v in ns.items():
@@ -223,9 +222,7 @@ def _build_weather_route_context(
         Ta_o = getattr(snap, "apparent_temperature_c", None)
         teff = float(Ta_o) if Ta_o is not None else T_air
         hm["effective_heat_temperature_c"] = teff
-        hm["apparent_minus_air_c"] = (
-            float(Ta_o) - T_air if Ta_o is not None else 0.0
-        )
+        hm["apparent_minus_air_c"] = float(Ta_o) - T_air if Ta_o is not None else 0.0
         hm["norm_apparent_heat"] = float(ns.get("apparent_heat_norm", 0.0))
         hm["norm_apparent_cold"] = float(ns.get("apparent_cold_norm", 0.0))
         hm["norm_apparent_minus_air"] = float(ns.get("apparent_minus_air_norm", 0.0))
@@ -241,50 +238,42 @@ def _build_weather_route_context(
         heat_continuous=hc,
         heat_microclimate=hm,
         routing_season=str(getattr(wp, "routing_season", "") or ""),
-        routing_season_calendar=str(
-            getattr(wp, "routing_season_calendar", "") or ""
-        ),
+        routing_season_calendar=str(getattr(wp, "routing_season_calendar", "") or ""),
         routing_season_source=str(getattr(wp, "routing_season_source", "") or ""),
         season_green_route_mult=float(getattr(wp, "season_green_route_mult", 1.0)),
-        season_tree_heat_route_mult=float(
-            getattr(wp, "season_tree_heat_route_mult", 1.0)
-        ),
+        season_tree_heat_route_mult=float(getattr(wp, "season_tree_heat_route_mult", 1.0)),
         season_stress_route_mult=float(getattr(wp, "season_stress_route_mult", 1.0)),
         season_stairs_route_mult=float(getattr(wp, "season_stairs_route_mult", 1.0)),
         season_wind_orientation_route_mult=float(
             getattr(wp, "season_wind_orientation_route_mult", 1.0)
         ),
-        stress_route_regime_factor=float(
-            getattr(wp, "stress_route_regime_factor", 1.0)
-        ),
+        stress_route_regime_factor=float(getattr(wp, "stress_route_regime_factor", 1.0)),
         snow_model_strength=float(getattr(wp, "snow_model_strength", 0.0)),
         snow_export_phys_amp=float(getattr(wp, "snow_export_phys_amp", 1.0)),
         snow_export_stress_amp=float(getattr(wp, "snow_export_stress_amp", 1.0)),
         snow_export_surface_amp=float(getattr(wp, "snow_export_surface_amp", 1.0)),
-        wind_direction_available=bool(
-            getattr(wp, "wind_direction_available", False)
-        ),
+        wind_direction_available=bool(getattr(wp, "wind_direction_available", False)),
     )
 
 
 def _iso_utc_z(dt: datetime) -> str:
     """UTC ISO-8601 с суффиксом Z (без смещения)."""
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _log_route_weather_line(
     *,
     built_at_utc: datetime,
-    start: Tuple[float, float],
-    end: Tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
     snap: WeatherSnapshot,
     source: str,
     wp: WeatherWeightParams,
-    weather_time_effective: Optional[str],
+    weather_time_effective: str | None,
 ) -> None:
     """Один компактный блок в лог на запрос альтернатив (см. ТЗ route_weather)."""
     lat = (float(start[0]) + float(end[0])) * 0.5
@@ -324,32 +313,32 @@ def _log_route_weather_line(
 
 
 def _resolve_route_weather(
-    start: Tuple[float, float],
-    end: Tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
     *,
     request_mode: str,
     use_live_weather: bool,
-    weather_time: Optional[str],
-    departure_time: Optional[str],
-    temperature_c: Optional[float],
-    precipitation_mm: Optional[float],
-    wind_speed_ms: Optional[float],
-    cloud_cover_pct: Optional[float] = None,
-    humidity_pct: Optional[float] = None,
-    wind_gusts_ms: Optional[float] = None,
-    wind_direction_deg: Optional[float] = None,
-    apparent_temperature_c: Optional[float] = None,
-    shortwave_radiation_wm2: Optional[float] = None,
-    snowfall_cm_h: Optional[float] = None,
-    snow_depth_m: Optional[float] = None,
-    weather_code: Optional[int] = None,
-    thermal_scales: Optional[Dict[str, float]] = None,
+    weather_time: str | None,
+    departure_time: str | None,
+    temperature_c: float | None,
+    precipitation_mm: float | None,
+    wind_speed_ms: float | None,
+    cloud_cover_pct: float | None = None,
+    humidity_pct: float | None = None,
+    wind_gusts_ms: float | None = None,
+    wind_direction_deg: float | None = None,
+    apparent_temperature_c: float | None = None,
+    shortwave_radiation_wm2: float | None = None,
+    snowfall_cm_h: float | None = None,
+    snow_depth_m: float | None = None,
+    weather_code: int | None = None,
+    thermal_scales: dict[str, float] | None = None,
     settings: Any = None,
-) -> Tuple[WeatherSnapshot, str, WeatherWeightParams]:
+) -> tuple[WeatherSnapshot, str, WeatherWeightParams]:
     lat = (float(start[0]) + float(end[0])) * 0.5
     lon = (float(start[1]) + float(end[1])) * 0.5
     wm = _engine_weather_mode(request_mode, use_live_weather)
-    manual: Optional[WeatherSnapshot] = None
+    manual: WeatherSnapshot | None = None
     if wm in ("manual", "fixed-snapshot"):
         manual = snapshot_from_manual(
             temperature_c=temperature_c,
@@ -387,8 +376,8 @@ def _fmt_time(seconds: float) -> str:
 
 
 def _resolve_time_slot_key(
-    departure_time: Optional[str],
-    time_slot_override: Optional[str],
+    departure_time: str | None,
+    time_slot_override: str | None,
 ) -> str:
     """Слот тепловой модели: явный time_slot или час из departure_time (ISO), иначе полдень."""
     valid = {s.key for s in TIME_SLOTS}
@@ -416,9 +405,9 @@ def _infer_season_from_month(month_1_12: int) -> str:
 
 def _resolve_season_for_heat_alternatives(
     *,
-    season_override: Optional[str],
-    weather_time_iso: Optional[str],
-    departure_time_iso: Optional[str],
+    season_override: str | None,
+    weather_time_iso: str | None,
+    departure_time_iso: str | None,
     now_utc: datetime,
 ) -> str:
     """Сезон для heat_context_multiplier и критериев: явный override, иначе месяц из дат погоды/выезда, иначе now_utc."""
@@ -433,7 +422,7 @@ def _resolve_season_for_heat_alternatives(
             iso = str(raw).strip().replace("Z", "+00:00")
             dt = datetime.fromisoformat(iso)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return _infer_season_from_month(int(dt.month))
         except (ValueError, TypeError):
             continue
@@ -489,9 +478,7 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlon = math.radians(lon2 - lon1)
     a = (
         math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlon / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
     )
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
@@ -509,11 +496,11 @@ class RouteEngine:
     только проверки и атомарная установка ``_graph`` (см. ``_ensure_graph_for_corridor``).
     """
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._app = Application(settings)
-        self._graph: Optional[nx.MultiDiGraph] = None
+        self._graph: nx.MultiDiGraph | None = None
         self._loaded = False
-        self._bounds: Optional[Tuple[float, float, float, float]] = None
+        self._bounds: tuple[float, float, float, float] | None = None
         s = self._app.settings
         self._route_disk_cache = RouteAlternativesDiskCache(
             Path(s.cache_dir) / "route_alternatives_cache",
@@ -523,16 +510,16 @@ class RouteEngine:
             Path(s.cache_dir) / "corridor_graphs",
             enabled=s.corridor_graph_disk_cache,
         )
-        self._graph_built_at_utc: Optional[str] = None
+        self._graph_built_at_utc: str | None = None
         # Короткие критические секции: снимок/замена графа; тяжёлый OSM/спутник — вне lock.
         self._graph_lock = threading.Lock()
         # Дедупликация одновременной сборки одного и того же ключа коридора (GraphML/OSM).
-        self._corridor_gate_locks: Dict[str, threading.Lock] = {}
+        self._corridor_gate_locks: dict[str, threading.Lock] = {}
         self._corridor_gate_guard = threading.Lock()
         # (min_lat, max_lat, min_lon, max_lon) последнего коридора create_bbox(start,end,buffer)
-        self._corridor_wgs84: Optional[Tuple[float, float, float, float]] = None
+        self._corridor_wgs84: tuple[float, float, float, float] | None = None
         # True — последний граф без спутниковой зелени (заглушки)
-        self._graph_built_skip_satellite: Optional[bool] = None
+        self._graph_built_skip_satellite: bool | None = None
 
     # ── Свойства ─────────────────────────────────────────────────
 
@@ -541,7 +528,7 @@ class RouteEngine:
         return self._loaded
 
     @property
-    def graph(self) -> Optional[nx.MultiDiGraph]:
+    def graph(self) -> nx.MultiDiGraph | None:
         return self._graph
 
     @property
@@ -549,12 +536,12 @@ class RouteEngine:
         return self._app.settings
 
     @property
-    def bounds(self) -> Optional[Tuple[float, float, float, float]]:
+    def bounds(self) -> tuple[float, float, float, float] | None:
         """(min_lat, max_lat, min_lon, max_lon) покрытия графа."""
         return self._bounds
 
     @property
-    def graph_built_at_utc(self) -> Optional[str]:
+    def graph_built_at_utc(self) -> str | None:
         """ISO UTC времени последней успешной сборки графа."""
         return self._graph_built_at_utc
 
@@ -565,21 +552,17 @@ class RouteEngine:
 
     # ── Валидация ────────────────────────────────────────────────
 
-    def _validate_point(
-        self, coords: Tuple[float, float], label: str
-    ) -> None:
+    def _validate_point(self, coords: tuple[float, float], label: str) -> None:
         """Проверить, что точка в зоне покрытия и рядом с дорогой."""
         if self._bounds is None or self._graph is None:
             return
-        self._validate_point_on_graph(
-            self._graph, self._bounds, coords, label
-        )
+        self._validate_point_on_graph(self._graph, self._bounds, coords, label)
 
     def _validate_point_on_graph(
         self,
         G: nx.MultiDiGraph,
-        bounds: Tuple[float, float, float, float],
-        coords: Tuple[float, float],
+        bounds: tuple[float, float, float, float],
+        coords: tuple[float, float],
         label: str,
     ) -> None:
         """Та же проверка по уже зафиксированному графу (можно вызывать вне долгого lock)."""
@@ -619,15 +602,13 @@ class RouteEngine:
             G.number_of_edges(),
             *self._bounds,
         )
-        self._graph_built_at_utc = datetime.now(timezone.utc).isoformat()
+        self._graph_built_at_utc = datetime.now(UTC).isoformat()
         fp = routing_engine_cache_fingerprint()
-        self._route_disk_cache.set_cache_context(
-            G.number_of_nodes(), G.number_of_edges(), fp
-        )
+        self._route_disk_cache.set_cache_context(G.number_of_nodes(), G.number_of_edges(), fp)
 
     def _build_graph_bundle_from_bbox(
         self, bbox: Any, *, skip_satellite_green: bool = False
-    ) -> Tuple[nx.MultiDiGraph, bool]:
+    ) -> tuple[nx.MultiDiGraph, bool]:
         """Собрать граф по bbox без установки в движок (для смены под коротким lock)."""
         G = self._app.graph_builder.load(bbox)
         edges = self._app.graph_builder.to_geodataframe(G)
@@ -644,29 +625,23 @@ class RouteEngine:
         self, bbox: Any, *, skip_satellite_green: bool = False
     ) -> None:
         """Загрузить OSM, веса (спутник опционально), применить к графу (фиксированная зона / warmup)."""
-        G, sk = self._build_graph_bundle_from_bbox(
-            bbox, skip_satellite_green=skip_satellite_green
-        )
+        G, sk = self._build_graph_bundle_from_bbox(bbox, skip_satellite_green=skip_satellite_green)
         self._set_active_graph(G)
         self._graph_built_skip_satellite = sk
 
     def _graph_satisfies_corridor_request(
         self,
-        required_wgs84: Tuple[float, float, float, float],
+        required_wgs84: tuple[float, float, float, float],
         need_satellite: bool,
     ) -> bool:
         """Проверка под активным lock: коридор покрывает запрос и фаза спутника достаточна."""
         if not self._loaded or self._graph is None or self._corridor_wgs84 is None:
             return False
-        if not self._wgs84_corridor_contains(
-            self._corridor_wgs84, required_wgs84
-        ):
+        if not self._wgs84_corridor_contains(self._corridor_wgs84, required_wgs84):
             return False
         if not need_satellite:
             return True
-        ph = self._graph.graph.get(
-            "bike_router_satellite_phase", _SAT_PHASE_STUB
-        )
+        ph = self._graph.graph.get("bike_router_satellite_phase", _SAT_PHASE_STUB)
         return ph == _SAT_PHASE_FULL
 
     def _upgrade_satellite_on_graph_copy(self, G: nx.MultiDiGraph) -> nx.MultiDiGraph:
@@ -680,8 +655,8 @@ class RouteEngine:
 
     @staticmethod
     def _wgs84_corridor_contains(
-        outer: Tuple[float, float, float, float],
-        inner: Tuple[float, float, float, float],
+        outer: tuple[float, float, float, float],
+        inner: tuple[float, float, float, float],
         *,
         eps_deg: float = 1e-6,
     ) -> bool:
@@ -701,18 +676,16 @@ class RouteEngine:
 
     def _quantized_corridor_bbox_for_request(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
-        eff_buf_m: Optional[float],
-    ) -> Tuple[Any, Tuple[float, float, float, float], Tuple[float, float, float, float]]:
+        start: tuple[float, float],
+        end: tuple[float, float],
+        eff_buf_m: float | None,
+    ) -> tuple[Any, tuple[float, float, float, float], tuple[float, float, float, float]]:
         """BBox для OSM/кэша; сырые bounds ключа; (min_lat, max_lat, min_lon, max_lon)."""
         s = self._app.settings
-        bbox_kw: Dict[str, float] = {}
+        bbox_kw: dict[str, float] = {}
         if eff_buf_m is not None:
             bbox_kw["buffer_meters"] = float(eff_buf_m)
-        raw_bbox = self._app.graph_builder.create_bbox_for_corridor(
-            start, end, **bbox_kw
-        )
+        raw_bbox = self._app.graph_builder.create_bbox_for_corridor(start, end, **bbox_kw)
         rmin_lon, rmin_lat, rmax_lon, rmax_lat = raw_bbox.bounds
         q = quantize_corridor_bbox_expanding(
             rmin_lon, rmin_lat, rmax_lon, rmax_lat, s.corridor_cache_grid_step_deg
@@ -735,7 +708,7 @@ class RouteEngine:
 
     def _try_activate_area_precache(
         self,
-        required_wgs84: Tuple[float, float, float, float],
+        required_wgs84: tuple[float, float, float, float],
         need_satellite: bool,
     ) -> bool:
         """Подставить граф с диска ``area_precache`` без Overpass, если коридор ⊂ арена."""
@@ -759,9 +732,7 @@ class RouteEngine:
             )
             return False
         if not precache_area_is_complete(s):
-            logger.info(
-                "area_precache: кэш полигона не готов семантически (meta) — live коридор"
-            )
+            logger.info("area_precache: кэш полигона не готов семантически (meta) — live коридор")
             return False
         if not precache_corridor_fits_arena(s, required_wgs84):
             logger.info(
@@ -786,9 +757,7 @@ class RouteEngine:
         ph = G.graph.get("bike_router_satellite_phase", _SAT_PHASE_STUB)
         skip_res = ph == _SAT_PHASE_STUB
         with self._graph_lock:
-            if self._graph_satisfies_corridor_request(
-                required_wgs84, need_satellite
-            ):
+            if self._graph_satisfies_corridor_request(required_wgs84, need_satellite):
                 return True
             self._corridor_wgs84 = (
                 float(aw[0]),
@@ -882,11 +851,11 @@ class RouteEngine:
 
     def _ensure_graph_for_corridor(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         *,
         skip_satellite_green: bool = False,
-        corridor_buffer_meters: Optional[float] = None,
+        corridor_buffer_meters: float | None = None,
     ) -> None:
         """Подгрузить/пересобрать граф по прямоугольнику start–end ± BUFFER.
 
@@ -897,7 +866,7 @@ class RouteEngine:
         if not s.use_dynamic_corridor_graph:
             return
 
-        eff_buf_m: Optional[float] = None
+        eff_buf_m: float | None = None
         if corridor_buffer_meters is not None:
             eff_buf_m = float(corridor_buffer_meters)
 
@@ -919,9 +888,7 @@ class RouteEngine:
         )
 
         with self._graph_lock:
-            if self._graph_satisfies_corridor_request(
-                required_wgs84, need_satellite
-            ):
+            if self._graph_satisfies_corridor_request(required_wgs84, need_satellite):
                 return
 
         if self._try_activate_area_precache(required_wgs84, need_satellite):
@@ -930,14 +897,12 @@ class RouteEngine:
         gate = self._corridor_gate(key_hash)
         with gate:
             with self._graph_lock:
-                if self._graph_satisfies_corridor_request(
-                    required_wgs84, need_satellite
-                ):
+                if self._graph_satisfies_corridor_request(required_wgs84, need_satellite):
                     return
 
             covers = False
             phase = _SAT_PHASE_STUB
-            g0: Optional[nx.MultiDiGraph] = None
+            g0: nx.MultiDiGraph | None = None
             with self._graph_lock:
                 g0 = self._graph
                 cw = self._corridor_wgs84
@@ -949,33 +914,23 @@ class RouteEngine:
                     and self._wgs84_corridor_contains(cw, required_wgs84)
                 )
                 if g0 is not None:
-                    phase = g0.graph.get(
-                        "bike_router_satellite_phase", _SAT_PHASE_STUB
-                    )
+                    phase = g0.graph.get("bike_router_satellite_phase", _SAT_PHASE_STUB)
 
-            G_result: Optional[nx.MultiDiGraph] = None
-            skip_res: Optional[bool] = None
+            G_result: nx.MultiDiGraph | None = None
+            skip_res: bool | None = None
 
             if covers and g0 is not None and need_satellite and phase == _SAT_PHASE_STUB:
-                logger.info(
-                    "Коридор: доначитка спутниковой зелени без повторной загрузки OSM…"
-                )
+                logger.info("Коридор: доначитка спутниковой зелени без повторной загрузки OSM…")
                 self._app.elevation.init(test_lat=start[0], test_lon=start[1])
                 G_result = self._upgrade_satellite_on_graph_copy(g0)
                 skip_res = False
             elif covers:
                 with self._graph_lock:
-                    if self._graph_satisfies_corridor_request(
-                        required_wgs84, need_satellite
-                    ):
+                    if self._graph_satisfies_corridor_request(required_wgs84, need_satellite):
                         return
                 return
             else:
-                log_buf = (
-                    eff_buf_m
-                    if eff_buf_m is not None
-                    else float(s.corridor_buffer_meters)
-                )
+                log_buf = eff_buf_m if eff_buf_m is not None else float(s.corridor_buffer_meters)
                 if s.corridor_buffer_meters > 0 or eff_buf_m is not None:
                     logger.info(
                         "Коридор маршрута (±%.0f м): lat [%.5f..%.5f] lon [%.5f..%.5f]",
@@ -1003,16 +958,12 @@ class RouteEngine:
                         "Коридор: граф из дискового кэша (%s…)",
                         key_hash[:16],
                     )
-                    ph = G_cached.graph.get(
-                        "bike_router_satellite_phase", _SAT_PHASE_STUB
-                    )
+                    ph = G_cached.graph.get("bike_router_satellite_phase", _SAT_PHASE_STUB)
                     if not need_satellite or ph == _SAT_PHASE_FULL:
                         G_result = G_cached
                         skip_res = ph == _SAT_PHASE_STUB
                     else:
-                        logger.info(
-                            "Коридор: в кэше phase1 — доначитка зелени без повторной OSM…"
-                        )
+                        logger.info("Коридор: в кэше phase1 — доначитка зелени без повторной OSM…")
                         G_result = self._upgrade_satellite_on_graph_copy(G_cached)
                         skip_res = False
 
@@ -1022,14 +973,10 @@ class RouteEngine:
                     )
 
             if G_result is None or skip_res is None:
-                raise BikeRouterError(
-                    "Внутренняя ошибка: не удалось подготовить граф коридора."
-                )
+                raise BikeRouterError("Внутренняя ошибка: не удалось подготовить граф коридора.")
 
             with self._graph_lock:
-                if self._graph_satisfies_corridor_request(
-                    required_wgs84, need_satellite
-                ):
+                if self._graph_satisfies_corridor_request(required_wgs84, need_satellite):
                     return
                 if not covers:
                     self._corridor_wgs84 = required_wgs84
@@ -1090,8 +1037,7 @@ class RouteEngine:
                 geom = unary_union(geom)
             if geom.geom_type != "Polygon":
                 raise ValueError(
-                    f"AREA_POLYGON_WKT: нужен Polygon или MultiPolygon, "
-                    f"получено {geom.geom_type}"
+                    f"AREA_POLYGON_WKT: нужен Polygon или MultiPolygon, получено {geom.geom_type}"
                 )
             if not geom.is_valid:
                 geom = geom.buffer(0)
@@ -1099,7 +1045,10 @@ class RouteEngine:
             b = geom.bounds
             logger.info(
                 "Область: полигон WKT, bounds [%.4f..%.4f, %.4f..%.4f]",
-                b[1], b[3], b[0], b[2],
+                b[1],
+                b[3],
+                b[0],
+                b[2],
             )
             if s.has_area_bbox:
                 logger.warning(
@@ -1108,17 +1057,16 @@ class RouteEngine:
         elif s.has_area_bbox:
             from shapely.geometry import box
 
-            bbox = box(s.area_min_lon, s.area_min_lat,
-                       s.area_max_lon, s.area_max_lat)
+            bbox = box(s.area_min_lon, s.area_min_lat, s.area_max_lon, s.area_max_lat)
             logger.info(
                 "Область покрытия AREA_*: [%.4f..%.4f, %.4f..%.4f]",
-                s.area_min_lat, s.area_max_lat,
-                s.area_min_lon, s.area_max_lon,
+                s.area_min_lat,
+                s.area_max_lat,
+                s.area_min_lon,
+                s.area_max_lon,
             )
         else:
-            bbox = self._app.graph_builder.create_bbox(
-                s.start_coords, s.end_coords, s.buffer
-            )
+            bbox = self._app.graph_builder.create_bbox(s.start_coords, s.end_coords, s.buffer)
 
         self._build_graph_from_bbox_shape(bbox)
         logger.info("Warmup завершён.")
@@ -1128,8 +1076,8 @@ class RouteEngine:
     @staticmethod
     def _route_quality_hints(
         route_length_m: float,
-        stairs: Dict[str, Any],
-        fb: Dict[str, float],
+        stairs: dict[str, Any],
+        fb: dict[str, float],
     ) -> RouteQualityHints:
         """Доли по сумме длин рёбер (совпадает с подписью «длина маршрута» в UI)."""
         denom = route_length_m if route_length_m > 0 else 0.0
@@ -1142,7 +1090,7 @@ class RouteEngine:
         na_frac = max(0.0, min(1.0, na_frac))
         inf_surf = max(0.0, min(1.0, inf_surf))
         inf_hw = max(0.0, min(1.0, inf_hw))
-        warnings: List[str] = []
+        warnings: list[str] = []
         if na_frac >= 0.22:
             warnings.append(
                 "Значительная часть длины маршрута без тега surface в OSM — оценка "
@@ -1174,19 +1122,19 @@ class RouteEngine:
 
     def _build_route_response(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         mode: str,
         route: RouteResult,
         cost_weight_key: str,
         variant_label: str = "",
         *,
-        graph: Optional[nx.MultiDiGraph] = None,
-        cost_override: Optional[float] = None,
-        heat_stress_metrics: Optional[HeatStressMetrics] = None,
-        routing_context: Optional[RoutingContextMeta] = None,
-        weather: Optional[WeatherRouteContext] = None,
+        graph: nx.MultiDiGraph | None = None,
+        cost_override: float | None = None,
+        heat_stress_metrics: HeatStressMetrics | None = None,
+        routing_context: RoutingContextMeta | None = None,
+        weather: WeatherRouteContext | None = None,
     ) -> RouteResponse:
         """Собрать :class:`RouteResponse` из уже найденного :class:`RouteResult`."""
         profile = _PROFILE_MAP[profile_key]
@@ -1224,11 +1172,7 @@ class RouteEngine:
 
         fb = router.route_weight_fallback_metrics(G, route, profile)
         total_m = float(fb.get("total_length_m") or 0.0)
-        na_len_frac = (
-            float(fb.get("na_surface_length_m") or 0.0) / total_m
-            if total_m > 0
-            else 0.0
-        )
+        na_len_frac = float(fb.get("na_surface_length_m") or 0.0) / total_m if total_m > 0 else 0.0
 
         quality_hints = self._route_quality_hints(length, stairs, fb)
         if mode == "green":
@@ -1241,9 +1185,7 @@ class RouteEngine:
                     inferred_highway_fraction=quality_hints.inferred_highway_fraction,
                 )
 
-        label = variant_label or _VARIANT_LABEL_DEFAULT.get(
-            mode, mode
-        )
+        label = variant_label or _VARIANT_LABEL_DEFAULT.get(mode, mode)
 
         layers_dict = router.build_route_map_layers(G, route)
         map_layers = MapLayersGeoJSON(
@@ -1256,9 +1198,7 @@ class RouteEngine:
         hm = heat_stress_metrics
         rc = routing_context
         gb_stats = self._app.graph_builder.last_surface_resolution_stats
-        surface_res_summary = (
-            gb_stats.to_api_summary() if gb_stats is not None else None
-        )
+        surface_res_summary = gb_stats.to_api_summary() if gb_stats is not None else None
         return RouteResponse(
             profile=profile.key,
             mode=mode,
@@ -1270,38 +1210,28 @@ class RouteEngine:
             cost=round(cost, 1),
             routing_context=rc,
             weather=weather,
-            route_built_at_utc=datetime.now(timezone.utc).isoformat(),
+            route_built_at_utc=datetime.now(UTC).isoformat(),
             heat_cost_total=float(hm.total_heat_cost) if hm else 0.0,
             stress_cost_total=float(hm.stress_cost_total) if hm else 0.0,
             exposed_length_m=float(hm.exposed_high_length_m) if hm else 0.0,
             building_shade_share=float(hm.building_shade_share) if hm else 0.0,
             route_open_sky_share=float(hm.route_open_sky_share) if hm else 0.0,
-            route_building_shade_share=float(hm.route_building_shade_share)
-            if hm
-            else 0.0,
+            route_building_shade_share=float(hm.route_building_shade_share) if hm else 0.0,
             route_covered_share=float(hm.route_covered_share) if hm else 0.0,
-            route_bad_wet_surface_share=float(hm.route_bad_wet_surface_share)
-            if hm
-            else 0.0,
+            route_bad_wet_surface_share=float(hm.route_bad_wet_surface_share) if hm else 0.0,
             route_winter_harsh_surface_share=float(hm.route_winter_harsh_surface_share)
             if hm
             else 0.0,
             route_mean_street_width_proxy_m=float(hm.route_mean_street_width_proxy_m)
             if hm
             else 0.0,
-            route_mean_urban_canyon_score=float(hm.route_mean_urban_canyon_score)
-            if hm
-            else 0.0,
+            route_mean_urban_canyon_score=float(hm.route_mean_urban_canyon_score) if hm else 0.0,
             route_mean_solar_shade_potential=float(hm.route_mean_solar_shade_potential)
             if hm
             else 0.0,
             vegetation_shade_share=float(hm.vegetation_shade_share) if hm else 0.0,
-            stressful_intersections_count=int(hm.stressful_intersections_count)
-            if hm
-            else 0,
-            high_stress_segments_count=int(hm.high_stress_segments_count)
-            if hm
-            else 0,
+            stressful_intersections_count=int(hm.stressful_intersections_count) if hm else 0,
+            high_stress_segments_count=int(hm.high_stress_segments_count) if hm else 0,
             turn_count_analytics=int(hm.turn_count) if hm else 0,
             elevation=ElevationMetrics(
                 climb_m=round(es["climb"], 1),
@@ -1316,9 +1246,7 @@ class RouteEngine:
                 percent=round(gs["percent"], 1),
                 avg_trees_pct=round(gs["avg_trees"], 1),
                 avg_grass_pct=round(gs["avg_grass"], 1),
-                categories={
-                    str(k): int(v) for k, v in gs["categories"].items()
-                },
+                categories={str(k): int(v) for k, v in gs["categories"].items()},
             ),
             stairs=StairsInfo(
                 count=stairs["count"],
@@ -1338,26 +1266,24 @@ class RouteEngine:
 
     def _next_length_alternative(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         exclude: set,
-        graph: Optional[nx.MultiDiGraph] = None,
-    ) -> Optional[RouteResult]:
+        graph: nx.MultiDiGraph | None = None,
+    ) -> RouteResult | None:
         """Следующий простой путь по ``length``, не из ``exclude``."""
         G = graph if graph is not None else self._graph
         if G is None:
             return None
-        return RouteService.find_next_simple_path_by_length(
-            G, start, end, exclude
-        )
+        return RouteService.find_next_simple_path_by_length(G, start, end, exclude)
 
-    def build_stress_overlay_geojson(self) -> Dict[str, Any]:
+    def build_stress_overlay_geojson(self) -> dict[str, Any]:
         """GeoJSON FeatureCollection: рёбра текущего графа со стресс-полями (отладочная маска)."""
         with self._graph_lock:
             if not self._loaded or self._graph is None:
                 raise BikeRouterError("Граф не загружен. Вызовите warmup().")
             G = self._graph
-        feats: List[dict] = []
+        feats: list[dict] = []
         for u, v, key, d in G.edges(data=True, keys=True):
             coords = RouteService._edge_linestring_coords(G, u, v, key)
             if len(coords) < 2:
@@ -1385,8 +1311,8 @@ class RouteEngine:
 
     def compute_route(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         mode: str,
     ) -> RouteResponse:
@@ -1409,13 +1335,10 @@ class RouteEngine:
         profile = _PROFILE_MAP.get(profile_key)
         if profile is None:
             raise ValueError(
-                f"Неизвестный профиль: {profile_key!r}. "
-                f"Допустимые: {list(_PROFILE_MAP)}"
+                f"Неизвестный профиль: {profile_key!r}. Допустимые: {list(_PROFILE_MAP)}"
             )
         if mode not in ("full", "green", "shortest"):
-            raise ValueError(
-                f"Неизвестный режим: {mode!r}. Допустимые: full, green, shortest"
-            )
+            raise ValueError(f"Неизвестный режим: {mode!r}. Допустимые: full, green, shortest")
 
         self._ensure_graph_for_corridor(start, end)
         with self._graph_lock:
@@ -1449,10 +1372,10 @@ class RouteEngine:
 
     @staticmethod
     def _reorder_routes_shortest_full_green(
-        routes: List[RouteResponse],
-    ) -> List[RouteResponse]:
+        routes: list[RouteResponse],
+    ) -> list[RouteResponse]:
         by = {r.mode: r for r in routes}
-        out: List[RouteResponse] = []
+        out: list[RouteResponse] = []
         if "shortest" in by:
             out.append(by["shortest"])
         if "full" in by:
@@ -1463,21 +1386,21 @@ class RouteEngine:
 
     def _collect_alternative_routes(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         *,
         include_green_route: bool,
-        graph: Optional[nx.MultiDiGraph] = None,
-        weather: Optional[WeatherWeightParams] = None,
+        graph: nx.MultiDiGraph | None = None,
+        weather: WeatherWeightParams | None = None,
         time_slot_key: str = "noon",
         heat_context_mult: float = 1.0,
-        weather_ctx: Optional[WeatherRouteContext] = None,
+        weather_ctx: WeatherRouteContext | None = None,
         enrich_heat_stress_metrics: bool = False,
         routing_profile_key: str = "balanced",
         season: str = "summer",
-        air_temperature_c: Optional[float] = None,
-    ) -> List[RouteResponse]:
+        air_temperature_c: float | None = None,
+    ) -> list[RouteResponse]:
         """Собрать варианты; порядок в ответе — кратчайший, полный, зелёный (если есть)."""
         profile = _PROFILE_MAP[profile_key]
         G = graph if graph is not None else self._graph
@@ -1522,9 +1445,7 @@ class RouteEngine:
         if rg is not None:
             exclude.add(tuple(rg.edges))
 
-        def _bundle_hm(
-            route_rr: RouteResult, physical_weight_key: str
-        ) -> Optional[HeatStressMetrics]:
+        def _bundle_hm(route_rr: RouteResult, physical_weight_key: str) -> HeatStressMetrics | None:
             if not enrich_heat_stress_metrics:
                 return None
             return self._make_heat_stress_metrics(
@@ -1540,7 +1461,7 @@ class RouteEngine:
                 physical_weight_key=physical_weight_key,
             )
 
-        routes_out: List[RouteResponse] = []
+        routes_out: list[RouteResponse] = []
         if include_green_route and rg is not None:
             seg_full = router.route_segment_costs(
                 G,
@@ -1615,9 +1536,7 @@ class RouteEngine:
                     _VARIANT_LABEL_DEFAULT["full"],
                     graph=G,
                     cost_override=(
-                        round(seg_full["physical"], 1)
-                        if seg_full is not None
-                        else None
+                        round(seg_full["physical"], 1) if seg_full is not None else None
                     ),
                     heat_stress_metrics=_bundle_hm(rf, w_full),
                     weather=weather_ctx,
@@ -1662,22 +1581,22 @@ class RouteEngine:
 
     def _compute_alternatives_once(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         *,
         include_green_route: bool,
         skip_satellite_green: bool,
-        corridor_buffer_meters: Optional[float],
-        weather: Optional[WeatherWeightParams] = None,
+        corridor_buffer_meters: float | None,
+        weather: WeatherWeightParams | None = None,
         time_slot_key: str = "noon",
         heat_context_mult: float = 1.0,
-        weather_ctx: Optional[WeatherRouteContext] = None,
+        weather_ctx: WeatherRouteContext | None = None,
         enrich_heat_stress_metrics: bool = False,
         routing_profile_key: str = "balanced",
         season: str = "summer",
-        air_temperature_c: Optional[float] = None,
-    ) -> List[RouteResponse]:
+        air_temperature_c: float | None = None,
+    ) -> list[RouteResponse]:
         self._ensure_graph_for_corridor(
             start,
             end,
@@ -1710,8 +1629,8 @@ class RouteEngine:
 
     def compute_green_route_addon(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
     ) -> RouteResponse:
         """Третий вариант (green): при необходимости пересобирает граф со спутниковой зеленью."""
@@ -1750,10 +1669,10 @@ class RouteEngine:
         routing_profile_key: str,
         *,
         season: str = "summer",
-        air_temperature_c: Optional[float] = None,
-        heat_mult: Optional[float] = None,
-        weather: Optional[WeatherWeightParams] = None,
-        physical_weight_key: Optional[str] = None,
+        air_temperature_c: float | None = None,
+        heat_mult: float | None = None,
+        weather: WeatherWeightParams | None = None,
+        physical_weight_key: str | None = None,
     ) -> HeatStressMetrics:
         pref = routing_preference_profile(routing_profile_key)
         router = self._app.router
@@ -1761,9 +1680,7 @@ class RouteEngine:
         hm = (
             float(heat_mult)
             if heat_mult is not None and math.isfinite(float(heat_mult))
-            else heat_context_multiplier(
-                season, time_slot_key, air_temperature_c
-            )
+            else heat_context_multiplier(season, time_slot_key, air_temperature_c)
         )
         seg = router.route_segment_costs(
             G,
@@ -1775,9 +1692,7 @@ class RouteEngine:
             physical_weight_key=physical_weight_key,
         )
         expm = router.route_exposure_metrics(G, route, time_slot_key)
-        exp_open = router.route_exposure_metrics(
-            G, route, time_slot_key, exposure_threshold=0.32
-        )
+        exp_open = router.route_exposure_metrics(G, route, time_slot_key, exposure_threshold=0.32)
         st = router.route_stress_levels(G, route)
         sh = router.route_shade_shares(G, route)
         sh_rt = router.route_shelter_length_weighted_averages(G, route)
@@ -1796,11 +1711,9 @@ class RouteEngine:
             physical_weight_key=physical_weight_key,
         )
         turn_part = float(pref.delta * TURN_PENALTY_BASE * max(0, turns))
-        wm_dict: Optional[Dict[str, float]] = None
+        wm_dict: dict[str, float] | None = None
         if weather is not None and weather.enabled:
-            wm_dict = {
-                k: round(float(v), 4) for k, v in asdict(weather.mults).items()
-            }
+            wm_dict = {k: round(float(v), 4) for k, v in asdict(weather.mults).items()}
         beta_eff = router.effective_heat_beta(pref, weather)
         length_m = max(float(seg.get("length_m", 0.0) or 0.0), 1e-9)
         physical_cost = float(pref.alpha * seg.get("physical_base", seg["physical"]))
@@ -1841,9 +1754,7 @@ class RouteEngine:
             heat_cost_raw=round(seg["heat_raw"], 1),
             stress_cost_total=round(seg["stress"], 1),
             exposed_high_length_m=round(expm["exposed_high_length_m"], 1),
-            exposed_open_unfavorable_length_m=round(
-                exp_open["exposed_high_length_m"], 1
-            ),
+            exposed_open_unfavorable_length_m=round(exp_open["exposed_high_length_m"], 1),
             avg_exposure_unit=round(expm["avg_exposure"], 3),
             vegetation_shade_share=round(sh["vegetation_shade_share"], 3),
             building_shade_share=round(sh["building_shade_share"], 3),
@@ -1879,33 +1790,17 @@ class RouteEngine:
             route_frac_wind_cross_building_screen=round(
                 float(wdm.get("route_frac_wind_cross_building_screen", 0.0)), 4
             ),
-            stress_route_regime_factor=round(
-                float(seg.get("stress_route_regime_factor", 0.0)), 4
-            ),
+            stress_route_regime_factor=round(float(seg.get("stress_route_regime_factor", 0.0)), 4),
             route_mean_base_route_factor=crit_means["route_mean_base_route_factor"],
             route_mean_slope_weather_factor=crit_means["route_mean_slope_weather_factor"],
-            route_mean_surface_weather_factor=crit_means[
-                "route_mean_surface_weather_factor"
-            ],
+            route_mean_surface_weather_factor=crit_means["route_mean_surface_weather_factor"],
             route_mean_green_route_factor=crit_means["route_mean_green_route_factor"],
-            route_mean_open_sky_weather_factor=crit_means[
-                "route_mean_open_sky_weather_factor"
-            ],
-            route_mean_building_shelter_factor=crit_means[
-                "route_mean_building_shelter_factor"
-            ],
-            route_mean_covered_shelter_factor=crit_means[
-                "route_mean_covered_shelter_factor"
-            ],
-            route_mean_stress_weather_factor=crit_means[
-                "route_mean_stress_weather_factor"
-            ],
-            route_mean_stairs_weather_factor=crit_means[
-                "route_mean_stairs_weather_factor"
-            ],
-            route_mean_wind_orientation_factor=crit_means[
-                "route_mean_wind_orientation_factor"
-            ],
+            route_mean_open_sky_weather_factor=crit_means["route_mean_open_sky_weather_factor"],
+            route_mean_building_shelter_factor=crit_means["route_mean_building_shelter_factor"],
+            route_mean_covered_shelter_factor=crit_means["route_mean_covered_shelter_factor"],
+            route_mean_stress_weather_factor=crit_means["route_mean_stress_weather_factor"],
+            route_mean_stairs_weather_factor=crit_means["route_mean_stairs_weather_factor"],
+            route_mean_wind_orientation_factor=crit_means["route_mean_wind_orientation_factor"],
             avg_stress_lts=round(st["avg_lts"], 2),
             max_stress_lts=round(st["max_lts"], 2),
             high_stress_length_fraction=round(st["high_stress_fraction"], 3),
@@ -1917,9 +1812,7 @@ class RouteEngine:
         )
 
     @staticmethod
-    def _route_uses_thermal_proxy(
-        G: nx.MultiDiGraph, route: Optional[RouteResult]
-    ) -> bool:
+    def _route_uses_thermal_proxy(G: nx.MultiDiGraph, route: RouteResult | None) -> bool:
         if route is None or route.edge_count <= 0:
             return False
         for i in range(route.edge_count):
@@ -1934,11 +1827,11 @@ class RouteEngine:
         time_slot_key: str,
         season: str,
         routing_profile_key: str,
-        air_temperature_c: Optional[float],
+        air_temperature_c: float | None,
         heat_mult: float,
         criterion: str,
         G: nx.MultiDiGraph,
-        route: Optional[RouteResult],
+        route: RouteResult | None,
     ) -> RoutingContextMeta:
         return RoutingContextMeta(
             time_slot=time_slot_key,
@@ -1953,16 +1846,16 @@ class RouteEngine:
     def _combined_route_with_detour_cap(
         self,
         G: nx.MultiDiGraph,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         time_slot_key: str,
         preference_key: str,
         *,
         max_detour_ratio: float,
         heat_context_mult: float,
-        weather: Optional[WeatherWeightParams],
-    ) -> Tuple[RouteResult, str]:
+        weather: WeatherWeightParams | None,
+    ) -> tuple[RouteResult, str]:
         """Поиск по α·physical+β·heat+γ·stress с ограничением длины относительно full.
 
         Возвращает маршрут и короткую русскую подпись, если пришлось упасть на эталон full.
@@ -1974,7 +1867,7 @@ class RouteEngine:
         lf = router.calculate_length(G, rf)
         beta = float(base.beta)
         gamma = float(base.gamma)
-        r_last: Optional[RouteResult] = None
+        r_last: RouteResult | None = None
         cap = max(0.0, float(max_detour_ratio))
         for _ in range(7):
             pref = replace(base, beta=beta, gamma=gamma)
@@ -2000,8 +1893,8 @@ class RouteEngine:
 
     def _build_criterion_routes(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         G: nx.MultiDiGraph,
         criterion: str,
@@ -2009,17 +1902,15 @@ class RouteEngine:
         time_slot_key: str,
         *,
         season: str = "summer",
-        air_temperature_c: Optional[float] = None,
-        weather: Optional[WeatherWeightParams] = None,
-        weather_ctx: Optional[WeatherRouteContext] = None,
-    ) -> List[RouteResponse]:
+        air_temperature_c: float | None = None,
+        weather: WeatherWeightParams | None = None,
+        weather_ctx: WeatherRouteContext | None = None,
+    ) -> list[RouteResponse]:
         router = self._app.router
         pref = routing_preference_profile(routing_profile_key)
-        routes_out: List[RouteResponse] = []
+        routes_out: list[RouteResponse] = []
         crit = criterion.strip().lower()
-        hm_ctx = heat_context_multiplier(
-            season, time_slot_key, air_temperature_c
-        )
+        hm_ctx = heat_context_multiplier(season, time_slot_key, air_temperature_c)
 
         w_full_key = f"weight_{profile_key}_full"
 
@@ -2212,28 +2103,27 @@ class RouteEngine:
             )
         else:
             raise ValueError(
-                f"Неизвестный критерий: {criterion!r}. "
-                f"Ожидалось heat, stress, heat_stress"
+                f"Неизвестный критерий: {criterion!r}. Ожидалось heat, stress, heat_stress"
             )
 
         return routes_out
 
     def _compute_alternatives_criterion_once(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         *,
         criterion: str,
         routing_profile_key: str,
         time_slot_key: str,
         green_enabled: bool,
-        corridor_buffer_meters: Optional[float],
+        corridor_buffer_meters: float | None,
         season: str = "summer",
-        air_temperature_c: Optional[float] = None,
-        weather: Optional[WeatherWeightParams] = None,
-        weather_ctx: Optional[WeatherRouteContext] = None,
-    ) -> List[RouteResponse]:
+        air_temperature_c: float | None = None,
+        weather: WeatherWeightParams | None = None,
+        weather_ctx: WeatherRouteContext | None = None,
+    ) -> list[RouteResponse]:
         self._ensure_graph_for_corridor(
             start,
             end,
@@ -2263,74 +2153,64 @@ class RouteEngine:
         )
 
     @staticmethod
-    def _order_unified_routes(routes: List[RouteResponse]) -> List[RouteResponse]:
+    def _order_unified_routes(routes: list[RouteResponse]) -> list[RouteResponse]:
         """Один маршрут на mode; порядок — см. _UNIFIED_ROUTE_ORDER."""
-        by_mode: Dict[str, RouteResponse] = {}
+        by_mode: dict[str, RouteResponse] = {}
         for r in routes:
             if r.mode not in by_mode:
                 by_mode[r.mode] = r
         return [by_mode[m] for m in _UNIFIED_ROUTE_ORDER if m in by_mode]
 
-    def _annotate_unified_routes(self, routes: List[RouteResponse]) -> List[RouteResponse]:
+    def _annotate_unified_routes(self, routes: list[RouteResponse]) -> list[RouteResponse]:
         """Пояснение для теплового варианта и короткое сравнение длины с кратчайшим."""
         by_mode = {r.mode: r for r in routes}
         shortest = by_mode.get("shortest")
         base_len = float(shortest.length_m) if shortest else None
-        out: List[RouteResponse] = []
+        out: list[RouteResponse] = []
         for r in routes:
-            note: Optional[str] = None
+            note: str | None = None
             if r.mode == "heat":
                 note = (
                     "Тепловой комфорт на базе энергетического маршрута (рельеф/покрытие), "
                     "с учётом погоды и геометрии среды; не эквивалентен «максимально зелёному»."
                 )
-            effect: Optional[str] = None
+            effect: str | None = None
             if base_len is not None and r.mode != "shortest":
                 delta = float(r.length_m) - base_len
                 if delta >= 30.0:
-                    effect = (
-                        f"Длинее кратчайшего по сети примерно на "
-                        f"{int(round(delta))} м."
-                    )
+                    effect = f"Длинее кратчайшего по сети примерно на {int(round(delta))} м."
                 elif delta <= -30.0:
-                    effect = (
-                        f"Короче кратчайшего по сети примерно на "
-                        f"{int(round(-delta))} м."
-                    )
-            out.append(
-                r.model_copy(
-                    update={"variant_note_ru": note, "effect_summary_ru": effect}
-                )
-            )
+                    effect = f"Короче кратчайшего по сети примерно на {int(round(-delta))} м."
+            out.append(r.model_copy(update={"variant_note_ru": note, "effect_summary_ru": effect}))
         return out
 
     def compute_alternatives(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         *,
         green_enabled: bool = True,
-        departure_time: Optional[str] = None,
-        time_slot_override: Optional[str] = None,
-        air_temperature_c: Optional[float] = None,
+        departure_time: str | None = None,
+        time_slot_override: str | None = None,
+        air_temperature_c: float | None = None,
         weather_mode: str = "none",
         use_live_weather: bool = False,
-        weather_time: Optional[str] = None,
-        temperature_c: Optional[float] = None,
-        precipitation_mm: Optional[float] = None,
-        wind_speed_ms: Optional[float] = None,
-        wind_direction_deg: Optional[float] = None,
-        cloud_cover_pct: Optional[float] = None,
-        humidity_pct: Optional[float] = None,
-        wind_gusts_ms: Optional[float] = None,
-        shortwave_radiation_wm2: Optional[float] = None,
-        apparent_temperature_c: Optional[float] = None,
-        snowfall_cm_h: Optional[float] = None,
-        snow_depth_m: Optional[float] = None,
-        weather_code: Optional[int] = None,
-        season: Optional[str] = None,
-        corridor_expand_schedule_meters: Optional[Sequence[float]] = None,
+        weather_time: str | None = None,
+        temperature_c: float | None = None,
+        precipitation_mm: float | None = None,
+        wind_speed_ms: float | None = None,
+        wind_direction_deg: float | None = None,
+        cloud_cover_pct: float | None = None,
+        humidity_pct: float | None = None,
+        wind_gusts_ms: float | None = None,
+        shortwave_radiation_wm2: float | None = None,
+        apparent_temperature_c: float | None = None,
+        snowfall_cm_h: float | None = None,
+        snow_depth_m: float | None = None,
+        weather_code: int | None = None,
+        season: str | None = None,
+        corridor_expand_schedule_meters: Sequence[float] | None = None,
     ) -> AlternativesResponse:
         """Все доступные варианты сразу: кратчайший, энергия, зелёный, тепло, стресс, тепло+безопасность.
 
@@ -2345,12 +2225,11 @@ class RouteEngine:
         profile = _PROFILE_MAP.get(profile_key)
         if profile is None:
             raise ValueError(
-                f"Неизвестный профиль: {profile_key!r}. "
-                f"Допустимые: {list(_PROFILE_MAP)}"
+                f"Неизвестный профиль: {profile_key!r}. Допустимые: {list(_PROFILE_MAP)}"
             )
 
         rp_internal = "balanced"
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         dep_for_weather = departure_time or now_utc.replace(microsecond=0).isoformat()
 
         _s = self._app.settings
@@ -2389,7 +2268,7 @@ class RouteEngine:
             departure_time_iso=dep_for_weather,
             now_utc=now_utc,
         )
-        air_eff: Optional[float] = air_temperature_c
+        air_eff: float | None = air_temperature_c
         if air_eff is None:
             air_eff = float(w_snap.temperature_c)
 
@@ -2427,7 +2306,7 @@ class RouteEngine:
         s = _s
         skip_sat = not green_enabled
         include_green = green_enabled
-        routes_base: List[RouteResponse]
+        routes_base: list[RouteResponse]
 
         buf_sched = (
             list(corridor_expand_schedule_meters)
@@ -2453,7 +2332,7 @@ class RouteEngine:
             )
         else:
             routes_base = None
-            last_nf: Optional[RouteNotFoundError] = None
+            last_nf: RouteNotFoundError | None = None
             for attempt, eff in enumerate(buf_sched, start=1):
                 try:
                     routes_base = self._compute_alternatives_once(
@@ -2473,8 +2352,7 @@ class RouteEngine:
                         air_temperature_c=air_eff,
                     )
                     logger.info(
-                        "auto_expand_corridor attempt=%d corridor_m=%.0f "
-                        "result=ok routes=%d",
+                        "auto_expand_corridor attempt=%d corridor_m=%.0f result=ok routes=%d",
                         attempt,
                         eff,
                         len(routes_base),
@@ -2483,8 +2361,7 @@ class RouteEngine:
                 except RouteNotFoundError as e:
                     last_nf = e
                     logger.warning(
-                        "auto_expand_corridor attempt=%d corridor_m=%.0f "
-                        "result=no_path code=%s",
+                        "auto_expand_corridor attempt=%d corridor_m=%.0f result=no_path code=%s",
                         attempt,
                         eff,
                         e.code,
@@ -2508,7 +2385,7 @@ class RouteEngine:
                 raise BikeRouterError("Граф не загружен. Вызовите warmup().")
             G = self._graph
 
-        extra_routes: List[RouteResponse] = []
+        extra_routes: list[RouteResponse] = []
         for sub, rp_crit in (
             ("heat", "thermal_physical_base"),
             ("stress", "stress_physical_base"),
@@ -2537,9 +2414,7 @@ class RouteEngine:
                     e,
                 )
             except BikeRouterError as e:
-                logger.warning(
-                    "Alternatives unified: режим %s — ошибка: %s", sub, e
-                )
+                logger.warning("Alternatives unified: режим %s — ошибка: %s", sub, e)
 
         merged = self._order_unified_routes(list(routes_base) + extra_routes)
         merged = self._annotate_unified_routes(merged)
@@ -2547,31 +2422,31 @@ class RouteEngine:
 
     def compute_heat_alternative(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         *,
         green_enabled: bool = True,
-        departure_time: Optional[str] = None,
-        time_slot_override: Optional[str] = None,
-        air_temperature_c: Optional[float] = None,
+        departure_time: str | None = None,
+        time_slot_override: str | None = None,
+        air_temperature_c: float | None = None,
         weather_mode: str = "none",
         use_live_weather: bool = False,
-        weather_time: Optional[str] = None,
-        temperature_c: Optional[float] = None,
-        precipitation_mm: Optional[float] = None,
-        wind_speed_ms: Optional[float] = None,
-        wind_direction_deg: Optional[float] = None,
-        cloud_cover_pct: Optional[float] = None,
-        humidity_pct: Optional[float] = None,
-        wind_gusts_ms: Optional[float] = None,
-        shortwave_radiation_wm2: Optional[float] = None,
-        apparent_temperature_c: Optional[float] = None,
-        snowfall_cm_h: Optional[float] = None,
-        snow_depth_m: Optional[float] = None,
-        weather_code: Optional[int] = None,
-        season: Optional[str] = None,
-        corridor_expand_schedule_meters: Optional[Sequence[float]] = None,
+        weather_time: str | None = None,
+        temperature_c: float | None = None,
+        precipitation_mm: float | None = None,
+        wind_speed_ms: float | None = None,
+        wind_direction_deg: float | None = None,
+        cloud_cover_pct: float | None = None,
+        humidity_pct: float | None = None,
+        wind_gusts_ms: float | None = None,
+        shortwave_radiation_wm2: float | None = None,
+        apparent_temperature_c: float | None = None,
+        snowfall_cm_h: float | None = None,
+        snow_depth_m: float | None = None,
+        weather_code: int | None = None,
+        season: str | None = None,
+        corridor_expand_schedule_meters: Sequence[float] | None = None,
     ) -> AlternativesResponse:
         """Только вариант ``heat`` (один критерий), без shortest/full/green/stress.
 
@@ -2580,12 +2455,11 @@ class RouteEngine:
         """
         if profile_key not in _PROFILE_MAP:
             raise ValueError(
-                f"Неизвестный профиль: {profile_key!r}. "
-                f"Допустимые: {list(_PROFILE_MAP)}"
+                f"Неизвестный профиль: {profile_key!r}. Допустимые: {list(_PROFILE_MAP)}"
             )
 
         rp_heat_metrics = "thermal_physical_base"
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         dep_for_weather = departure_time or now_utc.replace(microsecond=0).isoformat()
 
         _s = self._app.settings
@@ -2624,7 +2498,7 @@ class RouteEngine:
             departure_time_iso=dep_for_weather,
             now_utc=now_utc,
         )
-        air_eff: Optional[float] = air_temperature_c
+        air_eff: float | None = air_temperature_c
         if air_eff is None:
             air_eff = float(w_snap.temperature_c)
 
@@ -2667,8 +2541,8 @@ class RouteEngine:
         )
 
         def _heat_once(
-            corridor_buffer_meters: Optional[float],
-        ) -> List[RouteResponse]:
+            corridor_buffer_meters: float | None,
+        ) -> list[RouteResponse]:
             return self._compute_alternatives_criterion_once(
                 start,
                 end,
@@ -2684,12 +2558,12 @@ class RouteEngine:
                 weather_ctx=weather_ctx,
             )
 
-        heat_routes: List[RouteResponse]
+        heat_routes: list[RouteResponse]
         if not s.use_dynamic_corridor_graph or not buf_sched:
             heat_routes = _heat_once(None)
         else:
             heat_routes = []
-            last_nf: Optional[RouteNotFoundError] = None
+            last_nf: RouteNotFoundError | None = None
             for attempt, eff in enumerate(buf_sched, start=1):
                 try:
                     heat_routes = _heat_once(float(eff))
@@ -2729,12 +2603,12 @@ class RouteEngine:
 
     def compute_alternatives_phase1_two_routes(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         profile_key: str,
         *,
-        season: Optional[str] = None,
-    ) -> List[RouteResponse]:
+        season: str | None = None,
+    ) -> list[RouteResponse]:
         """Первые два маршрута (кратчайший + энергия) без спутниковой зелени; с авторасширением.
 
         Третий вариант («с учётом озеленения») считается в ``compute_green_route_addon`` на графе со спутником.
@@ -2742,18 +2616,14 @@ class RouteEngine:
         if profile_key not in _PROFILE_MAP:
             raise ValueError(f"Неизвестный профиль: {profile_key!r}")
         s = self._app.settings
-        cached = self._route_disk_cache.get(
-            start, end, profile_key, green_enabled=False
-        )
+        cached = self._route_disk_cache.get(start, end, profile_key, green_enabled=False)
         if cached is not None:
             try:
                 alt = AlternativesResponse.model_validate(cached)
                 by_mode = {r.mode: r for r in alt.routes}
                 if "shortest" in by_mode and "full" in by_mode:
                     inc_route_disk_hit()
-                    logger.info(
-                        "alternatives_phase1: hit route disk cache (green_enabled=false)"
-                    )
+                    logger.info("alternatives_phase1: hit route disk cache (green_enabled=false)")
                     return [by_mode["shortest"], by_mode["full"]]
             except Exception:
                 logger.debug("alternatives_phase1: route cache invalid, recalculating")
@@ -2773,7 +2643,7 @@ class RouteEngine:
                 corridor_buffer_meters=None,
                 season=s_val,
             )
-        last_nf: Optional[RouteNotFoundError] = None
+        last_nf: RouteNotFoundError | None = None
         for attempt, eff in enumerate(buf_sched, start=1):
             try:
                 routes = self._compute_alternatives_once(

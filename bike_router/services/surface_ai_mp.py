@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import time
-from io import StringIO
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List
+from typing import Any
 
 import geopandas as gpd
 import pandas as pd
@@ -58,9 +59,8 @@ def parallel_extract_tile_features_for_edges(
     progress: Callable[..., Any],
 ) -> pd.DataFrame:
     """Параллельное извлечение тайловых признаков по чанкам рёбер."""
-    from bike_router.tools._parallel_utils import auto_cpu_count, auto_worker_count, chunked
-
     from bike_router.services.surface_ml import extract_tile_features_for_edges
+    from bike_router.tools._parallel_utils import auto_cpu_count, auto_worker_count, chunked
 
     n = len(edges_gdf)
     cache_dir = Path(settings.cache_dir)
@@ -108,7 +108,7 @@ def parallel_extract_tile_features_for_edges(
         chunk_sz,
     )
 
-    payloads: List[dict] = []
+    payloads: list[dict] = []
     for part in parts:
         sub = edges_gdf.iloc[part].copy()
         payloads.append(
@@ -122,12 +122,10 @@ def parallel_extract_tile_features_for_edges(
             }
         )
 
-    frames: List[pd.DataFrame] = []
+    frames: list[pd.DataFrame] = []
     if workers <= 1:
         for p in payloads:
-            frames.append(
-                pd.read_json(StringIO(extract_tile_features_chunk_worker(p)))
-            )
+            frames.append(pd.read_json(StringIO(extract_tile_features_chunk_worker(p))))
     else:
         with ProcessPoolExecutor(max_workers=workers) as ex:
             for js in ex.map(extract_tile_features_chunk_worker, payloads):
@@ -138,7 +136,10 @@ def parallel_extract_tile_features_for_edges(
     before = len(out)
     out = out.drop_duplicates(subset=["edge_id"], keep="last")
     if len(out) < before:
-        _log.warning("Surface AI tile features: снято %d дублирующихся edge_id после concat", before - len(out))
+        _log.warning(
+            "Surface AI tile features: снято %d дублирующихся edge_id после concat",
+            before - len(out),
+        )
     order = {eid: i for i, eid in enumerate(edges_gdf["edge_id"].astype(str))}
     out["_ord"] = out["edge_id"].astype(str).map(lambda x: order.get(x, 10**9))
     out = out.sort_values("_ord").drop(columns=["_ord"], errors="ignore").reset_index(drop=True)
@@ -169,9 +170,7 @@ def train_surface_ai_candidate_worker(payload: dict) -> dict:
     sklearn_n_jobs = int(payload.get("sklearn_n_jobs", 1))
 
     target_col = "surface_group_direct_label" if target == "group_direct" else "surface_train_label"
-    labels = sorted(
-        set(train[target_col].astype(str)) | set(test[target_col].astype(str))
-    )
+    labels = sorted(set(train[target_col].astype(str)) | set(test[target_col].astype(str)))
 
     display, features_label = _candidate_display(candidate)
     feature_set = _candidate_feature_set(candidate)
@@ -222,7 +221,9 @@ def train_surface_ai_candidate_worker(payload: dict) -> dict:
         "dangerous_upgrade_rate_effective": metrics.get("dangerous_upgrade_rate_effective", 0.0),
         "dangerous_upgrade_count_raw": metrics.get("dangerous_upgrade_count_raw", 0),
         "dangerous_upgrade_count_effective": metrics.get("dangerous_upgrade_count_effective", 0),
-        "dangerous_upgrade_length_m_effective": metrics.get("dangerous_upgrade_length_m_effective", 0.0),
+        "dangerous_upgrade_length_m_effective": metrics.get(
+            "dangerous_upgrade_length_m_effective", 0.0
+        ),
     }
     out_model = Path(payload["models_dir"]) / f"_model_{candidate.replace('/', '_')}.joblib"
     joblib.dump(model, out_model)

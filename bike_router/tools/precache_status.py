@@ -1,4 +1,4 @@
-﻿"""Диагностика каталога area_precache для текущего .env.
+"""Диагностика каталога area_precache для текущего .env.
 
 Движок ищет ``meta.json`` только в **одном** каталоге:
 ``cache/area_precache/<sha256>/``, где хэш зависит от WKT арены, имени и
@@ -16,13 +16,6 @@
 
 from __future__ import annotations
 
-import json
-import os
-import sys
-from pathlib import Path
-
-
-
 
 def main() -> None:
     from bike_router.config import Settings
@@ -31,14 +24,14 @@ def main() -> None:
         area_green_edges_bundle_meta_path,
         area_green_edges_content_fingerprint,
         area_green_edges_pkl_path,
-        load_area_green_edges_bundle_meta,
         area_precache_directory_id,
         area_static_content_fingerprint,
+        graph_base_path,
+        graph_green_path,
+        load_area_green_edges_bundle_meta,
         meta_path,
         precache_area_dir,
         precache_area_root,
-        graph_base_path,
-        graph_green_path,
     )
 
     s = Settings()
@@ -108,9 +101,7 @@ def main() -> None:
         gbf = (p / "graph_base.graphml").is_file()
         ggf = (p / "graph_green.graphml").is_file()
         mark = "  <-- ТЕКУЩИЙ ОЖИДАЕМЫЙ" if p.name == aid else ""
-        print(
-            f"  {p.name[:16]}…  {tag}  base={gbf!s:5} green={ggf!s:5}{mark}"
-        )
+        print(f"  {p.name[:16]}…  {tag}  base={gbf!s:5} green={ggf!s:5}{mark}")
 
     print()
     print(
@@ -121,4 +112,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

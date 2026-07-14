@@ -3,14 +3,15 @@
 import logging
 import math
 import os
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Optional
 
 import geopandas as gpd
-import pandas as pd
-import requests
 import networkx as nx
 import numpy as np
 import osmnx as ox
+import pandas as pd
+import requests
 from shapely.geometry import box
 
 from ..config import (
@@ -34,12 +35,12 @@ from .heat import (
     urban_canyon_score,
 )
 from .policy_data import load_stress_policy
+from .retry import sleep_backoff
 from .stress import (
     intersection_stress_score,
     lts_from_osm_tags,
     stress_costs_for_edge,
 )
-from .retry import sleep_backoff
 from .surface_resolve import SurfaceResolutionStats, apply_surface_resolution
 
 if TYPE_CHECKING:
@@ -124,11 +125,11 @@ class GraphBuilder:
         self._green = green_analyzer
         self._settings = settings
         self._surface_prediction_store = surface_prediction_store
-        self._last_surface_resolution_stats: Optional[SurfaceResolutionStats] = None
+        self._last_surface_resolution_stats: SurfaceResolutionStats | None = None
         self._init_osmnx()
 
     @property
-    def last_surface_resolution_stats(self) -> Optional[SurfaceResolutionStats]:
+    def last_surface_resolution_stats(self) -> SurfaceResolutionStats | None:
         """Статистика последнего :meth:`apply_surface_resolution` (после ``calculate_weights``)."""
         return self._last_surface_resolution_stats
 
@@ -141,7 +142,7 @@ class GraphBuilder:
         _rt = int(max(1, round(float(s.osm_requests_timeout))))
         ox.settings.requests_timeout = _rt
         ox.settings.overpass_rate_limit = s.osm_overpass_rate_limit
-        chain: List[str] = s.resolved_overpass_endpoints()
+        chain: list[str] = s.resolved_overpass_endpoints()
         ox.settings.overpass_url = chain[0]
         for tag in (
             "surface",
@@ -185,8 +186,8 @@ class GraphBuilder:
 
     @staticmethod
     def create_bbox(
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         buffer: float,
     ) -> Any:
         """Bounding box для загрузки данных (buffer — градусы со всех сторон)."""
@@ -198,8 +199,8 @@ class GraphBuilder:
 
     def create_bbox_for_corridor(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         buffer_meters: Any = None,
     ) -> Any:
         """Прямоугольник коридора: метры (CORRIDOR_BUFFER_METERS) или градусы (BUFFER).
@@ -220,9 +221,7 @@ class GraphBuilder:
             max_lon = max(start[1], end[1]) + dlon
             return box(min_lon, min_lat, max_lon, max_lat)
         if buffer_meters is not None:
-            raise ValueError(
-                "buffer_meters override только при CORRIDOR_BUFFER_METERS > 0"
-            )
+            raise ValueError("buffer_meters override только при CORRIDOR_BUFFER_METERS > 0")
         return self.create_bbox(start, end, s.buffer)
 
     def load(self, bbox: Any) -> nx.MultiDiGraph:
@@ -233,7 +232,7 @@ class GraphBuilder:
         first_t = float(s.osm_overpass_first_attempt_timeout)
 
         logger.info("Загрузка дорог из OSM… endpoints=%d", len(endpoints))
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         per_ep = max(1, int(getattr(s, "overpass_per_endpoint_retries", 3)))
         rb = float(s.http_retry_base_delay_sec)
         rmax = float(s.http_retry_max_delay_sec)
@@ -333,12 +332,7 @@ class GraphBuilder:
 
         highway_dist = {}
         if "highway" in edges_gdf.columns:
-            highway_dist = dict(
-                edges_gdf["highway"]
-                .apply(_first_value)
-                .value_counts()
-                .items()
-            )
+            highway_dist = dict(edges_gdf["highway"].apply(_first_value).value_counts().items())
 
         surface_dist = {}
         if "surface" in edges_gdf.columns:
@@ -379,7 +373,7 @@ class GraphBuilder:
 
     def enrich_edges_base_physical(
         self, edges_gdf: gpd.GeoDataFrame
-    ) -> Tuple[gpd.GeoDataFrame, Any]:
+    ) -> tuple[gpd.GeoDataFrame, Any]:
         """Базовое обогащение: длина (OSM), высоты, surface_effective, градиенты.
 
         Без спутниковой зелени — она добавляется в :meth:`_apply_green_enrichment`.
@@ -405,8 +399,7 @@ class GraphBuilder:
         long_mask = len_arr > 30 * 1.5
         n_long = int(long_mask.sum())
         logger.info(
-            "Высоты: %d рёбер интерполировано (~30м шаг), "
-            "%d коротких (только нач/кон)",
+            "Высоты: %d рёбер интерполировано (~30м шаг), %d коротких (только нач/кон)",
             n_long,
             n - n_long,
         )
@@ -443,13 +436,9 @@ class GraphBuilder:
         if use_satellite:
             return self._green.calculate_satellite_batch(edges_gdf)
         if skip_satellite_green:
-            logger.info(
-                "Запрос без спутниковой зелени — тайлы не загружаются, заглушки."
-            )
+            logger.info("Запрос без спутниковой зелени — тайлы не загружаются, заглушки.")
         elif self._settings.disable_satellite_green:
-            logger.info(
-                "DISABLE_SATELLITE_GREEN=true — озеленение по снимкам отключено, заглушки."
-            )
+            logger.info("DISABLE_SATELLITE_GREEN=true — озеленение по снимкам отключено, заглушки.")
         return self._green._fill_empty_green(edges_gdf)
 
     def _compute_profile_weights_full(
@@ -472,12 +461,7 @@ class GraphBuilder:
         surf_base = None
         surf_first = None
         if "surface_effective" in edges_gdf.columns:
-            surf_base = (
-                edges_gdf["surface_effective"]
-                .astype(str)
-                .str.strip()
-                .str.lower()
-            )
+            surf_base = edges_gdf["surface_effective"].astype(str).str.strip().str.lower()
         elif "surface" in edges_gdf.columns:
             surf_first = [_first_value(x) for x in edges_gdf["surface"].values]
 
@@ -487,9 +471,7 @@ class GraphBuilder:
             hw_first = None
 
         for profile in PROFILES:
-            gradient = np.clip(
-                raw_gradient, -profile.max_gradient, profile.max_gradient
-            )
+            gradient = np.clip(raw_gradient, -profile.max_gradient, profile.max_gradient)
 
             if surf_base is not None:
                 surf = (
@@ -520,9 +502,7 @@ class GraphBuilder:
             eff = np.where(
                 gradient >= 0,
                 profile.nu + gradient,
-                np.maximum(
-                    profile.nu - np.abs(gradient), profile.min_descent_coeff
-                ),
+                np.maximum(profile.nu - np.abs(gradient), profile.min_descent_coeff),
             )
             base = profile.mg * length * eff
 
@@ -576,12 +556,8 @@ class GraphBuilder:
                 edges_gdf[f"weight_{profile.key}_full"],
                 errors="coerce",
             ).to_numpy(dtype=np.float64)
-            eff_green = np.clip(
-                1.0 + (green - 1.0) * profile.green_sensitivity, 0.2, 1.5
-            )
-            edges_gdf[f"weight_{profile.key}_green"] = np.maximum(
-                w_full * eff_green, 0
-            )
+            eff_green = np.clip(1.0 + (green - 1.0) * profile.green_sensitivity, 0.2, 1.5)
+            edges_gdf[f"weight_{profile.key}_green"] = np.maximum(w_full * eff_green, 0)
 
     def enrich_heat_stress_features(self, edges_gdf: gpd.GeoDataFrame) -> None:
         """Ориентация ребра, LTS/стресс, тепловые штрафы и экспозиция по слотам."""
@@ -634,17 +610,11 @@ class GraphBuilder:
             brg = float(edge_bearing_deg_from_geom(geom))
             bearing[i] = brg
             row = edges_gdf.iloc[i]
-            tags = {
-                k: row[k]
-                for k in _OSM_STRESS_TAG_KEYS
-                if k in edges_gdf.columns
-            }
+            tags = {k: row[k] for k in _OSM_STRESS_TAG_KEYS if k in edges_gdf.columns}
             if "highway" not in tags and "highway" in edges_gdf.columns:
                 tags["highway"] = row.get("highway")
 
-            O, V, B, C, _ = thermal_edge_features(
-                brg, float(trees[i]), float(grass[i]), tags
-            )
+            O, V, B, C, _ = thermal_edge_features(brg, float(trees[i]), float(grass[i]), tags)
             o_sky[i] = O
             v_sh[i] = V
             b_sh[i] = B
@@ -653,9 +623,7 @@ class GraphBuilder:
             canyon_score[i] = urban_canyon_score(tags)
             shade_potential[i] = solar_shade_potential(V, B, C)
 
-            fb = use_fallback_green or (
-                float(trees[i]) < 0.5 and float(grass[i]) < 0.5
-            )
+            fb = use_fallback_green or (float(trees[i]) < 0.5 and float(grass[i]) < 0.5)
             use_proxy[i] = 1 if fb else 0
 
             lv = float(lts_from_osm_tags(tags, pol_stress))
@@ -663,9 +631,7 @@ class GraphBuilder:
             ln = float(len_arr[i])
             isc = float(intersection_stress_score(tags, pol_stress))
             int_score_arr[i] = isc
-            seg, inter, tot = stress_costs_for_edge(
-                ln, lv, isc, pol_stress
-            )
+            seg, inter, tot = stress_costs_for_edge(ln, lv, isc, pol_stress)
             stress_seg[i] = seg
             stress_int[i] = inter
             stress_c[i] = tot
@@ -701,9 +667,7 @@ class GraphBuilder:
             edges_gdf[f"heat_{slot.key}"] = heat_by_slot[slot.key]
             edges_gdf[f"heat_exposure_{slot.key}"] = exp_by_slot[slot.key]
 
-    def upgrade_edges_satellite_weights(
-        self, edges_gdf: gpd.GeoDataFrame
-    ) -> gpd.GeoDataFrame:
+    def upgrade_edges_satellite_weights(self, edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """Green-addon: только спутник + ``weight_*_green``; база и ``weight_*_full`` без изменений.
 
         При настроенной арене и валидном ``cache/area_green_edges/.../green_edges.pkl``
@@ -718,8 +682,7 @@ class GraphBuilder:
             len(edges_gdf),
         )
         use_satellite = (
-            self._green._tiles.pil_available
-            and not self._settings.disable_satellite_green
+            self._green._tiles.pil_available and not self._settings.disable_satellite_green
         )
         if use_satellite:
             applied = (
@@ -794,9 +757,7 @@ class GraphBuilder:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def apply_weights(
-        G: nx.MultiDiGraph, edges_gdf: gpd.GeoDataFrame
-    ) -> nx.MultiDiGraph:
+    def apply_weights(G: nx.MultiDiGraph, edges_gdf: gpd.GeoDataFrame) -> nx.MultiDiGraph:
         """Перенести рассчитанные веса обратно в граф."""
         if all(c in edges_gdf.columns for c in ("u", "v", "key")):
             edges_gdf = edges_gdf.reset_index(drop=True)
@@ -842,19 +803,17 @@ class GraphBuilder:
             base_cols.append(f"heat_{s.key}")
             base_cols.append(f"heat_exposure_{s.key}")
         for p in PROFILES:
-            base_cols.extend(
-                [f"weight_{p.key}_full", f"weight_{p.key}_green"]
-            )
+            base_cols.extend([f"weight_{p.key}_full", f"weight_{p.key}_green"])
 
         avail = [c for c in base_cols if c in edges_gdf.columns]
-        lookup = edges_gdf.set_index(["u", "v", "key"])[avail].to_dict(
-            "index"
-        )
+        lookup = edges_gdf.set_index(["u", "v", "key"])[avail].to_dict("index")
 
         weight_cols = {c for c in avail if c.startswith("weight_")}
 
         heat_exp_cols = {c for c in avail if c.startswith("heat_exposure_")}
-        heat_cost_cols = {c for c in avail if c.startswith("heat_") and not c.startswith("heat_exposure_")}
+        heat_cost_cols = {
+            c for c in avail if c.startswith("heat_") and not c.startswith("heat_exposure_")
+        }
 
         for u, v, key, data in G.edges(keys=True, data=True):
             w = lookup.get((u, v, key), {})

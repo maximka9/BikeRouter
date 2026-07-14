@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import subprocess
 import sys
@@ -7,9 +8,8 @@ import zipfile
 from pathlib import Path
 
 from bike_router.__about__ import __registration_tag__, __version__
+from registration.scripts.source_selection import ROOT, relative_path, selected_files
 
-ROOT = Path(__file__).resolve().parents[2]
-MANIFEST = ROOT / "registration" / "manifest.txt"
 OUT_DIR = ROOT / "registration" / "private"
 ZIP_NAME = f"BikeRouter-{__version__}-registration.zip"
 
@@ -30,19 +30,37 @@ def _check_git() -> list[str]:
 
 
 def _manifest_files() -> list[Path]:
-    files: list[Path] = []
-    for raw in MANIFEST.read_text(encoding="utf-8").splitlines():
-        item = raw.strip()
-        if not item or item.startswith("#"):
-            continue
-        path = ROOT / item
-        if path.is_dir():
-            files.extend(p for p in path.rglob("*") if p.is_file())
-        elif path.is_file():
-            files.append(path)
-        else:
-            raise FileNotFoundError(item)
-    return sorted(set(files), key=lambda p: p.relative_to(ROOT).as_posix())
+    files = selected_files(for_archive=True)
+    if not files:
+        raise RuntimeError("source selection returned no files")
+    return files
+
+
+def _write_manifest_csv(files: list[Path]) -> Path:
+    path = OUT_DIR / "04_source_manifest.csv"
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["path", "bytes", "sha256"])
+        for item in files:
+            writer.writerow(
+                [
+                    relative_path(item),
+                    item.stat().st_size,
+                    hashlib.sha256(item.read_bytes()).hexdigest(),
+                ]
+            )
+    return path
+
+
+def _write_checksums(files: list[Path], archive: Path | None = None) -> Path:
+    path = OUT_DIR / "05_checksums.txt"
+    rows = []
+    for item in files:
+        rows.append(f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {relative_path(item)}")
+    if archive is not None:
+        rows.append(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}")
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
 
 
 def main() -> int:
@@ -53,22 +71,35 @@ def main() -> int:
         return 1
 
     subprocess.check_call([sys.executable, "-m", "registration.scripts.check_abstract"], cwd=ROOT)
-    subprocess.check_call([sys.executable, "-m", "registration.scripts.calculate_program_size"], cwd=ROOT)
+    subprocess.check_call(
+        [sys.executable, "-m", "registration.scripts.calculate_program_size"], cwd=ROOT
+    )
+    subprocess.check_call(
+        [sys.executable, "-m", "registration.scripts.generate_deposit_pdf"], cwd=ROOT
+    )
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    archive = OUT_DIR / ZIP_NAME
-    files = _manifest_files()
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for path in files:
-            rel = path.relative_to(ROOT).as_posix()
-            zf.write(path, rel)
-
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    (archive.with_suffix(archive.suffix + ".sha256")).write_text(f"{digest}  {ZIP_NAME}\n", encoding="utf-8")
-    (OUT_DIR / "manifest.files.txt").write_text(
-        "\n".join(p.relative_to(ROOT).as_posix() for p in files) + "\n",
+    (OUT_DIR / "01_abstract.txt").write_text(
+        (ROOT / "registration" / "abstract.md").read_text(encoding="utf-8").strip() + "\n",
         encoding="utf-8",
     )
+    archive = OUT_DIR / ZIP_NAME
+    files = _manifest_files()
+    _write_manifest_csv(files)
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in files:
+            zf.write(path, relative_path(path))
+
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (archive.with_suffix(archive.suffix + ".sha256")).write_text(
+        f"{digest}  {ZIP_NAME}\n", encoding="utf-8"
+    )
+    _write_checksums(files, archive)
+    status_after = _run(["git", "status", "--porcelain"])
+    if status_after:
+        print("ERROR: build changed tracked files", file=sys.stderr)
+        print(status_after, file=sys.stderr)
+        return 1
     print(f"{archive}")
     print(f"sha256 {digest}")
     return 0

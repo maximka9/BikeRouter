@@ -6,13 +6,11 @@
 
 **Публичный репозиторий релиза:** [github.com/maximka9/BikeRouter](https://github.com/maximka9/BikeRouter).
 
-Если разработка ведётся внутри монорепозитория, а каталог проекта лежит по пути `NIR/bike_router/`, обновлять GitHub достаточно **только** для этого remote (не обязательно пушить весь монорепозиторий). В корне Git добавьте remote `bike-router` → `https://github.com/maximka9/BikeRouter.git`, затем из корня репозитория:
+Основная ветка публикуется напрямую в remote `origin`. Из корня репозитория:
 
 ```powershell
-.\NIR\bike_router\scripts\push_to_github_bike_router.ps1
+git push origin main
 ```
-
-Скрипт выполняет `git subtree split --prefix=NIR/bike_router` и пушит результат в `bike-router:main`.
 
 ## Что умеет сервис
 
@@ -42,8 +40,9 @@
 | `docker-compose.yml` | Сервис, bind mount `./data` → `/data`, healthcheck |
 | `docker-entrypoint.sh` | Только `exec` Gunicorn/Uvicorn; предсборка полигона — офлайн (`precache_area`) |
 | `.dockerignore` | Исключения при сборке образа |
-| `.env` | Рабочий конфиг (пути, полигон, corridor, Overpass, runtime ML); коэффициенты моделей — в Python |
-| `.env.local` | Опциональный локальный override (не коммитить) |
+| `.env.example` | Безопасный шаблон локального конфига |
+| `.env` | Локальный рабочий конфиг, создаётся из `.env.example` и не коммитится |
+| `.env.local` | Опциональный локальный override, не коммитится |
 
 ### `bike_router/middleware/`
 
@@ -177,10 +176,11 @@ deploy/
 
 ## Быстрый старт (разработка)
 
-Из каталога **NIR** (родительский для пакета `bike_router`):
+Из корня репозитория:
 
 ```bash
-pip install -r bike_router/requirements.txt
+python -m pip install -r requirements.txt
+copy .env.example .env
 python -m bike_router
 ```
 
@@ -201,9 +201,13 @@ python -m bike_router
 
 ## Запуск в Docker
 
-Перейдите в каталог **`bike_router/`** (где лежит `docker-compose.yml`).
+Команды выполняются из корня репозитория, где лежит `docker-compose.yml`.
 
-**Первый раз:** отредактируйте `.env` (при необходимости создайте `.env.local` для личных override).
+**Первый раз:** создайте локальный конфиг из шаблона и отредактируйте его под свою среду:
+
+```bash
+cp .env.example .env
+```
 
 ### Два официальных режима кэша
 
@@ -224,7 +228,7 @@ docker compose run --rm bike-router python -m bike_router.tools.precache_area
 
 Результат появится в **`./data/cache/area_precache/...`**. API при старте **не** собирает полигон на диск: только офлайн **`precache_area`**; в **`warmup`** — лишь опциональная предзагрузка уже готового precache в память.
 
-Локально без Docker (чтобы всё лежало на нужном диске, напр. `R:`): из каталога **родителя** пакета (`NIR`, где лежит папка `bike_router`) задайте **`BIKE_ROUTER_BASE_DIR`** на каталог данных (например **`R:\Python\NIR\bike_router\data`**) и выполните **`python -m bike_router.tools.precache_area`**. Тогда **`cache/`** (тайлы, `area_precache`, **SRTM HGT** в `cache/srtm_hgt/`) и **`osmnx_cache/`** создаются под этим путём, а не в образе Docker и не в `C:\Users\…\.cache\srtm`.
+Локально без Docker задайте **`BIKE_ROUTER_BASE_DIR`** на каталог данных внутри или рядом с проектом и выполните **`python -m bike_router.tools.precache_area`**. Тогда **`cache/`** (тайлы, `area_precache`, **SRTM HGT** в `cache/srtm_hgt/`) и **`osmnx_cache/`** создаются под этим путём, а не в образе Docker и не в пользовательском системном кэше.
 
 ### Запуск API
 
@@ -232,7 +236,7 @@ docker compose run --rm bike-router python -m bike_router.tools.precache_area
 |----------|---------|
 | Собрать образ и запустить в foreground (логи в терминале) | `docker compose up --build` |
 | Запустить в фоне | `docker compose up -d --build` |
-| Остановить контейнеры (compose из этого каталога) | `docker compose stop` |
+| Остановить контейнеры | `docker compose stop` |
 | Остановить и удалить контейнеры сети compose | `docker compose down` |
 
 Очистить кэш на диске: удалите содержимое **`bike_router/data/`** (или всю папку) на хосте — это не том Docker, а обычная директория.
@@ -285,14 +289,14 @@ ingress:
 
 4. Либо другой туннель/VPN с настраиваемым таймаутом до origin.
 
-Спутниковая зелень по умолчанию **включена** (`DISABLE_SATELLITE_GREEN=false` в коде). Чтобы прогрев не тянул сотни тысяч тайлов, в **`.env`** задайте **узкий** **`AREA_*`** или **`AREA_POLYGON_WKT`**, снизьте **`SATELLITE_ZOOM`** (например 17 вместо 20 — в разы меньше тайлов) либо временно **`DISABLE_SATELLITE_GREEN=true`** (в т.ч. раскомментируйте строку в **`docker-compose.yml`**).
+Спутниковый анализ в `.env.example` **выключен**. Для включения задайте поставщика тайлов, лицензия которого разрешает машинный анализ и кэширование, укажите узкий **`AREA_*`** или **`AREA_POLYGON_WKT`**, настройте **`SATELLITE_ZOOM`** и документируйте источник данных отдельно.
 
 **Важно:** в образе по умолчанию **один** процесс Gunicorn + Uvicorn worker — граф OSM целиком в памяти процесса; увеличение `-w` дублирует потребление RAM.
 
 ## Production за пределами Docker
 
 1. **Uvicorn** (как в `python -m bike_router`) или **Gunicorn** + `uvicorn.workers.UvicornWorker` (см. `Dockerfile`, `CMD`).
-2. **Обратный прокси** (TLS, заголовки `X-Forwarded-*`): пример — `bike_router/deploy/nginx.example.conf`.
+2. **Обратный прокси** (TLS, заголовки `X-Forwarded-*`): пример — `deploy/nginx.example.conf`.
 3. Постоянный URL: DNS на ваш сервер + HTTPS (Let’s Encrypt и т.п.).
 4. Таймаут прокси не меньше **120 с** на первый запрос после холодного старта (загрузка графа).
 
@@ -307,13 +311,13 @@ ingress:
 | Bbox графа | **`AREA_MIN_LAT`**, **`AREA_MAX_LAT`**, **`AREA_MIN_LON`**, **`AREA_MAX_LON`** — если все заданы и ненулевые, граф строится по прямоугольнику |
 | Коридор по запросу | **`GRAPH_CORRIDOR_MODE=true`** — без полигона и без ненулевого `AREA_*`: граф и спутниковая зелень в прямоугольнике между точками запроса; запас по умолчанию **`CORRIDOR_BUFFER_METERS=400`** (метры по широте/долготе); при **`CORRIDOR_BUFFER_METERS=0`** — запас **`BUFFER`** в градусах; кэш графов — **`cache/corridor_graphs/*.graphml`** при **`CORRIDOR_GRAPH_DISK_CACHE=true`** |
 | Предкэш арены (area precache) | **`PRECACHE_AREA_ENABLED=true`** и **`PRECACHE_AREA_POLYGON_WKT`** — отдельно от **`AREA_POLYGON_WKT`**: при corridor-режиме, если bbox внутри полигона и **`meta.json`** валиден (**`green_quality_state=ok`** при зелени), граф с диска **`cache/area_precache/<hash>/`**. Сборка только офлайн: **`python -m bike_router.tools.precache_area`**. |
-| CORS | **`CORS_ALLOW_ORIGINS`**: `*` (по умолчанию, dev) или список origin через запятую для публикации |
+| CORS | **`CORS_ALLOW_ORIGINS`**: список origin через запятую; в `.env.example` указан локальный origin |
 | Запасной bbox | **`START_*`**, **`END_*`**, **`BUFFER`** — если нет ни полигона, ни `AREA_*`, и не включён коридор |
 | Лимиты | **`MAX_ROUTE_KM`**, **`MAX_SNAP_DISTANCE_M`** |
 | Инвалидация кэша маршрутов | **`ROUTING_ALGO_VERSION`** — увеличить после изменения формул весов / логики в `bike_router/services/graph.py`, `bike_router/services/routing.py` и т.д. |
 | Дисковый кэш | **`GEOCODE_DISK_CACHE`**, **`ROUTE_DISK_CACHE`** (опциональный UX-кэш ответов; по умолчанию `false` в `config`), **`CORRIDOR_GRAPH_DISK_CACHE`** — `true`/`false` |
-| Прочие кэши | **`CACHE_SATELLITE`**, **`CACHE_TILE_ANALYSIS`** (оставьте **`true`** на большом precache: маски в `cache/tile_green_masks`, агрегация читает с диска и не раздувает RAM), **`FORCE_RECALCULATE`** |
-| TMS для зелени | **`TMS_SERVER`**, **`SATELLITE_ZOOM`**, **`ROAD_BUFFER_METERS`** (ширина коридора **M** вокруг линии дороги в метрах), **`TILE_DOWNLOAD_THREADS`**, **`GREEN_TILE_BATCH_SIZE`** (сколько тайлов за один проход загрузки+масок; меньше — меньше RAM на большом полигоне; `0` — всё сразу) |
+| Прочие кэши | **`CACHE_SATELLITE`**, **`CACHE_TILE_ANALYSIS`**, **`FORCE_RECALCULATE`**; спутниковые кэши включайте только при наличии разрешённого источника данных |
+| TMS для зелени | **`TMS_SERVER`**, **`SATELLITE_ZOOM`**, **`ROAD_BUFFER_METERS`** (ширина коридора **M** вокруг линии дороги в метрах), **`TILE_DOWNLOAD_THREADS`**, **`GREEN_TILE_BATCH_SIZE`**; поставщик не задан по умолчанию |
 | Покрытие без `surface` в OSM | Тег OSM при наличии → иначе эвристика **`tracktype`** / **`highway`** → `unknown` (коэфф. 1.0); см. `bike_router/services/surface_resolve.py` |
 
 **Обязательные переменные:** для старта API ни одна не обязательна. Для **production** либо фиксированная зона (**`AREA_*`** / **`AREA_POLYGON_WKT`**), либо **`GRAPH_CORRIDOR_MODE`** без фиксированной области; при Docker задайте **`BIKE_ROUTER_BASE_DIR`**.
@@ -361,7 +365,7 @@ ingress:
 
 **Рекомендуемый порядок:** (1) собрать area precache в тот же каталог, что у runtime (**`BIKE_ROUTER_BASE_DIR`**); (2) поднять API — в `warmup` только проверка и опциональная предзагрузка **валидного** precache в память.
 
-Сборка на диск (локально, с `PYTHONPATH` на пакет и переменными из `.env`):
+Сборка на диск локально, с переменными из `.env`:
 
 ```bash
 python -m bike_router.tools.precache_area
@@ -388,14 +392,13 @@ docker compose run --rm bike-router python -m bike_router.tools.precache_area
 
 - **30 автоматических сценариев:** `bike_router/tools/route_scenarios.json`, прогон (нужен `requests`):  
   `python bike_router/tools/run_route_scenarios.py --base http://127.0.0.1:8000`  
-  (из каталога **NIR**; при фиксированной зоне граф уже в памяти, при **`GRAPH_CORRIDOR_MODE`** первый запрос строит коридор — задайте **`--timeout`** при необходимости.)
-- **Чеклист UX и мобильной проверки:** `bike_router/docs/ROUTE_TEST_MATRIX.md`.
+  (из корня репозитория; при фиксированной зоне граф уже в памяти, при **`GRAPH_CORRIDOR_MODE`** первый запрос строит коридор — задайте **`--timeout`** при необходимости.)
+- **Чеклист UX и мобильной проверки:** `docs/ROUTE_TEST_MATRIX.md`.
 
 ## Юнит-тесты (без загрузки OSM)
 
 ```bash
-cd NIR
-python -m unittest discover -s bike_router/tests -p "test*.py" -v
+python -m pytest -q
 ```
 
 ## Архитектура (кратко)

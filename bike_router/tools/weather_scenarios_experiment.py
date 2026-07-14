@@ -1,4 +1,4 @@
-﻿"""Сравнение маршрутов при разных погодных сценариях (ручной режим).
+"""Сравнение маршрутов при разных погодных сценариях (ручной режим).
 
 Запуск::
 
@@ -10,16 +10,12 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
-from typing import Any, Dict, List, Tuple
-
-
+from typing import Any
 
 
 def main() -> None:
-    from bike_router.engine import RouteEngine
     from bike_router.config import Settings
+    from bike_router.engine import RouteEngine
 
     s = Settings()
     start = (s.start_lat, s.start_lon)
@@ -27,14 +23,50 @@ def main() -> None:
     eng = RouteEngine()
     eng.warmup()
 
-    scenarios: List[Tuple[str, Dict[str, float]]] = [
-        ("neutral", {"temperature_c": 18.0, "precipitation_mm": 0.0, "wind_speed_ms": 3.0, "cloud_cover_pct": 50.0, "humidity_pct": 55.0}),
-        ("hot_sun", {"temperature_c": 34.0, "precipitation_mm": 0.0, "wind_speed_ms": 2.0, "cloud_cover_pct": 10.0, "humidity_pct": 40.0}),
-        ("rain", {"temperature_c": 15.0, "precipitation_mm": 4.0, "wind_speed_ms": 5.0, "cloud_cover_pct": 90.0, "humidity_pct": 92.0}),
-        ("wind", {"temperature_c": 12.0, "precipitation_mm": 0.0, "wind_speed_ms": 14.0, "cloud_cover_pct": 40.0, "humidity_pct": 65.0}),
+    scenarios: list[tuple[str, dict[str, float]]] = [
+        (
+            "neutral",
+            {
+                "temperature_c": 18.0,
+                "precipitation_mm": 0.0,
+                "wind_speed_ms": 3.0,
+                "cloud_cover_pct": 50.0,
+                "humidity_pct": 55.0,
+            },
+        ),
+        (
+            "hot_sun",
+            {
+                "temperature_c": 34.0,
+                "precipitation_mm": 0.0,
+                "wind_speed_ms": 2.0,
+                "cloud_cover_pct": 10.0,
+                "humidity_pct": 40.0,
+            },
+        ),
+        (
+            "rain",
+            {
+                "temperature_c": 15.0,
+                "precipitation_mm": 4.0,
+                "wind_speed_ms": 5.0,
+                "cloud_cover_pct": 90.0,
+                "humidity_pct": 92.0,
+            },
+        ),
+        (
+            "wind",
+            {
+                "temperature_c": 12.0,
+                "precipitation_mm": 0.0,
+                "wind_speed_ms": 14.0,
+                "cloud_cover_pct": 40.0,
+                "humidity_pct": 65.0,
+            },
+        ),
     ]
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for name, wx in scenarios:
         try:
             out = eng.compute_alternatives(
@@ -59,7 +91,9 @@ def main() -> None:
                     "weather": wx,
                     "length_m": r0.length_m if r0 else None,
                     "combined_cost": hs.combined_cost if hs else None,
-                    "physical_in_breakdown": hs.combined_breakdown.physical if hs and hs.combined_breakdown else None,
+                    "physical_in_breakdown": hs.combined_breakdown.physical
+                    if hs and hs.combined_breakdown
+                    else None,
                     "green_pct": g.percent if g else None,
                     "high_stress_frac": hs.high_stress_length_fraction if hs else None,
                     "weather_multipliers": (
@@ -77,4 +111,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -27,10 +27,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 import networkx as nx
 import osmnx as ox
@@ -89,9 +88,7 @@ def area_precache_content_fingerprint(settings: Settings) -> str:
     return area_static_content_fingerprint(settings)
 
 
-def area_precache_directory_id(
-    wkt: str, area_name: str, content_fp: str
-) -> str:
+def area_precache_directory_id(wkt: str, area_name: str, content_fp: str) -> str:
     """Стабильный идентификатор каталога ``cache/area_precache/<id>/``."""
     raw = json.dumps(
         {
@@ -119,15 +116,14 @@ def parse_precache_polygon(settings: Settings) -> Any:
         geom = unary_union(geom)
     if geom.geom_type != "Polygon":
         raise ValueError(
-            f"PRECACHE_AREA_POLYGON_WKT: нужен Polygon или MultiPolygon, "
-            f"получено {geom.geom_type}"
+            f"PRECACHE_AREA_POLYGON_WKT: нужен Polygon или MultiPolygon, получено {geom.geom_type}"
         )
     if not geom.is_valid:
         geom = geom.buffer(0)
     return geom
 
 
-def arena_wgs84_tuple(geom: Any) -> Tuple[float, float, float, float]:
+def arena_wgs84_tuple(geom: Any) -> tuple[float, float, float, float]:
     """Формат ``RouteEngine._corridor_wgs84``: (min_lat, max_lat, min_lon, max_lon)."""
     b = geom.bounds  # minx, miny, maxx, maxy = lon
     min_lon, min_lat, max_lon, max_lat = b[0], b[1], b[2], b[3]
@@ -135,7 +131,7 @@ def arena_wgs84_tuple(geom: Any) -> Tuple[float, float, float, float]:
 
 
 def corridor_box_from_wgs84(
-    required_wgs84: Tuple[float, float, float, float],
+    required_wgs84: tuple[float, float, float, float],
 ) -> Any:
     """Прямоугольник коридора запроса в lon/lat."""
     min_lat, max_lat, min_lon, max_lon = required_wgs84
@@ -213,7 +209,7 @@ def area_green_edges_content_fingerprint(settings: Settings) -> str:
 
 def load_area_green_edges_bundle_meta(
     settings: Settings,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     p = area_green_edges_bundle_meta_path(settings)
     if not p.is_file():
         return None
@@ -225,9 +221,7 @@ def load_area_green_edges_bundle_meta(
         return None
 
 
-def area_green_edges_bundle_is_valid(
-    settings: Settings, edges_count: int
-) -> bool:
+def area_green_edges_bundle_is_valid(settings: Settings, edges_count: int) -> bool:
     """Файлы на месте, fingerprint и число рёбер совпадают с ожиданием."""
     meta = load_area_green_edges_bundle_meta(settings)
     if not meta or meta.get("schema") != AREA_GREEN_EDGES_SCHEMA:
@@ -243,7 +237,7 @@ def area_green_edges_bundle_is_valid(
 def save_area_green_edges_bundle(
     settings: Settings,
     cache_service: Any,
-    records: Dict[Any, Any],
+    records: dict[Any, Any],
     *,
     edge_count: int,
     green_fp: str,
@@ -261,7 +255,7 @@ def save_area_green_edges_bundle(
     mp = area_green_edges_bundle_meta_path(settings)
     tmp = mp.with_suffix(".json.tmp")
     sidecar = {
-        "built_at_utc": datetime.now(timezone.utc).isoformat(),
+        "built_at_utc": datetime.now(UTC).isoformat(),
         "edge_count": int(edge_count),
         "fingerprint": green_fp,
         "green_edges_quality_ok": bool(green_edges_quality_ok),
@@ -279,8 +273,8 @@ def save_area_green_edges_bundle(
 
 
 def persist_area_green_edges_if_snapshot(
-    application: "Application",
-) -> Dict[str, Any]:
+    application: Application,
+) -> dict[str, Any]:
     """После полного ``calculate_satellite_batch``: записать ``area_green_edges`` и поля для precache meta."""
     from ..services.green import normalize_edge_index_key
 
@@ -295,9 +289,7 @@ def persist_area_green_edges_if_snapshot(
     edge_count = len(snap)
     gfp = area_green_edges_content_fingerprint(s)
     n_semantic = int(q.get("edges_semantic_ok", 0))
-    ok_qual = bool(
-        q.get("persistable_for_cache") and q.get("all_edges_semantic_ok", False)
-    )
+    ok_qual = bool(q.get("persistable_for_cache") and q.get("all_edges_semantic_ok", False))
     norm = {normalize_edge_index_key(k): dict(v) for k, v in snap.items()}
     save_area_green_edges_bundle(
         s,
@@ -324,7 +316,7 @@ def persist_area_green_edges_if_snapshot(
     }
 
 
-def load_meta(settings: Settings) -> Optional[Dict[str, Any]]:
+def load_meta(settings: Settings) -> dict[str, Any] | None:
     p = meta_path(settings)
     if not p.is_file():
         return None
@@ -336,7 +328,7 @@ def load_meta(settings: Settings) -> Optional[Dict[str, Any]]:
         return None
 
 
-def meta_matches_current(meta: Dict[str, Any], settings: Settings) -> bool:
+def meta_matches_current(meta: dict[str, Any], settings: Settings) -> bool:
     if meta.get("schema") != AREA_PRECACHE_SCHEMA:
         return False
     cur = area_precache_content_fingerprint(settings)
@@ -352,16 +344,16 @@ def save_meta(
     edges: int,
     green_phase_pending: bool = False,
     graph_base_ready: bool = True,
-    green_quality_state: Optional[str] = None,
+    green_quality_state: str | None = None,
     invalid_tiles_rejected: int = 0,
     green_edges_semantic_ok_count: int = 0,
-    green_from_valid_imagery: Optional[bool] = None,
-    area_green_edges_fingerprint: Optional[str] = None,
-    area_green_edges_rel_path: Optional[str] = None,
-    area_green_edges_schema: Optional[str] = None,
-    green_edges_count: Optional[int] = None,
-    green_edges_complete: Optional[bool] = None,
-    green_edges_quality_ok: Optional[bool] = None,
+    green_from_valid_imagery: bool | None = None,
+    area_green_edges_fingerprint: str | None = None,
+    area_green_edges_rel_path: str | None = None,
+    area_green_edges_schema: str | None = None,
+    green_edges_count: int | None = None,
+    green_edges_complete: bool | None = None,
+    green_edges_quality_ok: bool | None = None,
 ) -> None:
     d = precache_area_dir(settings)
     d.mkdir(parents=True, exist_ok=True)
@@ -369,19 +361,12 @@ def save_meta(
     fp = area_precache_content_fingerprint(settings)
     gqs = green_quality_state or (
         "disabled"
-        if not (
-            settings.precache_area_use_green_graph
-            and not settings.disable_satellite_green
-        )
+        if not (settings.precache_area_use_green_graph and not settings.disable_satellite_green)
         else "unknown"
     )
-    expect_g = (
-        settings.precache_area_use_green_graph
-        and not settings.disable_satellite_green
-    )
+    expect_g = settings.precache_area_use_green_graph and not settings.disable_satellite_green
     stages = {
-        "completed": graph_base_ready
-        and ((not expect_g) or (gqs == "ok" and has_green_graph)),
+        "completed": graph_base_ready and ((not expect_g) or (gqs == "ok" and has_green_graph)),
         "graph_base_ready": graph_base_ready,
         "graph_green_ready": bool(has_green_graph and gqs == "ok"),
         "green_edges_ready": has_green_graph and gqs == "ok",
@@ -390,7 +375,7 @@ def save_meta(
     payload = {
         "arena_wgs84": list(arena_wgs84_tuple(geom)),
         "area_name": settings.precache_area_name,
-        "built_at_utc": datetime.now(timezone.utc).isoformat(),
+        "built_at_utc": datetime.now(UTC).isoformat(),
         "edges": edges,
         "fingerprint": fp,
         "graph_base_ready": graph_base_ready,
@@ -435,7 +420,7 @@ def _save_graphml(G: nx.MultiDiGraph, path: Path) -> None:
     tmp.replace(path)
 
 
-def load_graphml_path(path: Path) -> Optional[nx.MultiDiGraph]:
+def load_graphml_path(path: Path) -> nx.MultiDiGraph | None:
     if not path.is_file() or path.stat().st_size < 64:
         return None
     try:
@@ -476,10 +461,7 @@ def precache_area_is_complete(settings: Settings) -> bool:
         return False
     if not graph_base_path(settings).is_file():
         return False
-    expect_green = (
-        settings.precache_area_use_green_graph
-        and not settings.disable_satellite_green
-    )
+    expect_green = settings.precache_area_use_green_graph and not settings.disable_satellite_green
     green_p = graph_green_path(settings)
     has_green_file = green_p.is_file()
     gqs = (meta.get("green_quality_state") or "").strip()
@@ -516,7 +498,7 @@ def precache_area_is_complete(settings: Settings) -> bool:
     return False
 
 
-def _complete_green_only_from_base(application: "Application", geom: Any) -> Path:
+def _complete_green_only_from_base(application: Application, geom: Any) -> Path:
     """Доначитка ``graph_green`` из уже сохранённого ``graph_base`` (повтор после обрыва или только phase1)."""
     s = application.settings
     gb = application.graph_builder
@@ -543,9 +525,7 @@ def _complete_green_only_from_base(application: "Application", geom: Any) -> Pat
         )
         return precache_area_dir(s)
 
-    logger.info(
-        "area_precache: этап 2 — статическое озеленение (graph_green из graph_base)…"
-    )
+    logger.info("area_precache: этап 2 — статическое озеленение (graph_green из graph_base)…")
     G_work = G.copy()
     e2 = gb.to_geodataframe(G_work)
     e2 = gb.upgrade_edges_satellite_weights(e2)
@@ -603,7 +583,7 @@ def _complete_green_only_from_base(application: "Application", geom: Any) -> Pat
     return precache_area_dir(s)
 
 
-def ensure_area_precache(application: "Application") -> Path:
+def ensure_area_precache(application: Application) -> Path:
     """Идемпотентная подготовка: если кэш полный — выход; иначе сборка или только зелёная фаза."""
     s = application.settings
     cleanup_stale_precache_tmp_files(s)
@@ -743,9 +723,7 @@ def build_area_precache(application: Application) -> Path:
             green_edges_quality_ok=ag_meta.get("green_edges_quality_ok"),
         )
     elif s.precache_area_use_green_graph and s.disable_satellite_green:
-        logger.info(
-            "area_precache: DISABLE_SATELLITE_GREEN=true — graph_green не строится"
-        )
+        logger.info("area_precache: DISABLE_SATELLITE_GREEN=true — graph_green не строится")
         save_meta(
             s,
             geom,
@@ -757,13 +735,8 @@ def build_area_precache(application: Application) -> Path:
             green_from_valid_imagery=False,
         )
     else:
-        if (
-            s.precache_area_use_green_graph
-            and not application.green._tiles.pil_available
-        ):
-            logger.info(
-                "area_precache: Pillow недоступен — graph_green со спутником не строится"
-            )
+        if s.precache_area_use_green_graph and not application.green._tiles.pil_available:
+            logger.info("area_precache: Pillow недоступен — graph_green со спутником не строится")
         save_meta(
             s,
             geom,
@@ -778,7 +751,7 @@ def build_area_precache(application: Application) -> Path:
 
 
 def precache_corridor_fits_arena(
-    settings: Settings, required_wgs84: Tuple[float, float, float, float]
+    settings: Settings, required_wgs84: tuple[float, float, float, float]
 ) -> bool:
     """True, если ось-выровненный bbox коридора целиком внутри полигона арены."""
     try:
@@ -789,9 +762,7 @@ def precache_corridor_fits_arena(
     return bool(geom.covers(cb))
 
 
-def select_precache_graph_path(
-    settings: Settings, need_satellite: bool
-) -> Optional[Path]:
+def select_precache_graph_path(settings: Settings, need_satellite: bool) -> Path | None:
     """Какой graphml использовать; ``None`` — откат на live corridor."""
     g_green = graph_green_path(settings)
     g_base = graph_base_path(settings)
@@ -808,12 +779,9 @@ def select_precache_graph_path(
     return None
 
 
-def select_warmup_precache_graph_path(settings: Settings) -> Optional[Path]:
+def select_warmup_precache_graph_path(settings: Settings) -> Path | None:
     """Лучший graphml для предзагрузки при старте: зелёный при наличии и настройках, иначе base."""
-    if (
-        settings.precache_area_use_green_graph
-        and not settings.disable_satellite_green
-    ):
+    if settings.precache_area_use_green_graph and not settings.disable_satellite_green:
         p = select_precache_graph_path(settings, need_satellite=True)
         if p is not None:
             return p

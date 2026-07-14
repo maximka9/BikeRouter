@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, NamedTuple, Optional, Tuple
+from typing import Any, NamedTuple
 
 # Имена критериев (соответствие столбцам таблицы / экспорту route_*).
-CRITERION_KEYS: Tuple[str, ...] = (
+CRITERION_KEYS: tuple[str, ...] = (
     "base_route_factor",
     "slope_weather_factor",
     "surface_weather_factor",
@@ -44,7 +44,7 @@ class EdgeRouteCriteriaFactors:
     stairs_weather_factor: float = 1.0
     wind_orientation_factor: float = 1.0
 
-    def as_dict(self) -> Dict[str, float]:
+    def as_dict(self) -> dict[str, float]:
         return {k: float(getattr(self, k)) for k in CRITERION_KEYS}
 
 
@@ -93,9 +93,7 @@ def slope_route_weather_factor(edge_data: dict, weather: Any) -> float:
     return max(0.94, min(1.14, f))
 
 
-def stairs_route_weather_factor(
-    edge_data: dict, weather: Any, profile_key: str
-) -> float:
+def stairs_route_weather_factor(edge_data: dict, weather: Any, profile_key: str) -> float:
     """Лестницы: снег + дождь + ветер + ориентация к ветру + сезон (отдельный критерий)."""
     if not weather or not getattr(weather, "enabled", False):
         return 1.0
@@ -130,7 +128,7 @@ def stairs_route_weather_factor(
 
 def continuous_heat_edge_factor_and_split(
     edge_data: dict, weather: Any
-) -> Tuple[float, Dict[str, float]]:
+) -> tuple[float, dict[str, float]]:
     """Непрерывный heat-множитель ef и прокси-субмножители open/building/covered (для экспорта)."""
     from .heat import wet_surface_edge_slip_factor
     from .routing import _wind_dir_edge_pack
@@ -185,10 +183,7 @@ def continuous_heat_edge_factor_and_split(
     # Жара + ясное небо + почти без дождя — усилить open/tree/building на выборе маршрута.
     hot_clear_dry = min(
         1.0,
-        max(0.0, tn - 0.38)
-        * max(0.0, 1.0 - cn - 0.08)
-        * max(0.0, 0.48 - rn)
-        * 2.85,
+        max(0.0, tn - 0.38) * max(0.0, 1.0 - cn - 0.08) * max(0.0, 0.48 - rn) * 2.85,
     )
     rain_route = min(
         1.0,
@@ -219,7 +214,9 @@ def continuous_heat_edge_factor_and_split(
     wo = float(getattr(weather, "winter_heat_open_scale", 1.0))
     wwind = float(getattr(weather, "winter_heat_wind_scale", 1.0))
     ss = float(getattr(weather, "snow_model_strength", 0.0))
-    winter_cover_boost = 1.0 + ss * float(getattr(weather, "winter_covered_snow_bonus_amp", 0.12)) * C
+    winter_cover_boost = (
+        1.0 + ss * float(getattr(weather, "winter_covered_snow_bonus_amp", 0.12)) * C
+    )
     wcw = float(sig.get("wc_wet_slip", 0.0))
     wcm = float(sig.get("wc_mixed", 0.0))
     wc_open = float(getattr(weather, "wc_winter_open_sky_penalty_amp", 0.05))
@@ -260,8 +257,8 @@ def compute_edge_route_criteria(
     heat_context_mult: float,
     weather: Any,
     *,
-    physical_weight_key: Optional[str] = None,
-) -> Tuple[EdgeRouteCriteriaFactors, float, float, float]:
+    physical_weight_key: str | None = None,
+) -> tuple[EdgeRouteCriteriaFactors, float, float, float]:
     """Собрать критерии и базовые phys/heat/stress до α,β,γ (green — отдельный множитель к phys)."""
     from .routing import (
         coerce_edge_weight_numeric,
@@ -310,11 +307,7 @@ def compute_edge_route_criteria(
         tnx = float(sig_s.get("temp_norm", 0.0))
         rnx = float(sig_s.get("rain_norm", 0.0))
         cnx = float(sig_s.get("cloud_norm", 0.0))
-        hot_dry = (
-            max(0.0, tnx - 0.42)
-            * max(0.0, 1.0 - cnx - 0.12)
-            * max(0.0, 0.38 - rnx)
-        )
+        hot_dry = max(0.0, tnx - 0.42) * max(0.0, 1.0 - cnx - 0.12) * max(0.0, 0.38 - rnx)
         if ss0 < 0.05 and hot_dry > 0.015:
             stairs_f *= 1.0 + min(0.2, 0.55 * hot_dry)
     base_f = float(wm.physical) * float(wm.surface)
@@ -355,9 +348,7 @@ def compute_edge_route_criteria(
             td = max(0.0, min(1.0, td))
             canyon = max(0.0, min(1.0, B * (0.65 + 0.35 * (1.0 - O))))
             build_f = 1.0 - 0.22 * rs * cc * canyon * min(1.0, heat_deficit + 0.18)
-            hh = hh * build_f * (
-                1.0 + 0.16 * rs * (1.0 - td) * V * (0.6 + 0.4 * heat_deficit)
-            )
+            hh = hh * build_f * (1.0 + 0.16 * rs * (1.0 - td) * V * (0.6 + 0.4 * heat_deficit))
             open_f = cover_f = 1.0
         else:
             if wm.heat >= 1.03:

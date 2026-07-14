@@ -1,4 +1,4 @@
-﻿"""CLI for the experimental OSM surface ML recovery module.
+"""CLI for the experimental OSM surface ML recovery module.
 
 Run from the repository parent:
 
@@ -12,10 +12,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-import sys
-
-
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,5 +71,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-
-

@@ -1,4 +1,4 @@
-﻿"""Сравнение маршрутов с SURFACE_AI_RUNTIME off vs on.
+"""Сравнение маршрутов с SURFACE_AI_RUNTIME off vs on.
 
 Примеры::
 
@@ -12,20 +12,17 @@ import argparse
 import json
 import logging
 import os
-import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
-
-
-def _route_surface_shares(surfaces: Dict[str, int]) -> Dict[str, float]:
+def _route_surface_shares(surfaces: dict[str, int]) -> dict[str, float]:
     tot = sum(int(v) for v in surfaces.values()) if surfaces else 0
     if tot <= 0:
         return {}
     return {k: round(int(v) / tot, 4) for k, v in surfaces.items()}
 
 
-def _read_pairs_csv(path: str) -> List[Tuple[float, float, float, float]]:
+def _read_pairs_csv(path: str) -> list[tuple[float, float, float, float]]:
     import pandas as pd
 
     df = pd.read_csv(path)
@@ -48,18 +45,18 @@ def _read_pairs_csv(path: str) -> List[Tuple[float, float, float, float]]:
 
 def run_modes_for_pair(
     modes_csv: str,
-    start: Tuple[float, float],
-    end: Tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
     *,
     profile: str = "cyclist",
     mode: str = "full",
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     from bike_router.app import Application
     from bike_router.config import Settings
     from bike_router.engine import RouteEngine
 
     modes = [m.strip().lower() for m in modes_csv.split(",") if m.strip()]
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for m in modes:
         en = "true" if m == "on" else "false"
         os.environ["SURFACE_AI_RUNTIME_ENABLED"] = en
@@ -86,7 +83,7 @@ def run_modes_for_pair(
     return out
 
 
-def _compare_off_on(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _compare_off_on(rows: list[dict[str, Any]]) -> dict[str, Any]:
     by = {r["surface_ai_runtime"]: r for r in rows}
     off = by.get("off")
     on = by.get("on")
@@ -100,13 +97,11 @@ def _compare_off_on(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "delta_length_m": round(dlen, 2),
         "delta_length_percent": round(100.0 * dlen / len0, 4),
         "delta_weight_percent": round(100.0 * dwc / w0, 4),
-        "route_changed_bool": bool(
-            abs(dlen) > 1.0 or abs(dwc) > max(1e-3, 1e-4 * w0)
-        ),
+        "route_changed_bool": bool(abs(dlen) > 1.0 or abs(dwc) > max(1e-3, 1e-4 * w0)),
     }
 
 
-def run_modes(modes_csv: str) -> List[Dict[str, Any]]:
+def run_modes(modes_csv: str) -> list[dict[str, Any]]:
     """Одна пара START/END из Settings — плоский список по режимам (совместимость с route_batch_experiment)."""
     from bike_router.config import Settings
 
@@ -120,14 +115,14 @@ def run_modes(modes_csv: str) -> List[Dict[str, Any]]:
 
 def run_modes_multi_pairs(
     modes_csv: str,
-    pairs: List[Tuple[float, float, float, float]],
-) -> List[Dict[str, Any]]:
+    pairs: list[tuple[float, float, float, float]],
+) -> list[dict[str, Any]]:
     """Несколько O-D: каждая строка — pair_index, modes, compare_off_on."""
-    batch: List[Dict[str, Any]] = []
+    batch: list[dict[str, Any]] = []
     for i, tup in enumerate(pairs):
         slat, slon, elat, elon = tup
         rows = run_modes_for_pair(modes_csv, (slat, slon), (elat, elon))
-        item: Dict[str, Any] = {"pair_index": i, "modes": rows}
+        item: dict[str, Any] = {"pair_index": i, "modes": rows}
         cmp = _compare_off_on(rows)
         if cmp:
             item["compare_off_on"] = cmp
@@ -167,4 +162,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

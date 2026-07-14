@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,7 @@ _GREEN_JOB_FAILED: Any = None
 _TILE_FAIL: Any = None
 
 
-def _c(name: str, doc: str) -> Optional[Any]:
+def _c(name: str, doc: str) -> Any | None:
     try:
         from prometheus_client import Counter
 

@@ -1,7 +1,7 @@
 """Сервис работы с данными высот (SRTM)."""
 
 import logging
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import srtm
 
@@ -17,15 +17,15 @@ class ElevationService:
     ``srtm_cache_dir`` — куда сохранять HGT (по умолчанию в коде задаётся из ``Settings``).
     """
 
-    def __init__(self, srtm_cache_dir: Optional[str] = None) -> None:
+    def __init__(self, srtm_cache_dir: str | None = None) -> None:
         self._srtm_cache_dir = (srtm_cache_dir or "").strip() or None
-        self._data: Optional[srtm.data.GeoElevationData] = None
+        self._data: srtm.data.GeoElevationData | None = None
         self._cache: dict[tuple, float] = {}
 
     def init(
         self,
-        test_lat: Optional[float] = None,
-        test_lon: Optional[float] = None,
+        test_lat: float | None = None,
+        test_lon: float | None = None,
     ) -> None:
         """Загрузить данные SRTM и (опционально) проверить тестовую точку.
 
@@ -72,16 +72,14 @@ class ElevationService:
         lat_end: float,
     ) -> float:
         """Разница высот (конец − начало)."""
-        return self.get_elevation(lat_end, lon_end) - self.get_elevation(
-            lat_start, lon_start
-        )
+        return self.get_elevation(lat_end, lon_end) - self.get_elevation(lat_start, lon_start)
 
     def get_edge_elevation(
         self,
         geometry: Any,
         length_m: float,
         step_m: float = 30.0,
-    ) -> Tuple[float, float, float, list]:
+    ) -> tuple[float, float, float, list]:
         coords = list(geometry.coords)
 
         if length_m <= step_m * 1.5 or len(coords) < 2:

@@ -15,7 +15,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import requests
 
@@ -32,12 +32,10 @@ class GeocodingProvider(ABC):
     """Интерфейс для подмены провайдера геокодирования."""
 
     @abstractmethod
-    def forward(self, query: str, limit: int) -> List[GeocodingResult]:
-        ...
+    def forward(self, query: str, limit: int) -> list[GeocodingResult]: ...
 
     @abstractmethod
-    def reverse(self, lat: float, lon: float) -> Optional[GeocodingResult]:
-        ...
+    def reverse(self, lat: float, lon: float) -> GeocodingResult | None: ...
 
 
 class NominatimProvider(GeocodingProvider):
@@ -54,7 +52,7 @@ class NominatimProvider(GeocodingProvider):
     _SAMARA_LAT = 53.195878
     _SAMARA_LON = 50.151612
 
-    def forward(self, query: str, limit: int) -> List[GeocodingResult]:
+    def forward(self, query: str, limit: int) -> list[GeocodingResult]:
         resp = requests.get(
             f"{self.BASE}/search",
             params={
@@ -83,10 +81,10 @@ class NominatimProvider(GeocodingProvider):
         return self._prioritize_samara(out)
 
     @classmethod
-    def _prioritize_samara(cls, results: List[GeocodingResult]) -> List[GeocodingResult]:
+    def _prioritize_samara(cls, results: list[GeocodingResult]) -> list[GeocodingResult]:
         """Самара в названии и ближе к центру города — выше в списке."""
 
-        def key(r: GeocodingResult) -> Tuple[int, float]:
+        def key(r: GeocodingResult) -> tuple[int, float]:
             name = (r.display_name or "").lower()
             in_city = 0 if ("самара" in name or "samara" in name) else 1
             dlat = r.lat - cls._SAMARA_LAT
@@ -96,7 +94,7 @@ class NominatimProvider(GeocodingProvider):
 
         return sorted(results, key=key)
 
-    def reverse(self, lat: float, lon: float) -> Optional[GeocodingResult]:
+    def reverse(self, lat: float, lon: float) -> GeocodingResult | None:
         resp = requests.get(
             f"{self.BASE}/reverse",
             params={"lat": lat, "lon": lon, "format": "jsonv2"},
@@ -133,30 +131,28 @@ class GeocodingService:
 
     def __init__(
         self,
-        provider: Optional[GeocodingProvider] = None,
+        provider: GeocodingProvider | None = None,
         min_interval: float = 1.1,
         max_cache_size: int = 2048,
-        disk_cache_dir: Optional[str] = None,
-        settings: Optional[Any] = None,
+        disk_cache_dir: str | None = None,
+        settings: Any | None = None,
     ) -> None:
         self._provider = provider or NominatimProvider()
         self._settings = settings
         self._min_interval = min_interval
         self._max_cache = max_cache_size
 
-        self._fwd_cache: Dict[Tuple[str, int], List[GeocodingResult]] = {}
-        self._rev_cache: Dict[Tuple[float, float], GeocodingResult] = {}
+        self._fwd_cache: dict[tuple[str, int], list[GeocodingResult]] = {}
+        self._rev_cache: dict[tuple[float, float], GeocodingResult] = {}
 
         self._last_ts: float = 0.0
         self._lock = threading.Lock()
 
-        self._disk_dir: Optional[Path] = (
-            Path(disk_cache_dir) if disk_cache_dir else None
-        )
+        self._disk_dir: Path | None = Path(disk_cache_dir) if disk_cache_dir else None
         if self._disk_dir is not None:
             self._disk_dir.mkdir(parents=True, exist_ok=True)
 
-    def _retry_kw(self) -> Dict[str, Any]:
+    def _retry_kw(self) -> dict[str, Any]:
         st = self._settings
         if st is None:
             return {
@@ -177,14 +173,14 @@ class GeocodingService:
         h = hashlib.sha256(key_material.encode("utf-8")).hexdigest()[:32]
         return self._disk_dir / f"{prefix}_{h}.json"
 
-    def _disk_get_fwd(self, query: str, limit: int) -> Optional[List[GeocodingResult]]:
+    def _disk_get_fwd(self, query: str, limit: int) -> list[GeocodingResult] | None:
         if self._disk_dir is None:
             return None
         path = self._disk_path("fwd", f"{query.strip().lower()}\n{limit}")
         if not path.is_file():
             return None
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 raw = json.load(f)
             return [
                 GeocodingResult(lat=r["lat"], lon=r["lon"], display_name=r["display_name"])
@@ -193,7 +189,7 @@ class GeocodingService:
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             return None
 
-    def _disk_put_fwd(self, query: str, limit: int, results: List[GeocodingResult]) -> None:
+    def _disk_put_fwd(self, query: str, limit: int, results: list[GeocodingResult]) -> None:
         if self._disk_dir is None:
             return
         path = self._disk_path("fwd", f"{query.strip().lower()}\n{limit}")
@@ -211,14 +207,14 @@ class GeocodingService:
             except OSError:
                 pass
 
-    def _disk_get_rev(self, lat: float, lon: float) -> Optional[GeocodingResult]:
+    def _disk_get_rev(self, lat: float, lon: float) -> GeocodingResult | None:
         if self._disk_dir is None:
             return None
         path = self._disk_path("rev", f"{round(lat, 5)},{round(lon, 5)}")
         if not path.is_file():
             return None
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 r = json.load(f)
             return GeocodingResult(
                 lat=float(r["lat"]),
@@ -273,7 +269,7 @@ class GeocodingService:
             cache.pop(next(iter(cache)))
 
     @property
-    def cache_stats(self) -> Dict[str, int]:
+    def cache_stats(self) -> dict[str, int]:
         return {
             "forward_entries": len(self._fwd_cache),
             "reverse_entries": len(self._rev_cache),
@@ -281,7 +277,7 @@ class GeocodingService:
 
     # ── Публичный API ────────────────────────────────────────────
 
-    def geocode(self, query: str, limit: int = 5) -> List[GeocodingResult]:
+    def geocode(self, query: str, limit: int = 5) -> list[GeocodingResult]:
         """Прямое геокодирование (адрес → координаты) с LRU и дисковым кэшем."""
         key = (query.strip().lower(), limit)
         cached = self._lru_get(self._fwd_cache, key)
@@ -302,7 +298,7 @@ class GeocodingService:
         self._wait()
         rk = self._retry_kw()
 
-        def _fwd() -> List[GeocodingResult]:
+        def _fwd() -> list[GeocodingResult]:
             return self._provider.forward(query, limit)
 
         results = retry_call(
@@ -316,9 +312,7 @@ class GeocodingService:
         self._disk_put_fwd(query, limit, results)
         return results
 
-    def reverse_geocode(
-        self, lat: float, lon: float
-    ) -> Optional[GeocodingResult]:
+    def reverse_geocode(self, lat: float, lon: float) -> GeocodingResult | None:
         """Обратное геокодирование (координаты → адрес) с LRU и дисковым кэшем."""
         key = (round(lat, 5), round(lon, 5))
         cached = self._lru_get(self._rev_cache, key)
@@ -337,7 +331,7 @@ class GeocodingService:
         self._wait()
         rk = self._retry_kw()
 
-        def _rev() -> Optional[GeocodingResult]:
+        def _rev() -> GeocodingResult | None:
             return self._provider.reverse(lat, lon)
 
         result = retry_call(

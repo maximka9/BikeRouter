@@ -10,9 +10,9 @@ import hashlib
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from multiprocessing import Pool
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 _log = logging.getLogger(__name__)
 
@@ -22,9 +22,9 @@ def run_variants_over_weather_cases(
     script_stem: str,
     n_points: int,
     profiles_mode: str,
-    synthetic_weather_grid: Optional[List[Any]],
-    fixed_weather_kw: Optional[Dict[str, Any]],
-    live_weather_bundle: Optional[Tuple[Any, str, Any, str, float, float]],
+    synthetic_weather_grid: list[Any] | None,
+    fixed_weather_kw: dict[str, Any] | None,
+    live_weather_bundle: tuple[Any, str, Any, str, float, float] | None,
     weather_grid_label: str = "all",
     verbose: bool,
     log_every: int,
@@ -33,15 +33,17 @@ def run_variants_over_weather_cases(
     mp_weather_chunk_size: int,
     directed_pairs: bool,
     write_vertices: bool,
-    output_xlsx_suffix: Optional[str] = None,
+    output_xlsx_suffix: str | None = None,
     include_surface_ml_report: bool = False,
 ) -> str:
     """Один Excel: либо непустой ``synthetic_weather_grid``, либо ``fixed_weather_kw`` (одна погода)."""
+    import numpy as np
+    from tqdm import tqdm
+
     from bike_router.config import ROUTING_ALGO_VERSION, Settings, routing_engine_cache_fingerprint
     from bike_router.engine import RouteEngine
     from bike_router.exceptions import BikeRouterError, RouteNotFoundError
     from bike_router.services.area_graph_cache import parse_precache_polygon
-
     from bike_router.tools._experiment_common import (
         DEFAULT_MAX_SAMPLE_ATTEMPTS,
         DEFAULT_MIN_SPACING_M,
@@ -49,6 +51,12 @@ def run_variants_over_weather_cases(
         EXPECTED_VARIANTS,
         EXPERIMENT_CORRIDOR_EXPAND_M,
         SYNTHETIC_TEST_WEATHER_ISO,
+        _batch_profiles_from_arg,
+        _direction_key,
+        _iter_directed_pairs,
+        _iter_undirected_pairs,
+        _point_id_fmt,
+        _set_quiet_mode_for_batch,
         add_surface_ml_report_summary_means,
         build_heat_experiment_extra_sheet_blocks,
         build_heat_vs_green_by_weather_rows,
@@ -70,16 +78,7 @@ def run_variants_over_weather_cases(
         sample_points_in_polygon,
         write_route_vertices_csv_gzip,
         write_xlsx,
-        _batch_profiles_from_arg,
-        _direction_key,
-        _iter_directed_pairs,
-        _iter_undirected_pairs,
-        _point_id_fmt,
-        _set_quiet_mode_for_batch,
     )
-
-    import numpy as np
-    from tqdm import tqdm
 
     if synthetic_weather_grid is not None and fixed_weather_kw is not None:
         raise ValueError("Укажите только synthetic_weather_grid или только fixed_weather_kw")
@@ -91,9 +90,7 @@ def run_variants_over_weather_cases(
 
     settings = Settings()
     if not settings.has_precache_area_polygon:
-        raise SystemExit(
-            "В .env должен быть задан PRECACHE_AREA_POLYGON_WKT (полигон арены)."
-        )
+        raise SystemExit("В .env должен быть задан PRECACHE_AREA_POLYGON_WKT (полигон арены).")
 
     seed = int(DEFAULT_ROUTE_BATCH_SEED)
     min_spacing_m = float(DEFAULT_MIN_SPACING_M)
@@ -126,14 +123,14 @@ def run_variants_over_weather_cases(
     pair_iter = (
         _iter_directed_pairs(n_points) if directed_pairs else _iter_undirected_pairs(n_points)
     )
-    route_tasks: List[Tuple[int, int, str]] = [
+    route_tasks: list[tuple[int, int, str]] = [
         (i, j, prof) for i, j in pair_iter for prof in profile_tuple
     ]
     n_pairs = n_points * (n_points - 1) if directed_pairs else n_points * (n_points - 1) // 2
 
-    raw_rows: List[Dict[str, Any]] = []
-    vertices: List[Dict[str, Any]] = []
-    failures: List[Dict[str, Any]] = []
+    raw_rows: list[dict[str, Any]] = []
+    vertices: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     n_ok = n_fail = n_skip = 0
     route_id_counter = 1
 
@@ -143,7 +140,7 @@ def run_variants_over_weather_cases(
     _set_quiet_mode_for_batch(verbose)
 
     if use_synthetic:
-        grid: List[Any] = list(synthetic_weather_grid or [])
+        grid: list[Any] = list(synthetic_weather_grid or [])
         wg_label = "synthetic_grid"
         expected_routes = len(route_tasks) * len(grid) * len(EXPECTED_VARIANTS)
         total_steps = len(route_tasks) * len(grid)
@@ -280,8 +277,8 @@ def run_variants_over_weather_cases(
                             **wkw,
                         )
                         if include_surface_ml_report:
-                            alt, surface_report_by_mode = (
-                                call_with_route_surface_source_report(eng, call)
+                            alt, surface_report_by_mode = call_with_route_surface_source_report(
+                                eng, call
                             )
                         else:
                             alt = call()
@@ -396,9 +393,7 @@ def run_variants_over_weather_cases(
             )
 
             pls = [(float(p.lat), float(p.lon)) for p in points]
-            task_list = [
-                (experiment_id, seed, i, j, prof, fk) for i, j, prof in route_tasks
-            ]
+            task_list = [(experiment_id, seed, i, j, prof, fk) for i, j, prof in route_tasks]
             del eng
             gc.collect()
             _log.info(
@@ -470,8 +465,8 @@ def run_variants_over_weather_cases(
                         **fk,
                     )
                     if include_surface_ml_report:
-                        alt, surface_report_by_mode = (
-                            call_with_route_surface_source_report(eng, call)
+                        alt, surface_report_by_mode = call_with_route_surface_source_report(
+                            eng, call
                         )
                     else:
                         alt = call()
@@ -574,9 +569,9 @@ def run_variants_over_weather_cases(
     )
     wkt_fp = routing_engine_cache_fingerprint()
 
-    meta_rows: List[Tuple[str, Any]] = [
+    meta_rows: list[tuple[str, Any]] = [
         ("experiment_id", experiment_id),
-        ("started_at_utc", datetime.now(timezone.utc).isoformat()),
+        ("started_at_utc", datetime.now(UTC).isoformat()),
         ("seed", seed),
         ("n_points", n_points),
         ("n_od_pairs", n_pairs),
@@ -609,7 +604,9 @@ def run_variants_over_weather_cases(
     if use_synthetic:
         meta_rows.append(("n_weather_cases", len(grid)))
         meta_rows.append(("experiment_weather_grid", str(weather_grid_label)))
-        meta_rows.append(("synthetic_test_cases", len(grid)))  # дублирует n_weather_cases для совместимости с heat
+        meta_rows.append(
+            ("synthetic_test_cases", len(grid))
+        )  # дублирует n_weather_cases для совместимости с heat
         meta_rows.append(("synthetic_weather_time_iso", SYNTHETIC_TEST_WEATHER_ISO))
         meta_rows.append(("experiment_kind", "route_batch_combined"))
         heat_only = [r for r in raw_rows if str(r.get("variant_key")) == "heat"]
@@ -617,12 +614,10 @@ def run_variants_over_weather_cases(
         if heat_kpi:
             heat_kpi[0].update(build_heat_weather_kpi_extras_dict(heat_only))
         wrows = [
-            r
-            for r in raw_rows
-            if str(r.get("weather_test_case_id") or "").startswith("winter_")
+            r for r in raw_rows if str(r.get("weather_test_case_id") or "").startswith("winter_")
         ]
         winter_kpi = build_winter_kpi_rows(wrows) if wrows else None
-        extra_blocks: List[Tuple[str, List[Dict[str, Any]]]] = [
+        extra_blocks: list[tuple[str, list[dict[str, Any]]]] = [
             ("Влияние погоды на heat (по кейсу)", build_heat_weather_influence_rows(raw_rows)),
             ("Heat vs Green (по погодному кейсу)", build_heat_vs_green_by_weather_rows(raw_rows)),
             ("Средние по погодному кейсу", build_summaries_by_weather_case_id(raw_rows)),
@@ -678,9 +673,7 @@ def run_variants_over_weather_cases(
     return out
 
 
-def _append_vertices_for_row(
-    row: Dict[str, Any], rid: int, vertices: List[Dict[str, Any]]
-) -> None:
+def _append_vertices_for_row(row: dict[str, Any], rid: int, vertices: list[dict[str, Any]]) -> None:
     """Из geometry_json в raw_row (после MP строки уже содержат geometry)."""
     import json
 
@@ -703,8 +696,6 @@ def _append_vertices_for_row(
             )
 
 
-def _append_vertices_from_geometry_row(
-    row: Dict[str, Any], vertices: List[Dict[str, Any]]
-) -> None:
+def _append_vertices_from_geometry_row(row: dict[str, Any], vertices: list[dict[str, Any]]) -> None:
     rid = int(row.get("route_id") or 0)
     _append_vertices_for_row(row, rid, vertices)

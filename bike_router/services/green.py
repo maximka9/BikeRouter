@@ -6,7 +6,7 @@ import logging
 import os
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any
 
 import geopandas as gpd
 import numpy as np
@@ -36,9 +36,7 @@ def _is_trustworthy_edge_record(r: Any) -> bool:
     return st in (GREEN_EDGE_STATUS_VALID, GREEN_EDGE_STATUS_ZERO)
 
 
-def _edge_cache_covers_all_edges(
-    edge_cache: dict, index_arr: np.ndarray
-) -> bool:
+def _edge_cache_covers_all_edges(edge_cache: dict, index_arr: np.ndarray) -> bool:
     for idx in index_arr:
         r = edge_cache.get(idx)
         if r is None or not _is_trustworthy_edge_record(r):
@@ -82,16 +80,16 @@ class GreenAnalyzer:
         self._tiles = tile_service
         self._cache = cache_service
         self._settings = settings
-        self._satellite_warning: Optional[str] = None
+        self._satellite_warning: str | None = None
         # LRU при чтении масок с диска в цикле по рёбрам (без гигабайтного dict в RAM)
         self._tile_mask_read_lru: OrderedDict[
-            Tuple[int, int, int], Tuple[np.ndarray, np.ndarray]
+            tuple[int, int, int], tuple[np.ndarray, np.ndarray]
         ] = OrderedDict()
         self._tile_mask_read_lru_max: int = 8192
-        self._last_satellite_quality: Optional[Dict[str, Any]] = None
-        self._last_edge_cache_snapshot: Optional[Dict[Any, Any]] = None
+        self._last_satellite_quality: dict[str, Any] | None = None
+        self._last_edge_cache_snapshot: dict[Any, Any] | None = None
 
-    def consume_satellite_warning(self) -> Optional[str]:
+    def consume_satellite_warning(self) -> str | None:
         """Одноразово отдать предупреждение о неполных тайлах (режим green в ответе)."""
         w = self._satellite_warning
         self._satellite_warning = None
@@ -109,7 +107,7 @@ class GreenAnalyzer:
             return False
         return bool(q.get("persistable_for_cache"))
 
-    def last_satellite_quality_report(self) -> Optional[Dict[str, Any]]:
+    def last_satellite_quality_report(self) -> dict[str, Any] | None:
         """Снимок качества для meta.json area precache (может быть None до первого расчёта)."""
         return self._last_satellite_quality
 
@@ -130,8 +128,8 @@ class GreenAnalyzer:
             AREA_GREEN_EDGES_SCHEMA,
             area_green_edges_bundle_is_valid,
             area_green_edges_content_fingerprint,
-            load_area_green_edges_bundle_meta,
             area_green_edges_pkl_path,
+            load_area_green_edges_bundle_meta,
         )
 
         n = len(edges_gdf)
@@ -140,9 +138,7 @@ class GreenAnalyzer:
         side = load_area_green_edges_bundle_meta(self._settings)
         if not side or side.get("schema") != AREA_GREEN_EDGES_SCHEMA:
             return False
-        if side.get("fingerprint") != area_green_edges_content_fingerprint(
-            self._settings
-        ):
+        if side.get("fingerprint") != area_green_edges_content_fingerprint(self._settings):
             return False
 
         path = area_green_edges_pkl_path(self._settings).as_posix()
@@ -201,7 +197,7 @@ class GreenAnalyzer:
     # ==================================================================
 
     @staticmethod
-    def compute_vegetation_masks(img: Any) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    def compute_vegetation_masks(img: Any) -> tuple[np.ndarray, np.ndarray] | None:
         """Булевы маски деревьев **T** и травы **G** (H, W), взаимно не пересекаются."""
         if img is None:
             return None
@@ -219,27 +215,21 @@ class GreenAnalyzer:
         saturation = (max_rgb - min_rgb) / (max_rgb + 0.001)
 
         base_green = (
-            (ndi > 0.01)
-            & (exg > 1)
-            & (g > r)
-            & (g > 30)
-            & (brightness > 5)
-            & (brightness < 250)
+            (ndi > 0.01) & (exg > 1) & (g > r) & (g > 30) & (brightness > 5) & (brightness < 250)
         )
 
         trees_mask = base_green & (
-            (brightness < 120)
-            | ((brightness < 160) & (ndi > 0.05) & (saturation > 0.1))
+            (brightness < 120) | ((brightness < 160) & (ndi > 0.05) & (saturation > 0.1))
         )
-        grass_mask = base_green & ~trees_mask & (
-            (brightness >= 60) & (brightness < 220) & (ndi > 0.01)
+        grass_mask = (
+            base_green & ~trees_mask & ((brightness >= 60) & (brightness < 220) & (ndi > 0.01))
         )
         return trees_mask, grass_mask
 
     @staticmethod
     def analyze_image(
         img: Any,
-        mask: Optional[np.ndarray] = None,
+        mask: np.ndarray | None = None,
         return_details: bool = False,
     ) -> dict | float:
         """Доли зелени в %: при маске **M** — ``100·sum(M∩T)/sum(M)`` и аналогично трава."""
@@ -270,8 +260,8 @@ class GreenAnalyzer:
     @staticmethod
     def create_corridor_mask(
         edge_geom: Any,
-        tile_bounds: Tuple[float, ...],
-        img_size: Tuple[int, int],
+        tile_bounds: tuple[float, ...],
+        img_size: tuple[int, int],
         buffer_meters: int,
     ) -> np.ndarray:
         """Маска коридора вокруг линии дороги (для попиксельного анализа)."""
@@ -281,7 +271,7 @@ class GreenAnalyzer:
         min_lon, min_lat, max_lon, max_lat = tile_bounds
         w, h = img_size
 
-        def _to_pixel(lon: float, lat: float) -> Tuple[int, int]:
+        def _to_pixel(lon: float, lat: float) -> tuple[int, int]:
             px = int((lon - min_lon) / (max_lon - min_lon) * w)
             py = int((max_lat - lat) / (max_lat - min_lat) * h)
             return px, py
@@ -305,9 +295,7 @@ class GreenAnalyzer:
                 return
             pixels = [_to_pixel(lon, lat) for lon, lat in coords]
             for i in range(len(pixels) - 1):
-                draw.line(
-                    [pixels[i], pixels[i + 1]], fill=255, width=lw
-                )
+                draw.line([pixels[i], pixels[i + 1]], fill=255, width=lw)
 
         gt = getattr(edge_geom, "geom_type", None)
         if gt == "LineString":
@@ -322,9 +310,7 @@ class GreenAnalyzer:
     # Пакетный спутниковый анализ
     # ==================================================================
 
-    def calculate_satellite_batch(
-        self, edges_gdf: gpd.GeoDataFrame
-    ) -> gpd.GeoDataFrame:
+    def calculate_satellite_batch(self, edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """Пакетный расчёт зелени для каждого ребра по космоснимкам.
 
         1. Определяет покрывающие ребро TMS-тайлы.
@@ -367,21 +353,15 @@ class GreenAnalyzer:
             if geom is None:
                 continue
             b = geom.bounds
-            x1, y1 = self._tiles.lat_lon_to_tile(
-                b[3] + buf_deg, b[0] - buf_deg, zoom
-            )
-            x2, y2 = self._tiles.lat_lon_to_tile(
-                b[1] - buf_deg, b[2] + buf_deg, zoom
-            )
-            tiles = [
-                (x, y) for x in range(x1, x2 + 1) for y in range(y1, y2 + 1)
-            ]
+            x1, y1 = self._tiles.lat_lon_to_tile(b[3] + buf_deg, b[0] - buf_deg, zoom)
+            x2, y2 = self._tiles.lat_lon_to_tile(b[1] - buf_deg, b[2] + buf_deg, zoom)
+            tiles = [(x, y) for x in range(x1, x2 + 1) for y in range(y1, y2 + 1)]
             edge_tiles[idx] = tiles
 
         edge_cache = self._load_edge_cache(edges_gdf, zoom, buf_m)
         n_tg_fail_total = 0
 
-        tiles_needed: Set[Tuple[int, int]] = set()
+        tiles_needed: set[tuple[int, int]] = set()
         for pos in range(n_edges):
             idx = index_arr[pos]
             if idx in edge_cache:
@@ -390,7 +370,7 @@ class GreenAnalyzer:
             if tl:
                 tiles_needed.update(tl)
 
-        tile_masks: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]] = {}
+        tile_masks: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
         if _edge_cache_covers_all_edges(edge_cache, index_arr):
             logger.info(
                 "Все результаты в кэше (%d рёбер, семантика valid/zero)",
@@ -438,9 +418,7 @@ class GreenAnalyzer:
                     need_jpeg = {
                         xy
                         for xy in chunk_set
-                        if not self._tile_mask_cache_usable_without_image(
-                            xy[0], xy[1], zoom
-                        )
+                        if not self._tile_mask_cache_usable_without_image(xy[0], xy[1], zoom)
                     }
                 else:
                     need_jpeg = set(chunk_set)
@@ -485,11 +463,7 @@ class GreenAnalyzer:
                 )
                 logger.warning("%s", self._satellite_warning)
 
-            masks_done = (
-                len(tile_masks)
-                if not self._settings.cache_tile_analysis
-                else n_need
-            )
+            masks_done = len(tile_masks) if not self._settings.cache_tile_analysis else n_need
             logger.info(
                 "Маски T/G: готово %d / %d (tile_green_masks hit %d, miss %d, fail %d); "
                 "%% по коридору: 100·Σ(M∩T)/Σ(M)",
@@ -543,9 +517,9 @@ class GreenAnalyzer:
             sum_t = 0
             sum_g = 0
             missing_tile_mask = False
-            ram_masks: Optional[
-                Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]]
-            ] = None if self._settings.cache_tile_analysis else tile_masks
+            ram_masks: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] | None = (
+                None if self._settings.cache_tile_analysis else tile_masks
+            )
             for tx, ty in edge_tiles[idx]:
                 pair = self._resolve_tile_masks_pair(tx, ty, zoom, ram_masks)
                 if pair is None:
@@ -556,9 +530,7 @@ class GreenAnalyzer:
                 tb = self._tiles.get_tile_bounds(tx, ty, zoom)
 
                 if self._settings.analyze_corridor:
-                    m_arr = self.create_corridor_mask(
-                        geom, tb, (w, h), buf_m
-                    )
+                    m_arr = self.create_corridor_mask(geom, tb, (w, h), buf_m)
                     mb = m_arr > 0
                 else:
                     mb = np.ones((h, w), dtype=bool)
@@ -599,15 +571,11 @@ class GreenAnalyzer:
         logger.info("Спутник: агрегация по рёбрам коридора завершена (%d шт.)", n_edges)
 
         # Строгость: сбой маски / HTTP или warning → не сохраняем «полный» кэш (см. docstring).
-        skip_edge_persist = (
-            self._satellite_warning is not None or n_tg_fail_total > 0
-        )
+        skip_edge_persist = self._satellite_warning is not None or n_tg_fail_total > 0
         all_semantic_ok = _edge_cache_covers_all_edges(edge_cache, index_arr)
         persistable = (not skip_edge_persist) and all_semantic_ok
         n_trust = sum(
-            1
-            for idx in index_arr
-            if _is_trustworthy_edge_record(edge_cache.get(idx, {}))
+            1 for idx in index_arr if _is_trustworthy_edge_record(edge_cache.get(idx, {}))
         )
         self._last_satellite_quality = {
             "invalid_tiles_total": 0,
@@ -644,16 +612,12 @@ class GreenAnalyzer:
 
     def _tile_mask_cache_path(self, tx: int, ty: int, zoom: int) -> str:
         key = hashlib.sha256(
-            f"{self._settings.tms_server!s}|{zoom}|{tx}|{ty}|{TILE_VEG_MASK_VERSION}".encode(
-                "utf-8"
-            )
+            f"{self._settings.tms_server!s}|{zoom}|{tx}|{ty}|{TILE_VEG_MASK_VERSION}".encode()
         ).hexdigest()[:28]
         sub = os.path.join(self._cache.cache_dir, "tile_green_masks")
         return os.path.join(sub, f"{key}.npz")
 
-    def _tile_mask_cache_usable_without_image(
-        self, tx: int, ty: int, zoom: int
-    ) -> bool:
+    def _tile_mask_cache_usable_without_image(self, tx: int, ty: int, zoom: int) -> bool:
         """Есть ли файл маски — тогда JPEG не качаем (разбор .npz в воркере)."""
         if not self._settings.cache_tile_analysis or self._settings.force_recalculate:
             return False
@@ -661,7 +625,7 @@ class GreenAnalyzer:
 
     def _load_green_tile_masks_npz(
         self, tx: int, ty: int, zoom: int
-    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    ) -> tuple[np.ndarray, np.ndarray] | None:
         """Чтение готовых масок с диска (без PIL), для агрегации при CACHE_TILE_ANALYSIS."""
         path = self._tile_mask_cache_path(tx, ty, zoom)
         if not os.path.isfile(path):
@@ -682,8 +646,8 @@ class GreenAnalyzer:
         tx: int,
         ty: int,
         zoom: int,
-        ram: Optional[Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]]],
-    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        ram: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] | None,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
         if ram is not None:
             return ram.get((tx, ty))
         key = (tx, ty, zoom)
@@ -701,7 +665,7 @@ class GreenAnalyzer:
 
     def _get_or_compute_tile_masks(
         self, img: Any, tx: int, ty: int, zoom: int
-    ) -> Tuple[Optional[Tuple[np.ndarray, np.ndarray]], str]:
+    ) -> tuple[tuple[np.ndarray, np.ndarray] | None, str]:
         """Один раз NDI/ExG на тайл; чтение/запись ``.npz``.
 
         Returns:
@@ -741,26 +705,23 @@ class GreenAnalyzer:
 
     def _parallel_build_tile_masks(
         self,
-        tile_images: Dict[Tuple[int, int], Any],
+        tile_images: dict[tuple[int, int], Any],
         zoom: int,
-        all_tiles: Set[Tuple[int, int]],
-    ) -> Tuple[
-        Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]],
+        all_tiles: set[tuple[int, int]],
+    ) -> tuple[
+        dict[tuple[int, int], tuple[np.ndarray, np.ndarray]],
         int,
         int,
         int,
     ]:
         """Собрать маски по тайлам; счётчики cache hit / compute / fail (нет снимка или NDI)."""
-        out: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]] = {}
+        out: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
         n_cache = n_compute = n_fail = 0
         tiles_list = list(all_tiles)
         workers = max(1, self._settings.tile_download_threads)
 
-        def job(xy: Tuple[int, int]):
-            if (
-                self._settings.cache_tile_analysis
-                and not self._settings.force_recalculate
-            ):
+        def job(xy: tuple[int, int]):
+            if self._settings.cache_tile_analysis and not self._settings.force_recalculate:
                 cached = self._load_green_tile_masks_npz(xy[0], xy[1], zoom)
                 if cached is not None:
                     return xy, cached, "cache"
@@ -784,9 +745,7 @@ class GreenAnalyzer:
                     out[xy] = pair
         return out, n_cache, n_compute, n_fail
 
-    def _edge_cache_path(
-        self, edges_gdf: gpd.GeoDataFrame, zoom: int, buf_m: int
-    ) -> str:
+    def _edge_cache_path(self, edges_gdf: gpd.GeoDataFrame, zoom: int, buf_m: int) -> str:
         """Путь к pickle кэша по bbox + параметрам анализа (в т.ч. TMS и алгоритм)."""
         bounds = edges_gdf.total_bounds
         payload = {
@@ -801,18 +760,14 @@ class GreenAnalyzer:
             "zoom": int(zoom),
         }
         h = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         sub = os.path.join(self._cache.cache_dir, "green_edges")
         os.makedirs(sub, exist_ok=True)
         return os.path.join(sub, f"{h}.pkl")
 
     @staticmethod
-    def _edge_cache_is_degenerate_all_zeros(
-        cached: Dict[Any, Any], n_edges: int
-    ) -> bool:
+    def _edge_cache_is_degenerate_all_zeros(cached: dict[Any, Any], n_edges: int) -> bool:
         """Полный кэш из нулей без подтверждённой семантики — часто артефакт сбоя тайлов/TMS.
 
         ``confirmed_zero_green`` с нулевыми процентами — валидно и не считается дегенератом.
@@ -834,9 +789,7 @@ class GreenAnalyzer:
             return True
         return False
 
-    def _load_edge_cache(
-        self, edges_gdf: gpd.GeoDataFrame, zoom: int, buf_m: int
-    ) -> dict:
+    def _load_edge_cache(self, edges_gdf: gpd.GeoDataFrame, zoom: int, buf_m: int) -> dict:
         if not self._settings.cache_tile_analysis:
             return {}
         if self._settings.force_recalculate:
@@ -864,8 +817,9 @@ class GreenAnalyzer:
                 len(cached),
             )
             n_edges = len(edges_gdf)
-            if self._settings.green_edge_reject_all_zero_cache and self._edge_cache_is_degenerate_all_zeros(
-                cached, n_edges
+            if (
+                self._settings.green_edge_reject_all_zero_cache
+                and self._edge_cache_is_degenerate_all_zeros(cached, n_edges)
             ):
                 logger.warning(
                     "green_edges: игнорируем pickle — полный кэш только из нулей "
@@ -940,8 +894,7 @@ class GreenAnalyzer:
     @staticmethod
     def _log_green_stats(gdf: gpd.GeoDataFrame, buf_m: int) -> None:
         logger.info(
-            "Статистика зелени (коридор %dм): "
-            "деревья=%.1f%%, трава=%.1f%%, всего=%.1f%%",
+            "Статистика зелени (коридор %dм): деревья=%.1f%%, трава=%.1f%%, всего=%.1f%%",
             buf_m,
             gdf["trees_percent"].mean(),
             gdf["grass_percent"].mean(),

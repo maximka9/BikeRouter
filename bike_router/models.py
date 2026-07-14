@@ -8,10 +8,9 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 # ── Перечисления ─────────────────────────────────────────────────
 
@@ -77,22 +76,22 @@ class AlternativesRequest(BaseModel):
         True,
         description="False — только кратчайший и энергетический, без спутника и без зелёного маршрута",
     )
-    departure_time: Optional[str] = Field(
+    departure_time: str | None = Field(
         default=None,
         description="ISO 8601 локального времени, напр. 2026-07-15T13:00:00 — выбор теплового слота",
     )
-    time_slot: Optional[str] = Field(
+    time_slot: str | None = Field(
         default=None,
         description="Явный слот: morning | noon | evening | night (если задан — важнее departure_time)",
     )
-    season: Optional[SeasonEnum] = Field(
+    season: SeasonEnum | None = Field(
         default=None,
         description=(
             "Сезон для множителя тепла (summer | spring_autumn). "
             "Если не задан — берётся из weather_time / departure_time / даты сервера."
         ),
     )
-    air_temperature_c: Optional[float] = Field(
+    air_temperature_c: float | None = Field(
         default=None,
         description="Опционально: температура воздуха °C для поправки тепловой модели",
     )
@@ -104,35 +103,33 @@ class AlternativesRequest(BaseModel):
         default=False,
         description="Если true — как auto (прогноз/кэш по координатам и времени)",
     )
-    weather_time: Optional[str] = Field(
+    weather_time: str | None = Field(
         default=None,
         description="ISO 8601 — время для почасовой погоды (иначе departure_time)",
     )
-    temperature_c: Optional[float] = Field(default=None, description="Ручая погода °C")
-    apparent_temperature_c: Optional[float] = Field(
+    temperature_c: float | None = Field(default=None, description="Ручая погода °C")
+    apparent_temperature_c: float | None = Field(
         default=None,
         description="Ощущаемая температура °C (manual/fixed-snapshot); для heat как Teff",
     )
-    precipitation_mm: Optional[float] = Field(default=None, description="Осадки мм/ч (ручной режим)")
-    wind_speed_ms: Optional[float] = Field(default=None, description="Ветер м/с")
-    wind_direction_deg: Optional[float] = Field(
+    precipitation_mm: float | None = Field(default=None, description="Осадки мм/ч (ручной режим)")
+    wind_speed_ms: float | None = Field(default=None, description="Ветер м/с")
+    wind_direction_deg: float | None = Field(
         default=None,
         description="Направление ветра ° (метео: откуда дует), для manual/fixed-snapshot",
     )
-    cloud_cover_pct: Optional[float] = Field(default=None, description="Облачность %")
-    humidity_pct: Optional[float] = Field(default=None, description="Влажность %")
-    wind_gusts_ms: Optional[float] = Field(default=None, description="Порывы ветра м/с")
-    shortwave_radiation_wm2: Optional[float] = Field(
+    cloud_cover_pct: float | None = Field(default=None, description="Облачность %")
+    humidity_pct: float | None = Field(default=None, description="Влажность %")
+    wind_gusts_ms: float | None = Field(default=None, description="Порывы ветра м/с")
+    shortwave_radiation_wm2: float | None = Field(
         default=None, description="КВ радиация Вт/м² (ручной снимок)"
     )
-    snowfall_cm_h: Optional[float] = Field(
-        default=None, description="Снегопад см/ч (ручной снимок)"
-    )
-    snow_depth_m: Optional[float] = Field(
+    snowfall_cm_h: float | None = Field(default=None, description="Снегопад см/ч (ручной снимок)")
+    snow_depth_m: float | None = Field(
         default=None,
         description="Глубина снега м (модельная; ручной снимок)",
     )
-    weather_code: Optional[int] = Field(
+    weather_code: int | None = Field(
         default=None, description="Код погоды WMO (Open-Meteo), опционально"
     )
 
@@ -144,37 +141,37 @@ class AlternativesStartRequest(BaseModel):
     end: LatLon
     profile: ProfileEnum = ProfileEnum.cyclist
     green_enabled: bool = True
-    departure_time: Optional[str] = Field(
+    departure_time: str | None = Field(
         default=None,
         description="ISO 8601 локального времени выезда",
     )
-    time_slot: Optional[str] = Field(
+    time_slot: str | None = Field(
         default=None,
         description="Явный слот (важнее departure_time, если задан)",
     )
-    season: Optional[SeasonEnum] = Field(
+    season: SeasonEnum | None = Field(
         default=None,
         description="Сезон для тепла; None — как в POST /alternatives (по датам запроса)",
     )
-    air_temperature_c: Optional[float] = Field(
+    air_temperature_c: float | None = Field(
         default=None,
         description="Температура воздуха °C (опционально)",
     )
     weather_mode: str = Field(default="none")
     use_live_weather: bool = False
-    weather_time: Optional[str] = None
-    temperature_c: Optional[float] = None
-    apparent_temperature_c: Optional[float] = None
-    precipitation_mm: Optional[float] = None
-    wind_speed_ms: Optional[float] = None
-    cloud_cover_pct: Optional[float] = None
-    humidity_pct: Optional[float] = None
-    wind_gusts_ms: Optional[float] = None
-    wind_direction_deg: Optional[float] = None
-    shortwave_radiation_wm2: Optional[float] = None
-    snowfall_cm_h: Optional[float] = None
-    snow_depth_m: Optional[float] = None
-    weather_code: Optional[int] = None
+    weather_time: str | None = None
+    temperature_c: float | None = None
+    apparent_temperature_c: float | None = None
+    precipitation_mm: float | None = None
+    wind_speed_ms: float | None = None
+    cloud_cover_pct: float | None = None
+    humidity_pct: float | None = None
+    wind_gusts_ms: float | None = None
+    wind_direction_deg: float | None = None
+    shortwave_radiation_wm2: float | None = None
+    snowfall_cm_h: float | None = None
+    snow_depth_m: float | None = None
+    weather_code: int | None = None
 
 
 class AlternativesStartResponse(BaseModel):
@@ -187,12 +184,12 @@ class AlternativesStartResponse(BaseModel):
             "done | failed"
         ),
     )
-    routes: List["RouteResponse"] = Field(default_factory=list)
-    pending: List[str] = Field(
+    routes: list[RouteResponse] = Field(default_factory=list)
+    pending: list[str] = Field(
         default_factory=list,
         description="Режимы, ещё не пришедшие в ответе (напр. green, heat при progressive 2.0)",
     )
-    criteria_bundle: Optional[Dict[str, List["RouteResponse"]]] = Field(
+    criteria_bundle: dict[str, list[RouteResponse]] | None = Field(
         default=None,
         description="При include_criteria_bundle — набор маршрутов по критериям",
     )
@@ -201,14 +198,14 @@ class AlternativesStartResponse(BaseModel):
 class AlternativesJobResponse(BaseModel):
     job_id: str
     status: str
-    routes: List["RouteResponse"] = Field(default_factory=list)
-    pending: List[str] = Field(default_factory=list)
-    error: Optional[ErrorDetail] = None
-    green_warning: Optional[str] = Field(
+    routes: list[RouteResponse] = Field(default_factory=list)
+    pending: list[str] = Field(default_factory=list)
+    error: ErrorDetail | None = None
+    green_warning: str | None = Field(
         default=None,
         description="Если зелёный маршрут не удалось добавить",
     )
-    criteria_bundle: Optional[Dict[str, List["RouteResponse"]]] = Field(
+    criteria_bundle: dict[str, list[RouteResponse]] | None = Field(
         default=None,
         description="Сравнение критериев (если было в запросе)",
     )
@@ -233,12 +230,8 @@ class ElevationMetrics(BaseModel):
         ...,
         description="Средний |уклон| по тем же валидным сегментам (%)",
     )
-    max_above_start_m: float = Field(
-        ..., description="Макс. подъём относительно старта (м)"
-    )
-    max_below_start_m: float = Field(
-        ..., description="Макс. спуск относительно старта (м, ≤0)"
-    )
+    max_above_start_m: float = Field(..., description="Макс. подъём относительно старта (м)")
+    max_below_start_m: float = Field(..., description="Макс. спуск относительно старта (м, ≤0)")
     end_diff_m: float = Field(..., description="Перепад старт→финиш (м)")
 
 
@@ -248,7 +241,7 @@ class GreenMetrics(BaseModel):
     percent: float = Field(..., description="Доля озеленённых рёбер (%)")
     avg_trees_pct: float = Field(..., description="Средняя доля деревьев (%)")
     avg_grass_pct: float = Field(..., description="Средняя доля травы (%)")
-    categories: Dict[str, int] = Field(
+    categories: dict[str, int] = Field(
         default_factory=dict, description="Категории озеленения → кол-во рёбер"
     )
 
@@ -263,10 +256,10 @@ class StairsInfo(BaseModel):
 class SurfaceBreakdown(BaseModel):
     """Распределение покрытий и типов дорог."""
 
-    surfaces: Dict[str, int] = Field(
+    surfaces: dict[str, int] = Field(
         default_factory=dict, description="Покрытие → кол-во рёбер на маршруте"
     )
-    highways: Dict[str, int] = Field(
+    highways: dict[str, int] = Field(
         default_factory=dict, description="Тип дороги → кол-во рёбер на маршруте"
     )
     na_fraction: float = Field(
@@ -311,7 +304,7 @@ class CombinedCostBreakdown(BaseModel):
         default=1.0,
         description="κ: сезон и/или температура",
     )
-    weather_multipliers: Optional[Dict[str, float]] = Field(
+    weather_multipliers: dict[str, float] | None = Field(
         default=None,
         description="Погодные множители (если режим погоды включён)",
     )
@@ -327,7 +320,7 @@ class RoutingContextMeta(BaseModel):
         default="",
         description="Служебная метка режима построения (например heat, full)",
     )
-    air_temperature_c: Optional[float] = None
+    air_temperature_c: float | None = None
     heat_context_multiplier: float = 1.0
     thermal_model_proxy: bool = Field(
         default=False,
@@ -339,21 +332,21 @@ class WeatherSnapshotValues(BaseModel):
     """Нормализованные поля погоды в ответе API."""
 
     temperature_c: float = 20.0
-    apparent_temperature_c: Optional[float] = None
+    apparent_temperature_c: float | None = None
     precipitation_mm: float = 0.0
-    precipitation_probability: Optional[float] = None
+    precipitation_probability: float | None = None
     wind_speed_ms: float = 3.0
-    wind_gusts_ms: Optional[float] = None
-    wind_direction_deg: Optional[float] = Field(
+    wind_gusts_ms: float | None = None
+    wind_direction_deg: float | None = Field(
         default=None,
         description="Направление ветра ° по Open-Meteo: откуда дует (0° — север), не куда",
     )
     cloud_cover_pct: float = 50.0
     humidity_pct: float = 60.0
-    shortwave_radiation_wm2: Optional[float] = None
+    shortwave_radiation_wm2: float | None = None
     snowfall_cm_h: float = 0.0
     snow_depth_m: float = 0.0
-    weather_code: Optional[int] = None
+    weather_code: int | None = None
 
 
 class WeatherRouteContext(BaseModel):
@@ -365,13 +358,13 @@ class WeatherRouteContext(BaseModel):
         description="none | auto | manual",
     )
     use_live_weather: bool = False
-    weather_time: Optional[str] = Field(
+    weather_time: str | None = Field(
         default=None,
         description="ISO 8601 — момент, для которого взята погода",
     )
     source: str = Field(default="", description="open_meteo | manual | none | …")
-    snapshot: Optional[WeatherSnapshotValues] = None
-    multipliers: Dict[str, float] = Field(
+    snapshot: WeatherSnapshotValues | None = None
+    multipliers: dict[str, float] = Field(
         default_factory=dict,
         description="physical, heat, green, stress, surface",
     )
@@ -383,7 +376,7 @@ class WeatherRouteContext(BaseModel):
         default=False,
         description="Непрерывная тепло-микроклиматическая модель рёбер включена",
     )
-    heat_microclimate: Dict[str, float] = Field(
+    heat_microclimate: dict[str, float] = Field(
         default_factory=dict,
         description="Коэффициенты и нормированные сигналы (tree_shade_bonus, temp_norm, …)",
     )
@@ -427,7 +420,9 @@ class WeatherRouteContext(BaseModel):
         default=0.0,
         description="Сила зимней snow-модели 0..1",
     )
-    snow_export_phys_amp: float = Field(default=1.0, description="Глобальный множитель физики от снега")
+    snow_export_phys_amp: float = Field(
+        default=1.0, description="Глобальный множитель физики от снега"
+    )
     snow_export_stress_amp: float = Field(
         default=1.0, description="Глобальный множитель stress от снега"
     )
@@ -590,7 +585,7 @@ class HeatStressMetrics(BaseModel):
         default=0.0,
         description="α·physical + β·heat·κ + γ·stress + δ·turn",
     )
-    combined_breakdown: Optional[CombinedCostBreakdown] = Field(
+    combined_breakdown: CombinedCostBreakdown | None = Field(
         default=None,
         description="Детализация для heat_stress",
     )
@@ -599,7 +594,7 @@ class HeatStressMetrics(BaseModel):
 class RouteQualityHints(BaseModel):
     """Предупреждения о полноте OSM и эвристиках вдоль маршрута."""
 
-    warnings: List[str] = Field(
+    warnings: list[str] = Field(
         default_factory=list,
         description="Тексты для показа пользователю",
     )
@@ -613,33 +608,25 @@ class RouteQualityHints(BaseModel):
         0.0,
         ge=0.0,
         le=1.0,
-        description=(
-            "Доля длины без surface или с неизвестным значением — коэффициент 1.0"
-        ),
+        description=("Доля длины без surface или с неизвестным значением — коэффициент 1.0"),
     )
     inferred_highway_fraction: float = Field(
         0.0,
         ge=0.0,
         le=1.0,
-        description=(
-            "Доля длины без highway или с неизвестным типом — коэффициент 1.0"
-        ),
+        description=("Доля длины без highway или с неизвестным типом — коэффициент 1.0"),
     )
 
 
 class MapLayersGeoJSON(BaseModel):
     """GeoJSON-слои сегментов выбранного маршрута (для MapLibre / аналитики)."""
 
-    greenery: Dict[str, Any] = Field(
-        ..., description="Сегменты с заметным озеленением"
-    )
-    stairs: Dict[str, Any] = Field(..., description="highway=steps")
-    problematic: Dict[str, Any] = Field(
+    greenery: dict[str, Any] = Field(..., description="Сегменты с заметным озеленением")
+    stairs: dict[str, Any] = Field(..., description="highway=steps")
+    problematic: dict[str, Any] = Field(
         ..., description="Крутые уклоны или магистрали/второстепенки с трафиком"
     )
-    na_surface: Dict[str, Any] = Field(
-        ..., description="Нет тега surface в OSM"
-    )
+    na_surface: dict[str, Any] = Field(..., description="Нет тега surface в OSM")
 
 
 # ── Основной ответ ───────────────────────────────────────────────
@@ -658,56 +645,50 @@ class RouteResponse(BaseModel):
         default="",
         description="Человекочитаемая подпись варианта (для UI)",
     )
-    variant_note_ru: Optional[str] = Field(
+    variant_note_ru: str | None = Field(
         default=None,
         description="Краткое пояснение режима (например, отличие теплового от зелёного)",
     )
-    effect_summary_ru: Optional[str] = Field(
+    effect_summary_ru: str | None = Field(
         default=None,
         description="Краткое сравнение с базовым (кратчайшим) маршрутом, без чисел модели",
     )
-    geometry: List[List[float]] = Field(
-        ..., description="Полилиния маршрута [[lat, lon], ...]"
-    )
+    geometry: list[list[float]] = Field(..., description="Полилиния маршрута [[lat, lon], ...]")
     length_m: float = Field(..., description="Длина маршрута (м)")
     time_s: float = Field(..., description="Оценка времени (с)")
-    time_display: str = Field(
-        ..., description="Человекочитаемое время, напр. '12 мин 30 сек'"
-    )
-    cost: float = Field(
-        ..., description="Стоимость маршрута (единицы энерго-модели)"
-    )
+    time_display: str = Field(..., description="Человекочитаемое время, напр. '12 мин 30 сек'")
+    cost: float = Field(..., description="Стоимость маршрута (единицы энерго-модели)")
     elevation: ElevationMetrics
     green: GreenMetrics
     stairs: StairsInfo
     surfaces: SurfaceBreakdown
-    elevation_profile: List[ElevationPoint] = Field(
+    elevation_profile: list[ElevationPoint] = Field(
         ..., description="Профиль высот (абсолютные высоты)"
     )
-    map_layers: Optional[MapLayersGeoJSON] = Field(
+    map_layers: MapLayersGeoJSON | None = Field(
         default=None,
         description="Слои карты: озеленение, лестницы, проблемные участки, N/A surface",
     )
-    quality_hints: Optional[RouteQualityHints] = Field(
+    quality_hints: RouteQualityHints | None = Field(
         default=None,
         description="Предупреждения о качестве данных OSM и fallback-коэффициентах",
     )
-    surface_resolution: Optional[Dict[str, Any]] = Field(
+    surface_resolution: dict[str, Any] | None = Field(
         default=None,
         description=(
             "Сводка источников покрытия по графу после последнего расчёта весов "
             "(osm_share, ml_share, heuristic_share, unknown_share, ml_avg_confidence, ml_rejected_edges)"
         ),
     )
-    heat_stress: Optional[HeatStressMetrics] = Field(
+    heat_stress: HeatStressMetrics | None = Field(
         default=None,
         description="Заполняется для критериев heat, stress, heat_stress",
     )
-    routing_context: Optional[RoutingContextMeta] = Field(
+    routing_context: RoutingContextMeta | None = Field(
         default=None,
         description="Слот, сезон, κ и профиль",
     )
-    weather: Optional[WeatherRouteContext] = Field(
+    weather: WeatherRouteContext | None = Field(
         default=None,
         description="Погодный контекст и множители (если запрошено)",
     )
@@ -752,7 +733,7 @@ class RouteResponse(BaseModel):
         default=0,
         description="Число значимых поворотов (дублирует heat_stress.turn_count при наличии)",
     )
-    route_built_at_utc: Optional[str] = Field(
+    route_built_at_utc: str | None = Field(
         default=None,
         description="Момент построения этого варианта на сервере (UTC, ISO 8601); для UI «Построен: …»",
     )
@@ -761,12 +742,12 @@ class RouteResponse(BaseModel):
 class AlternativesResponse(BaseModel):
     """Несколько вариантов маршрута для одного профиля (обычно 2–3 шт.)."""
 
-    routes: List[RouteResponse] = Field(
+    routes: list[RouteResponse] = Field(
         ...,
         description="Список вариантов: оптимальный, зелёный, кратчайший по длине или альтернатива",
         min_length=1,
     )
-    criteria_bundle: Optional[Dict[str, List[RouteResponse]]] = Field(
+    criteria_bundle: dict[str, list[RouteResponse]] | None = Field(
         default=None,
         description="При include_criteria_bundle: сравнение критериев по ключам",
     )
@@ -800,8 +781,8 @@ class HealthResponse(BaseModel):
     graph_loaded: bool
     nodes: int = 0
     edges: int = 0
-    profiles: List[str] = Field(default_factory=list)
-    graph_built_at_utc: Optional[str] = Field(
+    profiles: list[str] = Field(default_factory=list)
+    graph_built_at_utc: str | None = Field(
         default=None,
         description="Момент последней сборки графа на сервере (UTC, ISO 8601)",
     )

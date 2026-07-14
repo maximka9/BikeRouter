@@ -8,19 +8,18 @@ future integration, but the live graph is not mutated.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import logging
 import math
 import os
 import re
 import subprocess
-from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any
 
 import geopandas as gpd
 import joblib
@@ -50,24 +49,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
 from ..config import Settings
-from .surface_ml import (
-    OSM_HIGHWAY_FILTER,
-    OSM_TAG_COLUMNS,
-    SATELLITE_FEATURES,
-    SURFACE_GROUP_MAP,
-    SURFACE_GROUPS,
-    _first_osm_value,
-    _geometry_feature_row,
-    _import_pyplot,
-    _json_safe,
-    _utm_crs_for,
-    dedupe_dataframe_by_edge_id,
-    extract_tile_features_for_edges,
-    filter_edges_to_polygon,
-    limit_edges_for_experiment,
-    no_progress,
-    progress_iter,
-)
 from .area_graph_cache import (
     area_precache_content_fingerprint,
     area_precache_directory_id,
@@ -78,12 +59,27 @@ from .area_graph_cache import (
     precache_area_dir,
 )
 from .graph import GraphBuilder
+from .surface_ml import (
+    OSM_TAG_COLUMNS,
+    SATELLITE_FEATURES,
+    SURFACE_GROUP_MAP,
+    SURFACE_GROUPS,
+    _first_osm_value,
+    _geometry_feature_row,
+    _import_pyplot,
+    _json_safe,
+    _utm_crs_for,
+    dedupe_dataframe_by_edge_id,
+    filter_edges_to_polygon,
+    limit_edges_for_experiment,
+    no_progress,
+    progress_iter,
+)
+
+ProgressFactory = Callable[[Iterable[Any], str, int | None], Iterable[Any]]
 
 
-ProgressFactory = Callable[[Iterable[Any], str, Optional[int]], Iterable[Any]]
-
-
-CONCRETE_SURFACE_VALUES: Tuple[str, ...] = (
+CONCRETE_SURFACE_VALUES: tuple[str, ...] = (
     "asphalt",
     "concrete",
     "paved",
@@ -105,12 +101,12 @@ CONCRETE_SURFACE_VALUES: Tuple[str, ...] = (
     "mud",
 )
 
-SUPPORTED_SURFACE_VALUES: Tuple[str, ...] = CONCRETE_SURFACE_VALUES + (
+SUPPORTED_SURFACE_VALUES: tuple[str, ...] = CONCRETE_SURFACE_VALUES + (
     "unknown",
     "rare_other",
 )
 
-AI_OSM_FEATURES: Tuple[str, ...] = (
+AI_OSM_FEATURES: tuple[str, ...] = (
     "highway",
     "service",
     "tracktype",
@@ -128,7 +124,7 @@ AI_OSM_FEATURES: Tuple[str, ...] = (
     "area",
 )
 
-AI_GEOMETRY_FEATURES: Tuple[str, ...] = (
+AI_GEOMETRY_FEATURES: tuple[str, ...] = (
     "edge_length_m",
     "edge_bearing_deg",
     "edge_sinuosity",
@@ -138,9 +134,9 @@ AI_GEOMETRY_FEATURES: Tuple[str, ...] = (
     "distance_to_polygon_center_m",
 )
 
-AI_SATELLITE_FEATURES: Tuple[str, ...] = SATELLITE_FEATURES
+AI_SATELLITE_FEATURES: tuple[str, ...] = SATELLITE_FEATURES
 
-SPATIAL_PRIOR_FEATURES: Tuple[str, ...] = (
+SPATIAL_PRIOR_FEATURES: tuple[str, ...] = (
     "distance_to_polygon_center_m",
     "distance_to_polygon_centroid_x",
     "distance_to_polygon_centroid_y",
@@ -150,7 +146,7 @@ SPATIAL_PRIOR_FEATURES: Tuple[str, ...] = (
     "tile_y",
 )
 
-NEIGHBOR_FEATURES: Tuple[str, ...] = (
+NEIGHBOR_FEATURES: tuple[str, ...] = (
     "neighbor_1hop_count",
     "neighbor_2hop_count",
     "neighbor_1hop_known_surface_share",
@@ -171,7 +167,7 @@ NEIGHBOR_FEATURES: Tuple[str, ...] = (
     "neighbor_1hop_highway_path_or_track_share",
 )
 
-CONCRETE_AI_LABEL_MAP: Dict[str, str] = {
+CONCRETE_AI_LABEL_MAP: dict[str, str] = {
     "asphalt": "asphalt",
     "paving_stones": "paving_stones",
     "concrete": "concrete",
@@ -193,7 +189,7 @@ CONCRETE_AI_LABEL_MAP: Dict[str, str] = {
     "mud": "other_unpaved",
 }
 
-CONCRETE_COMPACT_LABELS: Tuple[str, ...] = (
+CONCRETE_COMPACT_LABELS: tuple[str, ...] = (
     "asphalt",
     "paving_stones",
     "unpaved",
@@ -203,14 +199,14 @@ CONCRETE_COMPACT_LABELS: Tuple[str, ...] = (
     "other_unpaved",
 )
 
-DANGEROUS_UPGRADE_SEVERITY: Dict[str, float] = {
+DANGEROUS_UPGRADE_SEVERITY: dict[str, float] = {
     "paved_rough": 1.0,
     "unpaved_hard": 2.0,
     "unpaved_soft": 3.0,
     "rough_or_unpaved": 2.5,
 }
 
-REQUIRED_PROBA_SURFACES: Tuple[str, ...] = (
+REQUIRED_PROBA_SURFACES: tuple[str, ...] = (
     "asphalt",
     "concrete",
     "paved",
@@ -226,7 +222,7 @@ REQUIRED_PROBA_SURFACES: Tuple[str, ...] = (
     "unknown",
 )
 
-BAD_SURFACES: Tuple[str, ...] = (
+BAD_SURFACES: tuple[str, ...] = (
     "unpaved",
     "ground",
     "dirt",
@@ -236,7 +232,7 @@ BAD_SURFACES: Tuple[str, ...] = (
     "mud",
 )
 
-SURFACE_COLORS: Dict[str, str] = {
+SURFACE_COLORS: dict[str, str] = {
     "asphalt": "#1f78b4",
     "concrete": "#6baed6",
     "paved": "#756bb1",
@@ -260,7 +256,7 @@ SURFACE_COLORS: Dict[str, str] = {
     "unknown": "#969696",
 }
 
-GROUP_COLORS: Dict[str, str] = {
+GROUP_COLORS: dict[str, str] = {
     "paved_good": "#0B4F9C",
     "paved_rough": "#7B3294",
     "unpaved_hard": "#E08214",
@@ -269,10 +265,10 @@ GROUP_COLORS: Dict[str, str] = {
 }
 
 # Backward-compatible hook for old candidate aliases.
-_GROUP_MODEL_CANDIDATE_ALIASES: Dict[str, str] = {}
+_GROUP_MODEL_CANDIDATE_ALIASES: dict[str, str] = {}
 
 
-def _normalize_group_model_candidates(names: Tuple[str, ...]) -> Tuple[str, ...]:
+def _normalize_group_model_candidates(names: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(_GROUP_MODEL_CANDIDATE_ALIASES.get(n, n) for n in names)
 
 
@@ -301,7 +297,7 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _split_csv(raw: str) -> Tuple[str, ...]:
+def _split_csv(raw: str) -> tuple[str, ...]:
     return tuple(x.strip() for x in raw.split(",") if x.strip())
 
 
@@ -311,7 +307,7 @@ class SurfaceAIConfig:
     mode: str = "experiment"
     target: str = "concrete"
     min_class_count: int = 50
-    model_candidates: Tuple[str, ...] = (
+    model_candidates: tuple[str, ...] = (
         "always_majority",
         "highway_heuristic",
         "osm_only_rf",
@@ -322,7 +318,7 @@ class SurfaceAIConfig:
         "combined_rf_balanced_without_spatial_prior",
         "combined_rf_with_neighbors",
     )
-    group_model_candidates: Tuple[str, ...] = (
+    group_model_candidates: tuple[str, ...] = (
         "group_direct_always_majority",
         "group_direct_highway_heuristic",
         "group_direct_osm_only_rf",
@@ -364,7 +360,7 @@ class SurfaceAIConfig:
     use_neighbor_features: bool = True
     neighbor_hops: int = 2
     neighbor_use_prediction_pass2: bool = True
-    graph_source_priority: Tuple[str, ...] = (
+    graph_source_priority: tuple[str, ...] = (
         "area_precache",
         "tiles_coverage_graph",
         "osmnx_fallback",
@@ -380,12 +376,12 @@ class SurfaceAIConfig:
     predict_area_mode: str = "precache_polygon"
     train_on_all_tile_edges: bool = True
     predict_only_inside_polygon: bool = True
-    train_graph_source_priority: Tuple[str, ...] = (
+    train_graph_source_priority: tuple[str, ...] = (
         "tile_coverage_graph",
         "area_precache",
         "osmnx_fallback",
     )
-    predict_graph_source_priority: Tuple[str, ...] = (
+    predict_graph_source_priority: tuple[str, ...] = (
         "area_precache",
         "tile_coverage_graph",
         "osmnx_fallback",
@@ -403,17 +399,17 @@ class SurfaceAIConfig:
     max_output_files: int = 20
     compact_cleanup: bool = True
     save_heavy_artifacts: bool = False
-    compact_allowed_extensions: Tuple[str, ...] = (".csv", ".xlsx", ".png")
+    compact_allowed_extensions: tuple[str, ...] = (".csv", ".xlsx", ".png")
     save_full_predictions_geojson: bool = False
     run_holdout_leakage_checks: bool = True
     holdout_split_mode: str = "grouped_geometry_or_way"
     holdout_large_grid_m: float = 1000.0
     mask_holdout_labels_for_neighbors: bool = True
     prevent_directed_edge_leakage: bool = True
-    use_satellite_features: bool = True
+    use_satellite_features: bool = False
     sample_step_m: float = 7.0
     pixel_window: int = 5
-    tms_server: str = "google"
+    tms_server: str = ""
     tile_zoom: int = 20
     tiles_dir: str = ""
     spatial_grid_m: float = 300.0
@@ -442,71 +438,162 @@ class SurfaceAIConfig:
     model_outer_parallel_min_candidates: int = 3
 
     @classmethod
-    def from_env(cls) -> "SurfaceAIConfig":
+    def from_env(cls) -> SurfaceAIConfig:
         """Load Surface AI settings from ``SURFACE_AI_*`` environment variables."""
         base = cls()
-        updates: Dict[str, Any] = {
+        updates: dict[str, Any] = {
             "enabled": _env_bool("SURFACE_AI_ENABLED", base.enabled),
             "mode": _env_str("SURFACE_AI_MODE", base.mode),
             "target": _env_str("SURFACE_AI_TARGET", base.target),
             "min_class_count": _env_int("SURFACE_AI_MIN_CLASS_COUNT", base.min_class_count),
             "selection_metric": _env_str("SURFACE_AI_SELECTION_METRIC", base.selection_metric),
-            "group_selection_metric": _env_str("SURFACE_AI_GROUP_SELECTION_METRIC", base.group_selection_metric),
-            "dangerous_error_penalty": _env_float("SURFACE_AI_DANGEROUS_ERROR_PENALTY", base.dangerous_error_penalty),
-            "min_bad_surface_recall": _env_float("SURFACE_AI_MIN_BAD_SURFACE_RECALL", base.min_bad_surface_recall),
-            "min_paved_rough_recall": _env_float("SURFACE_AI_MIN_PAVED_ROUGH_RECALL", base.min_paved_rough_recall),
-            "paved_rough_recall_weight": _env_float("SURFACE_AI_PAVED_ROUGH_RECALL_WEIGHT", base.paved_rough_recall_weight),
-            "unpaved_soft_recall_weight": _env_float("SURFACE_AI_UNPAVED_SOFT_RECALL_WEIGHT", base.unpaved_soft_recall_weight),
-            "group_class_weight_mode": _env_str("SURFACE_AI_GROUP_CLASS_WEIGHT_MODE", base.group_class_weight_mode),
-            "group_class_weight_paved_good": _env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_PAVED_GOOD", base.group_class_weight_paved_good),
-            "group_class_weight_paved_rough": _env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_PAVED_ROUGH", base.group_class_weight_paved_rough),
-            "group_class_weight_unpaved_soft": _env_float("SURFACE_AI_GROUP_CLASS_WEIGHT_UNPAVED_SOFT", base.group_class_weight_unpaved_soft),
-            "group_threshold_tuning": _env_bool("SURFACE_AI_GROUP_THRESHOLD_TUNING", base.group_threshold_tuning),
-            "paved_rough_min_proba": _env_float("SURFACE_AI_PAVED_ROUGH_MIN_PROBA", base.paved_rough_min_proba),
-            "unpaved_soft_min_proba": _env_float("SURFACE_AI_UNPAVED_SOFT_MIN_PROBA", base.unpaved_soft_min_proba),
-            "concrete_target_mode": _env_str("SURFACE_AI_CONCRETE_TARGET_MODE", base.concrete_target_mode),
+            "group_selection_metric": _env_str(
+                "SURFACE_AI_GROUP_SELECTION_METRIC", base.group_selection_metric
+            ),
+            "dangerous_error_penalty": _env_float(
+                "SURFACE_AI_DANGEROUS_ERROR_PENALTY", base.dangerous_error_penalty
+            ),
+            "min_bad_surface_recall": _env_float(
+                "SURFACE_AI_MIN_BAD_SURFACE_RECALL", base.min_bad_surface_recall
+            ),
+            "min_paved_rough_recall": _env_float(
+                "SURFACE_AI_MIN_PAVED_ROUGH_RECALL", base.min_paved_rough_recall
+            ),
+            "paved_rough_recall_weight": _env_float(
+                "SURFACE_AI_PAVED_ROUGH_RECALL_WEIGHT", base.paved_rough_recall_weight
+            ),
+            "unpaved_soft_recall_weight": _env_float(
+                "SURFACE_AI_UNPAVED_SOFT_RECALL_WEIGHT", base.unpaved_soft_recall_weight
+            ),
+            "group_class_weight_mode": _env_str(
+                "SURFACE_AI_GROUP_CLASS_WEIGHT_MODE", base.group_class_weight_mode
+            ),
+            "group_class_weight_paved_good": _env_float(
+                "SURFACE_AI_GROUP_CLASS_WEIGHT_PAVED_GOOD", base.group_class_weight_paved_good
+            ),
+            "group_class_weight_paved_rough": _env_float(
+                "SURFACE_AI_GROUP_CLASS_WEIGHT_PAVED_ROUGH", base.group_class_weight_paved_rough
+            ),
+            "group_class_weight_unpaved_soft": _env_float(
+                "SURFACE_AI_GROUP_CLASS_WEIGHT_UNPAVED_SOFT", base.group_class_weight_unpaved_soft
+            ),
+            "group_threshold_tuning": _env_bool(
+                "SURFACE_AI_GROUP_THRESHOLD_TUNING", base.group_threshold_tuning
+            ),
+            "paved_rough_min_proba": _env_float(
+                "SURFACE_AI_PAVED_ROUGH_MIN_PROBA", base.paved_rough_min_proba
+            ),
+            "unpaved_soft_min_proba": _env_float(
+                "SURFACE_AI_UNPAVED_SOFT_MIN_PROBA", base.unpaved_soft_min_proba
+            ),
+            "concrete_target_mode": _env_str(
+                "SURFACE_AI_CONCRETE_TARGET_MODE", base.concrete_target_mode
+            ),
             "group_target_mode": _env_str("SURFACE_AI_GROUP_TARGET_MODE", base.group_target_mode),
-            "train_direct_group_model": _env_bool("SURFACE_AI_TRAIN_DIRECT_GROUP_MODEL", base.train_direct_group_model),
-            "calibration_enabled": _env_bool("SURFACE_AI_CALIBRATION_ENABLED", base.calibration_enabled),
-            "calibration_method": _env_str("SURFACE_AI_CALIBRATION_METHOD", base.calibration_method),
+            "train_direct_group_model": _env_bool(
+                "SURFACE_AI_TRAIN_DIRECT_GROUP_MODEL", base.train_direct_group_model
+            ),
+            "calibration_enabled": _env_bool(
+                "SURFACE_AI_CALIBRATION_ENABLED", base.calibration_enabled
+            ),
+            "calibration_method": _env_str(
+                "SURFACE_AI_CALIBRATION_METHOD", base.calibration_method
+            ),
             "calibration_share": _env_float("SURFACE_AI_CALIBRATION_SHARE", base.calibration_share),
-            "calibration_min_class_count": _env_int("SURFACE_AI_CALIBRATION_MIN_CLASS_COUNT", base.calibration_min_class_count),
-            "enable_spatial_prior": _env_bool("SURFACE_AI_ENABLE_SPATIAL_PRIOR", base.enable_spatial_prior),
-            "run_spatial_prior_ablation": _env_bool("SURFACE_AI_RUN_SPATIAL_PRIOR_ABLATION", base.run_spatial_prior_ablation),
-            "use_neighbor_features": _env_bool("SURFACE_AI_USE_NEIGHBOR_FEATURES", base.use_neighbor_features),
+            "calibration_min_class_count": _env_int(
+                "SURFACE_AI_CALIBRATION_MIN_CLASS_COUNT", base.calibration_min_class_count
+            ),
+            "enable_spatial_prior": _env_bool(
+                "SURFACE_AI_ENABLE_SPATIAL_PRIOR", base.enable_spatial_prior
+            ),
+            "run_spatial_prior_ablation": _env_bool(
+                "SURFACE_AI_RUN_SPATIAL_PRIOR_ABLATION", base.run_spatial_prior_ablation
+            ),
+            "use_neighbor_features": _env_bool(
+                "SURFACE_AI_USE_NEIGHBOR_FEATURES", base.use_neighbor_features
+            ),
             "neighbor_hops": _env_int("SURFACE_AI_NEIGHBOR_HOPS", base.neighbor_hops),
-            "neighbor_use_prediction_pass2": _env_bool("SURFACE_AI_NEIGHBOR_USE_PREDICTION_PASS2", base.neighbor_use_prediction_pass2),
-            "strict_area_precache": _env_bool("SURFACE_AI_STRICT_AREA_PRECACHE", base.strict_area_precache),
-            "use_tile_coverage_polygon": _env_bool("SURFACE_AI_USE_TILE_COVERAGE_POLYGON", base.use_tile_coverage_polygon),
+            "neighbor_use_prediction_pass2": _env_bool(
+                "SURFACE_AI_NEIGHBOR_USE_PREDICTION_PASS2", base.neighbor_use_prediction_pass2
+            ),
+            "strict_area_precache": _env_bool(
+                "SURFACE_AI_STRICT_AREA_PRECACHE", base.strict_area_precache
+            ),
+            "use_tile_coverage_polygon": _env_bool(
+                "SURFACE_AI_USE_TILE_COVERAGE_POLYGON", base.use_tile_coverage_polygon
+            ),
             "tile_usage_report": _env_bool("SURFACE_AI_TILE_USAGE_REPORT", base.tile_usage_report),
-            "use_green_cache_features": _env_bool("SURFACE_AI_USE_GREEN_CACHE_FEATURES", base.use_green_cache_features),
-            "use_tile_green_mask_features": _env_bool("SURFACE_AI_USE_TILE_GREEN_MASK_FEATURES", base.use_tile_green_mask_features),
-            "max_dangerous_upgrade_rate_effective": _env_float("SURFACE_AI_MAX_DANGEROUS_UPGRADE_RATE_EFFECTIVE", base.max_dangerous_upgrade_rate_effective),
-            "max_calibration_ece": _env_float("SURFACE_AI_MAX_CALIBRATION_ECE", base.max_calibration_ece),
+            "use_green_cache_features": _env_bool(
+                "SURFACE_AI_USE_GREEN_CACHE_FEATURES", base.use_green_cache_features
+            ),
+            "use_tile_green_mask_features": _env_bool(
+                "SURFACE_AI_USE_TILE_GREEN_MASK_FEATURES", base.use_tile_green_mask_features
+            ),
+            "max_dangerous_upgrade_rate_effective": _env_float(
+                "SURFACE_AI_MAX_DANGEROUS_UPGRADE_RATE_EFFECTIVE",
+                base.max_dangerous_upgrade_rate_effective,
+            ),
+            "max_calibration_ece": _env_float(
+                "SURFACE_AI_MAX_CALIBRATION_ECE", base.max_calibration_ece
+            ),
             "train_area_mode": _env_str("SURFACE_AI_TRAIN_AREA_MODE", base.train_area_mode),
             "predict_area_mode": _env_str("SURFACE_AI_PREDICT_AREA_MODE", base.predict_area_mode),
-            "train_on_all_tile_edges": _env_bool("SURFACE_AI_TRAIN_ON_ALL_TILE_EDGES", base.train_on_all_tile_edges),
-            "predict_only_inside_polygon": _env_bool("SURFACE_AI_PREDICT_ONLY_INSIDE_POLYGON", base.predict_only_inside_polygon),
+            "train_on_all_tile_edges": _env_bool(
+                "SURFACE_AI_TRAIN_ON_ALL_TILE_EDGES", base.train_on_all_tile_edges
+            ),
+            "predict_only_inside_polygon": _env_bool(
+                "SURFACE_AI_PREDICT_ONLY_INSIDE_POLYGON", base.predict_only_inside_polygon
+            ),
             "osmnx_retain_all": _env_bool("SURFACE_AI_OSMNX_RETAIN_ALL", base.osmnx_retain_all),
-            "osmnx_truncate_by_edge": _env_bool("SURFACE_AI_OSMNX_TRUNCATE_BY_EDGE", base.osmnx_truncate_by_edge),
+            "osmnx_truncate_by_edge": _env_bool(
+                "SURFACE_AI_OSMNX_TRUNCATE_BY_EDGE", base.osmnx_truncate_by_edge
+            ),
             "osmnx_simplify": _env_bool("SURFACE_AI_OSMNX_SIMPLIFY", base.osmnx_simplify),
-            "osmnx_network_type": _env_str("SURFACE_AI_OSMNX_NETWORK_TYPE", base.osmnx_network_type),
-            "osmnx_custom_filter": _env_str("SURFACE_AI_OSMNX_CUSTOM_FILTER", base.osmnx_custom_filter),
-            "holdout_predict_polygon_known_share": _env_float("SURFACE_AI_HOLDOUT_PREDICT_POLYGON_KNOWN_SHARE", base.holdout_predict_polygon_known_share),
-            "tile_edge_match_mode": _env_str("SURFACE_AI_TILE_EDGE_MATCH_MODE", base.tile_edge_match_mode),
-            "edge_tile_buffer_m": _env_float("SURFACE_AI_EDGE_TILE_BUFFER_M", base.edge_tile_buffer_m),
+            "osmnx_network_type": _env_str(
+                "SURFACE_AI_OSMNX_NETWORK_TYPE", base.osmnx_network_type
+            ),
+            "osmnx_custom_filter": _env_str(
+                "SURFACE_AI_OSMNX_CUSTOM_FILTER", base.osmnx_custom_filter
+            ),
+            "holdout_predict_polygon_known_share": _env_float(
+                "SURFACE_AI_HOLDOUT_PREDICT_POLYGON_KNOWN_SHARE",
+                base.holdout_predict_polygon_known_share,
+            ),
+            "tile_edge_match_mode": _env_str(
+                "SURFACE_AI_TILE_EDGE_MATCH_MODE", base.tile_edge_match_mode
+            ),
+            "edge_tile_buffer_m": _env_float(
+                "SURFACE_AI_EDGE_TILE_BUFFER_M", base.edge_tile_buffer_m
+            ),
             "compact_output": _env_bool("SURFACE_AI_COMPACT_OUTPUT", base.compact_output),
             "output_mode": _env_str("SURFACE_AI_OUTPUT_MODE", base.output_mode),
             "max_output_files": _env_int("SURFACE_AI_MAX_OUTPUT_FILES", base.max_output_files),
             "compact_cleanup": _env_bool("SURFACE_AI_COMPACT_CLEANUP", base.compact_cleanup),
-            "save_heavy_artifacts": _env_bool("SURFACE_AI_SAVE_HEAVY_ARTIFACTS", base.save_heavy_artifacts),
-            "save_full_predictions_geojson": _env_bool("SURFACE_AI_SAVE_FULL_PREDICTIONS_GEOJSON", base.save_full_predictions_geojson),
-            "run_holdout_leakage_checks": _env_bool("SURFACE_AI_RUN_HOLDOUT_LEAKAGE_CHECKS", base.run_holdout_leakage_checks),
-            "holdout_split_mode": _env_str("SURFACE_AI_HOLDOUT_SPLIT_MODE", base.holdout_split_mode),
-            "holdout_large_grid_m": _env_float("SURFACE_AI_HOLDOUT_LARGE_GRID_M", base.holdout_large_grid_m),
-            "mask_holdout_labels_for_neighbors": _env_bool("SURFACE_AI_MASK_HOLDOUT_LABELS_FOR_NEIGHBORS", base.mask_holdout_labels_for_neighbors),
-            "prevent_directed_edge_leakage": _env_bool("SURFACE_AI_PREVENT_DIRECTED_EDGE_LEAKAGE", base.prevent_directed_edge_leakage),
-            "use_satellite_features": _env_bool("SURFACE_AI_USE_SATELLITE_FEATURES", base.use_satellite_features),
+            "save_heavy_artifacts": _env_bool(
+                "SURFACE_AI_SAVE_HEAVY_ARTIFACTS", base.save_heavy_artifacts
+            ),
+            "save_full_predictions_geojson": _env_bool(
+                "SURFACE_AI_SAVE_FULL_PREDICTIONS_GEOJSON", base.save_full_predictions_geojson
+            ),
+            "run_holdout_leakage_checks": _env_bool(
+                "SURFACE_AI_RUN_HOLDOUT_LEAKAGE_CHECKS", base.run_holdout_leakage_checks
+            ),
+            "holdout_split_mode": _env_str(
+                "SURFACE_AI_HOLDOUT_SPLIT_MODE", base.holdout_split_mode
+            ),
+            "holdout_large_grid_m": _env_float(
+                "SURFACE_AI_HOLDOUT_LARGE_GRID_M", base.holdout_large_grid_m
+            ),
+            "mask_holdout_labels_for_neighbors": _env_bool(
+                "SURFACE_AI_MASK_HOLDOUT_LABELS_FOR_NEIGHBORS",
+                base.mask_holdout_labels_for_neighbors,
+            ),
+            "prevent_directed_edge_leakage": _env_bool(
+                "SURFACE_AI_PREVENT_DIRECTED_EDGE_LEAKAGE", base.prevent_directed_edge_leakage
+            ),
+            "use_satellite_features": _env_bool(
+                "SURFACE_AI_USE_SATELLITE_FEATURES", base.use_satellite_features
+            ),
             "sample_step_m": _env_float("SURFACE_AI_SAMPLE_STEP_M", base.sample_step_m),
             "pixel_window": _env_int("SURFACE_AI_PIXEL_WINDOW", base.pixel_window),
             "tms_server": _env_str("SURFACE_AI_TMS_SERVER", base.tms_server),
@@ -520,18 +607,31 @@ class SurfaceAIConfig:
             "min_confidence": _env_float("SURFACE_AI_MIN_CONFIDENCE", base.min_confidence),
             "conf_high": _env_float("SURFACE_AI_CONF_HIGH", base.conf_high),
             "conf_medium": _env_float("SURFACE_AI_CONF_MEDIUM", base.conf_medium),
-            "enable_safety_policy": _env_bool("SURFACE_AI_ENABLE_SAFETY_POLICY", base.enable_safety_policy),
-            "paved_good_min_confidence": _env_float("SURFACE_AI_PAVED_GOOD_MIN_CONFIDENCE", base.paved_good_min_confidence),
-            "bad_surface_min_confidence": _env_float("SURFACE_AI_BAD_SURFACE_MIN_CONFIDENCE", base.bad_surface_min_confidence),
+            "enable_safety_policy": _env_bool(
+                "SURFACE_AI_ENABLE_SAFETY_POLICY", base.enable_safety_policy
+            ),
+            "paved_good_min_confidence": _env_float(
+                "SURFACE_AI_PAVED_GOOD_MIN_CONFIDENCE", base.paved_good_min_confidence
+            ),
+            "bad_surface_min_confidence": _env_float(
+                "SURFACE_AI_BAD_SURFACE_MIN_CONFIDENCE", base.bad_surface_min_confidence
+            ),
             "min_margin": _env_float("SURFACE_AI_MIN_MARGIN", base.min_margin),
             "out_dir": _env_str("SURFACE_AI_OUT_DIR", base.out_dir),
             "min_known_edges": _env_int("SURFACE_AI_MIN_KNOWN_EDGES", base.min_known_edges),
-            "max_tile_cache_items": _env_int("SURFACE_AI_MAX_TILE_CACHE_ITEMS", base.max_tile_cache_items),
+            "max_tile_cache_items": _env_int(
+                "SURFACE_AI_MAX_TILE_CACHE_ITEMS", base.max_tile_cache_items
+            ),
             "reuse_edges_cache": _env_bool("SURFACE_AI_REUSE_EDGES_CACHE", base.reuse_edges_cache),
             "edges_cache_write": _env_bool("SURFACE_AI_EDGES_CACHE_WRITE", base.edges_cache_write),
-            "edges_cache_dir": os.getenv("SURFACE_AI_EDGES_CACHE_DIR", base.edges_cache_dir).strip(),
+            "edges_cache_dir": os.getenv(
+                "SURFACE_AI_EDGES_CACHE_DIR", base.edges_cache_dir
+            ).strip(),
             "auto_parallel": _env_bool("SURFACE_AI_AUTO_PARALLEL", base.auto_parallel),
-            "model_outer_parallel_min_candidates": _env_int("SURFACE_AI_MODEL_OUTER_PARALLEL_MIN_CANDIDATES", base.model_outer_parallel_min_candidates),
+            "model_outer_parallel_min_candidates": _env_int(
+                "SURFACE_AI_MODEL_OUTER_PARALLEL_MIN_CANDIDATES",
+                base.model_outer_parallel_min_candidates,
+            ),
         }
         if os.getenv("SURFACE_AI_MODEL_CANDIDATES"):
             updates["model_candidates"] = _split_csv(os.getenv("SURFACE_AI_MODEL_CANDIDATES", ""))
@@ -540,13 +640,21 @@ class SurfaceAIConfig:
                 _split_csv(os.getenv("SURFACE_AI_GROUP_MODEL_CANDIDATES", ""))
             )
         if os.getenv("SURFACE_AI_GRAPH_SOURCE_PRIORITY"):
-            updates["graph_source_priority"] = _split_csv(os.getenv("SURFACE_AI_GRAPH_SOURCE_PRIORITY", ""))
+            updates["graph_source_priority"] = _split_csv(
+                os.getenv("SURFACE_AI_GRAPH_SOURCE_PRIORITY", "")
+            )
         if os.getenv("SURFACE_AI_TRAIN_GRAPH_SOURCE_PRIORITY"):
-            updates["train_graph_source_priority"] = _split_csv(os.getenv("SURFACE_AI_TRAIN_GRAPH_SOURCE_PRIORITY", ""))
+            updates["train_graph_source_priority"] = _split_csv(
+                os.getenv("SURFACE_AI_TRAIN_GRAPH_SOURCE_PRIORITY", "")
+            )
         if os.getenv("SURFACE_AI_PREDICT_GRAPH_SOURCE_PRIORITY"):
-            updates["predict_graph_source_priority"] = _split_csv(os.getenv("SURFACE_AI_PREDICT_GRAPH_SOURCE_PRIORITY", ""))
+            updates["predict_graph_source_priority"] = _split_csv(
+                os.getenv("SURFACE_AI_PREDICT_GRAPH_SOURCE_PRIORITY", "")
+            )
         if os.getenv("SURFACE_AI_COMPACT_ALLOWED_EXTENSIONS"):
-            updates["compact_allowed_extensions"] = _split_csv(os.getenv("SURFACE_AI_COMPACT_ALLOWED_EXTENSIONS", ""))
+            updates["compact_allowed_extensions"] = _split_csv(
+                os.getenv("SURFACE_AI_COMPACT_ALLOWED_EXTENSIONS", "")
+            )
         return replace(base, **updates)
 
 
@@ -609,7 +717,7 @@ class SurfaceAIArtifacts:
     runtime_predictions_csv: Path
 
 
-def normalize_surface_value(raw: Any) -> Optional[str]:
+def normalize_surface_value(raw: Any) -> str | None:
     value = _first_osm_value(raw)
     if value is None:
         return None
@@ -652,7 +760,7 @@ def normalize_surface_value(raw: Any) -> Optional[str]:
     return first if first in CONCRETE_SURFACE_VALUES else None
 
 
-def _surface_values_from_edge_row(row: Any) -> Tuple[Optional[str], Optional[str]]:
+def _surface_values_from_edge_row(row: Any) -> tuple[str | None, str | None]:
     """Return ``(raw_surface, normalized_surface)`` from raw or derived graph columns.
 
     Some cached graph variants keep ``surface_osm_raw``/``surface_osm_norm`` but do
@@ -671,7 +779,7 @@ def _surface_values_from_edge_row(row: Any) -> Tuple[Optional[str], Optional[str
         getattr(row, "surface_true_concrete", None),
     )
 
-    raw_surface: Optional[str] = None
+    raw_surface: str | None = None
     for value in raw_candidates:
         first = _first_osm_value(value)
         if first is not None and str(first).strip().lower() not in {"", "none", "null", "nan"}:
@@ -696,7 +804,7 @@ def surface_to_group(surface: Any) -> str:
     return SURFACE_GROUP_MAP.get(str(s or ""), "unknown")
 
 
-def normalize_surface_to_concrete_ai_label(surface_norm: Any) -> Optional[str]:
+def normalize_surface_to_concrete_ai_label(surface_norm: Any) -> str | None:
     surface = normalize_surface_value(surface_norm)
     if surface is None:
         return None
@@ -720,7 +828,7 @@ def normalize_group_target(group: Any, mode: str = "3class_unpaved_hard_to_soft"
     return "unknown"
 
 
-def group_target_labels(mode: str) -> Tuple[str, ...]:
+def group_target_labels(mode: str) -> tuple[str, ...]:
     if mode == "4class_original":
         return SURFACE_GROUPS
     if mode == "3class_rough_or_unpaved":
@@ -729,7 +837,10 @@ def group_target_labels(mode: str) -> Tuple[str, ...]:
 
 
 def is_dangerous_upgrade(true_group: str, pred_group: str) -> bool:
-    return str(true_group) in {"paved_rough", "unpaved_hard", "unpaved_soft", "rough_or_unpaved"} and str(pred_group) == "paved_good"
+    return (
+        str(true_group) in {"paved_rough", "unpaved_hard", "unpaved_soft", "rough_or_unpaved"}
+        and str(pred_group) == "paved_good"
+    )
 
 
 def train_label_to_surface(label: Any) -> str:
@@ -788,7 +899,7 @@ def predict_surface_by_highway_heuristic(edge_attrs: dict) -> str:
     return "unknown"
 
 
-def _norm_feature(value: Any) -> Optional[str]:
+def _norm_feature(value: Any) -> str | None:
     v = _first_osm_value(value)
     if v is None:
         return None
@@ -802,10 +913,12 @@ def _geometry_features_with_center(
     row: Any,
     projected_geom: Any,
     center_projected: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     item = _geometry_feature_row(row, projected_geom)
     try:
-        item["distance_to_polygon_center_m"] = float(projected_geom.centroid.distance(center_projected))
+        item["distance_to_polygon_center_m"] = float(
+            projected_geom.centroid.distance(center_projected)
+        )
     except Exception:
         item["distance_to_polygon_center_m"] = float("nan")
     return item
@@ -842,7 +955,7 @@ def build_osm_geometry_dataset(
     projected = edges_gdf.to_crs(projected_crs)
     center = gpd.GeoSeries([polygon.centroid], crs="EPSG:4326").to_crs(projected_crs).iloc[0]
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     iterator = zip(edges_gdf.itertuples(index=False), projected.geometry.values)
     for row, projected_geom in progress(
         iterator,
@@ -851,7 +964,7 @@ def build_osm_geometry_dataset(
     ):
         surface_raw, surface_norm = _surface_values_from_edge_row(row)
         true_group = surface_to_group(surface_norm)
-        item: Dict[str, Any] = {
+        item: dict[str, Any] = {
             "edge_id": row.edge_id,
             "u": str(row.u),
             "v": str(row.v),
@@ -863,7 +976,8 @@ def build_osm_geometry_dataset(
             "surface_osm_norm": surface_norm or "unknown",
             "surface_true_concrete": surface_norm or "unknown",
             "surface_true_concrete_legacy": surface_norm or "unknown",
-            "surface_true_concrete_compact": normalize_surface_to_concrete_ai_label(surface_norm) or "unknown",
+            "surface_true_concrete_compact": normalize_surface_to_concrete_ai_label(surface_norm)
+            or "unknown",
             "surface_true_group": true_group,
             "surface_group_true": true_group,
             "is_surface_known": bool(surface_norm in CONCRETE_SURFACE_VALUES),
@@ -883,7 +997,9 @@ def build_osm_geometry_dataset(
     return pd.DataFrame(rows)
 
 
-def _surface_train_label(surface: str, frequent: set[str], *, mode: str = "legacy_full") -> Tuple[str, bool]:
+def _surface_train_label(
+    surface: str, frequent: set[str], *, mode: str = "legacy_full"
+) -> tuple[str, bool]:
     if mode == "compact":
         label = normalize_surface_to_concrete_ai_label(surface)
         if label:
@@ -903,15 +1019,15 @@ def add_train_labels(
     min_class_count: int,
     concrete_target_mode: str = "compact",
     group_target_mode: str = "3class_unpaved_hard_to_soft",
-) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     df = dataset.copy()
     known = df[df["is_surface_known"]]
     counts = known["surface_true_concrete"].value_counts().sort_index()
     frequent = {str(k) for k, v in counts.items() if int(v) >= int(min_class_count)}
-    train_labels: List[str] = []
-    legacy_labels: List[str] = []
-    group_direct: List[str] = []
-    rare_flags: List[bool] = []
+    train_labels: list[str] = []
+    legacy_labels: list[str] = []
+    group_direct: list[str] = []
+    rare_flags: list[bool] = []
     for _, row in df.iterrows():
         surface = str(row.get("surface_true_concrete") or "unknown")
         group = str(row.get("surface_true_group") or "unknown")
@@ -951,7 +1067,7 @@ def build_surface_ai_dataset(
     polygon: Any,
     *,
     progress: ProgressFactory = no_progress,
-) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     osm_df = build_osm_geometry_dataset(edges_gdf, polygon, progress=progress)
     if config.use_satellite_features:
         ml_config = _surface_ml_config_from_ai(config)
@@ -977,12 +1093,8 @@ def build_surface_ai_dataset(
     # GeoJSON/JSON round-trip и read_json могут дать edge_id как float — merge требует один тип.
     osm_df = osm_df.copy()
     tile_df = tile_df.copy()
-    osm_df["edge_id"] = osm_df["edge_id"].map(
-        lambda x: "" if pd.isna(x) else str(x).strip()
-    )
-    tile_df["edge_id"] = tile_df["edge_id"].map(
-        lambda x: "" if pd.isna(x) else str(x).strip()
-    )
+    osm_df["edge_id"] = osm_df["edge_id"].map(lambda x: "" if pd.isna(x) else str(x).strip())
+    tile_df["edge_id"] = tile_df["edge_id"].map(lambda x: "" if pd.isna(x) else str(x).strip())
     osm_df = dedupe_dataframe_by_edge_id(osm_df, keep="first", name="osm_df (surface_ai)")
     tile_df = dedupe_dataframe_by_edge_id(tile_df, keep="last", name="tile_df (surface_ai)")
     dataset = osm_df.merge(tile_df, on="edge_id", how="left", validate="one_to_one")
@@ -1007,22 +1119,23 @@ def add_neighbor_features(dataset: pd.DataFrame) -> pd.DataFrame:
     df = dataset.copy()
     edge_ids = df["edge_id"].astype(str).tolist()
     edge_set = set(edge_ids)
-    node_edges: Dict[str, set[str]] = {}
+    node_edges: dict[str, set[str]] = {}
     for edge_id, u, v in zip(edge_ids, df["u"].astype(str), df["v"].astype(str)):
         node_edges.setdefault(u, set()).add(edge_id)
         node_edges.setdefault(v, set()).add(edge_id)
-    edge_neighbors: Dict[str, set[str]] = {}
+    edge_neighbors: dict[str, set[str]] = {}
     for edge_id, u, v in zip(edge_ids, df["u"].astype(str), df["v"].astype(str)):
         n = (node_edges.get(u, set()) | node_edges.get(v, set())) - {edge_id}
         edge_neighbors[edge_id] = n
     lookup = df.set_index("edge_id", drop=False)
-    allowed_known = (
-        lookup["is_surface_known"].astype(bool)
-        & ~lookup.get("surface_ai_split", pd.Series("", index=lookup.index)).isin({"test", "predict_holdout"})
-    )
+    allowed_known = lookup["is_surface_known"].astype(bool) & ~lookup.get(
+        "surface_ai_split", pd.Series("", index=lookup.index)
+    ).isin({"test", "predict_holdout"})
 
-    def summarize(edge_id: str, neigh_ids: set[str], hop: int, base_highway: str) -> Dict[str, float]:
-        out: Dict[str, float] = {}
+    def summarize(
+        edge_id: str, neigh_ids: set[str], hop: int, base_highway: str
+    ) -> dict[str, float]:
+        out: dict[str, float] = {}
         ids = [n for n in neigh_ids if n in edge_set]
         sub = lookup.loc[ids] if ids else lookup.iloc[0:0]
         out[f"neighbor_{hop}hop_count"] = float(len(ids))
@@ -1044,20 +1157,36 @@ def add_neighbor_features(dataset: pd.DataFrame) -> pd.DataFrame:
         known = sub[known_mask]
         denom = max(1, len(sub))
         out[f"neighbor_{hop}hop_known_surface_share"] = float(len(known) / denom)
-        groups = known["surface_true_group"].map(lambda g: normalize_group_target(g, "3class_unpaved_hard_to_soft"))
+        groups = known["surface_true_group"].map(
+            lambda g: normalize_group_target(g, "3class_unpaved_hard_to_soft")
+        )
         for group in ("paved_good", "paved_rough", "unpaved_soft"):
-            out[f"neighbor_{hop}hop_{group}_share"] = float((groups == group).sum() / max(1, len(known)))
+            out[f"neighbor_{hop}hop_{group}_share"] = float(
+                (groups == group).sum() / max(1, len(known))
+            )
         hws = sub["highway"].astype(str)
-        out[f"neighbor_{hop}hop_same_highway_share"] = float((hws == base_highway).mean()) if len(hws) else 0.0
-        out[f"neighbor_{hop}hop_mean_length_m"] = float(pd.to_numeric(sub["length_m"], errors="coerce").mean()) if len(sub) else 0.0
+        out[f"neighbor_{hop}hop_same_highway_share"] = (
+            float((hws == base_highway).mean()) if len(hws) else 0.0
+        )
+        out[f"neighbor_{hop}hop_mean_length_m"] = (
+            float(pd.to_numeric(sub["length_m"], errors="coerce").mean()) if len(sub) else 0.0
+        )
         if hop == 1:
-            out["neighbor_1hop_highway_residential_share"] = float((hws == "residential").mean()) if len(hws) else 0.0
-            out["neighbor_1hop_highway_footway_share"] = float((hws == "footway").mean()) if len(hws) else 0.0
-            out["neighbor_1hop_highway_service_share"] = float((hws == "service").mean()) if len(hws) else 0.0
-            out["neighbor_1hop_highway_path_or_track_share"] = float(hws.isin(["path", "track"]).mean()) if len(hws) else 0.0
+            out["neighbor_1hop_highway_residential_share"] = (
+                float((hws == "residential").mean()) if len(hws) else 0.0
+            )
+            out["neighbor_1hop_highway_footway_share"] = (
+                float((hws == "footway").mean()) if len(hws) else 0.0
+            )
+            out["neighbor_1hop_highway_service_share"] = (
+                float((hws == "service").mean()) if len(hws) else 0.0
+            )
+            out["neighbor_1hop_highway_path_or_track_share"] = (
+                float(hws.isin(["path", "track"]).mean()) if len(hws) else 0.0
+            )
         return out
 
-    rows: List[Dict[str, float]] = []
+    rows: list[dict[str, float]] = []
     for edge_id, base_highway in zip(edge_ids, df["highway"].astype(str)):
         hop1 = edge_neighbors.get(edge_id, set())
         hop2: set[str] = set()
@@ -1103,9 +1232,15 @@ def spatial_train_test_split(
     candidate_mask = dataset.get("is_train_candidate", dataset["is_surface_known"]).astype(bool)
     known = dataset[candidate_mask].copy()
     if len(known) < int(config.min_known_edges):
-        inside_train = dataset.get("inside_train_area", pd.Series(False, index=dataset.index)).astype(bool)
-        has_tiles = dataset.get("has_tile_features", pd.Series(False, index=dataset.index)).astype(bool)
-        surface_known = dataset.get("is_surface_known", pd.Series(False, index=dataset.index)).astype(bool)
+        inside_train = dataset.get(
+            "inside_train_area", pd.Series(False, index=dataset.index)
+        ).astype(bool)
+        has_tiles = dataset.get("has_tile_features", pd.Series(False, index=dataset.index)).astype(
+            bool
+        )
+        surface_known = dataset.get(
+            "is_surface_known", pd.Series(False, index=dataset.index)
+        ).astype(bool)
         diagnostics = {
             "total_edges": int(len(dataset)),
             "inside_train_area": int(inside_train.sum()),
@@ -1113,7 +1248,9 @@ def spatial_train_test_split(
             "known_surface_edges": int(surface_known.sum()),
             "known_inside_train_area": int((inside_train & surface_known).sum()),
             "known_with_tile_features": int((surface_known & has_tiles).sum()),
-            "known_inside_train_with_tile_features": int((inside_train & surface_known & has_tiles).sum()),
+            "known_inside_train_with_tile_features": int(
+                (inside_train & surface_known & has_tiles).sum()
+            ),
         }
         raise ValueError(
             f"Not enough known train-candidate surface edges for training: found {len(known)}. "
@@ -1123,14 +1260,19 @@ def spatial_train_test_split(
         raise ValueError("Need at least two concrete surface classes for training")
 
     edge_lookup_df = edges_gdf.copy()
-    edge_lookup_df["edge_id"] = edge_lookup_df["edge_id"].map(lambda x: "" if pd.isna(x) else str(x).strip())
+    edge_lookup_df["edge_id"] = edge_lookup_df["edge_id"].map(
+        lambda x: "" if pd.isna(x) else str(x).strip()
+    )
     edge_lookup = edge_lookup_df.drop_duplicates("edge_id", keep="first").set_index("edge_id")
     known_edges = edge_lookup.loc[known["edge_id"].astype(str)].reset_index()
     projected = known_edges.to_crs(_utm_crs_for(known_edges))
     cent = projected.geometry.centroid
     grid = max(1.0, float(config.spatial_grid_m))
     cells = pd.Series(
-        [f"{int(math.floor(x / grid))}:{int(math.floor(y / grid))}" for x, y in zip(cent.x, cent.y)],
+        [
+            f"{int(math.floor(x / grid))}:{int(math.floor(y / grid))}"
+            for x, y in zip(cent.x, cent.y)
+        ],
         index=known.index,
     )
     unique_cells = np.array(sorted(cells.unique()))
@@ -1139,7 +1281,11 @@ def spatial_train_test_split(
     rng = np.random.default_rng(int(config.random_state))
     rng.shuffle(unique_cells)
     test_n = max(1, int(round(len(unique_cells) * float(config.test_share))))
-    cal_n = int(round(len(unique_cells) * float(config.calibration_share))) if config.calibration_enabled else 0
+    cal_n = (
+        int(round(len(unique_cells) * float(config.calibration_share)))
+        if config.calibration_enabled
+        else 0
+    )
     test_n = min(test_n, len(unique_cells) - 1)
     cal_n = min(max(0, cal_n), max(0, len(unique_cells) - test_n - 1))
     test_cells = set(unique_cells[:test_n])
@@ -1181,12 +1327,22 @@ def spatial_train_test_split(
                 if mode == "grouped_osm_way" and "osm_way_id" in dataset.columns:
                     groups = dataset.loc[train_inside, "osm_way_id"].fillna("").astype(str)
                 elif mode == "grouped_geometry_or_way":
-                    way = dataset.loc[train_inside, "osm_way_id"].fillna("").astype(str) if "osm_way_id" in dataset.columns else pd.Series("", index=train_inside)
+                    way = (
+                        dataset.loc[train_inside, "osm_way_id"].fillna("").astype(str)
+                        if "osm_way_id" in dataset.columns
+                        else pd.Series("", index=train_inside)
+                    )
                     geom = dataset.loc[train_inside, "geometry_hash_rounded"].fillna("").astype(str)
-                    undirected = dataset.loc[train_inside, "undirected_edge_key"].fillna("").astype(str)
-                    groups = way.where(way.str.len() > 0, undirected.where(undirected.str.len() > 0, geom))
+                    undirected = (
+                        dataset.loc[train_inside, "undirected_edge_key"].fillna("").astype(str)
+                    )
+                    groups = way.where(
+                        way.str.len() > 0, undirected.where(undirected.str.len() > 0, geom)
+                    )
                 else:
-                    groups = dataset.loc[train_inside, "geometry_hash_rounded"].fillna("").astype(str)
+                    groups = (
+                        dataset.loc[train_inside, "geometry_hash_rounded"].fillna("").astype(str)
+                    )
                 unique_groups = np.array(sorted(groups.unique()))
                 rng.shuffle(unique_groups)
                 group_target = max(1, int(round(len(unique_groups) * holdout_share)))
@@ -1194,13 +1350,23 @@ def spatial_train_test_split(
                 chosen = groups[groups.isin(chosen_groups)].index.to_numpy()
             else:
                 holdout_n = int(round(len(train_inside) * holdout_share))
-                chosen = rng.choice(np.array(train_inside), size=max(1, holdout_n), replace=False) if holdout_n > 0 else np.array([])
+                chosen = (
+                    rng.choice(np.array(train_inside), size=max(1, holdout_n), replace=False)
+                    if holdout_n > 0
+                    else np.array([])
+                )
             if len(chosen):
                 split.loc[chosen] = "predict_holdout"
-                if bool(config.prevent_directed_edge_leakage) and "undirected_edge_key" in dataset.columns:
+                if (
+                    bool(config.prevent_directed_edge_leakage)
+                    and "undirected_edge_key" in dataset.columns
+                ):
                     keys = set(dataset.loc[chosen, "undirected_edge_key"].dropna().astype(str))
                     peer_idx = known.index[
-                        dataset.loc[known.index, "undirected_edge_key"].astype(str).isin(keys).to_numpy()
+                        dataset.loc[known.index, "undirected_edge_key"]
+                        .astype(str)
+                        .isin(keys)
+                        .to_numpy()
                     ]
                     split.loc[peer_idx] = "predict_holdout"
     if (split == "train").sum() == 0 or (split == "test").sum() == 0:
@@ -1220,21 +1386,27 @@ def _features_for_model(
     dataset: pd.DataFrame,
     feature_set: str,
     *,
-    config: Optional[SurfaceAIConfig] = None,
-) -> Tuple[pd.DataFrame, List[str], List[str]]:
+    config: SurfaceAIConfig | None = None,
+) -> tuple[pd.DataFrame, list[str], list[str]]:
     geometry_cols = list(AI_GEOMETRY_FEATURES)
-    if feature_set.endswith("_without_spatial_prior") or feature_set == "combined_without_spatial_prior":
+    if (
+        feature_set.endswith("_without_spatial_prior")
+        or feature_set == "combined_without_spatial_prior"
+    ):
         geometry_cols = [c for c in geometry_cols if c not in SPATIAL_PRIOR_FEATURES]
     if feature_set == "osm":
         cat_cols = list(AI_OSM_FEATURES)
-        num_cols: List[str] = []
+        num_cols: list[str] = []
     elif feature_set == "satellite":
         cat_cols = []
         num_cols = list(AI_SATELLITE_FEATURES)
     elif feature_set in {"combined", "combined_without_spatial_prior"}:
         cat_cols = list(AI_OSM_FEATURES)
         num_cols = geometry_cols + list(AI_SATELLITE_FEATURES)
-    elif feature_set in {"combined_with_neighbors", "combined_with_neighbors_without_spatial_prior"}:
+    elif feature_set in {
+        "combined_with_neighbors",
+        "combined_with_neighbors_without_spatial_prior",
+    }:
         cat_cols = list(AI_OSM_FEATURES)
         num_cols = geometry_cols + list(AI_SATELLITE_FEATURES) + list(NEIGHBOR_FEATURES)
     elif feature_set == "osm_geometry":
@@ -1255,11 +1427,11 @@ def _features_for_model(
     return X, cat_cols, num_cols
 
 
-def _numeric_columns_with_signal(X: pd.DataFrame, num_cols: Sequence[str]) -> List[str]:
+def _numeric_columns_with_signal(X: pd.DataFrame, num_cols: Sequence[str]) -> list[str]:
     """Числовые признаки, в которых есть хотя бы одно не-NaN значение (иначе median-imputer шумит предупреждениями)."""
     if X.empty or len(X) == 0:
         return list(num_cols)
-    out: List[str] = []
+    out: list[str] = []
     for c in num_cols:
         if c not in X.columns:
             continue
@@ -1271,7 +1443,7 @@ def _numeric_columns_with_signal(X: pd.DataFrame, num_cols: Sequence[str]) -> Li
 class ConstantFeatureTransformer(BaseEstimator, TransformerMixin):
     """Single constant feature for candidates whose requested feature set is empty."""
 
-    def fit(self, X: Any, y: Any = None) -> "ConstantFeatureTransformer":
+    def fit(self, X: Any, y: Any = None) -> ConstantFeatureTransformer:
         return self
 
     def transform(self, X: Any) -> np.ndarray:
@@ -1306,13 +1478,15 @@ def _build_preprocessor(cat_cols: Sequence[str], num_cols: Sequence[str]) -> Any
         )
     if not transformers:
         return ConstantFeatureTransformer()
-    return ColumnTransformer(transformers=transformers, remainder="drop", verbose_feature_names_out=True)
+    return ColumnTransformer(
+        transformers=transformers, remainder="drop", verbose_feature_names_out=True
+    )
 
 
 def _rf(
     config: SurfaceAIConfig,
     *,
-    class_weight: Optional[str],
+    class_weight: str | None,
     n_jobs: int = -1,
 ) -> RandomForestClassifier:
     return RandomForestClassifier(
@@ -1324,7 +1498,7 @@ def _rf(
     )
 
 
-def _manual_group_class_weight(config: SurfaceAIConfig) -> Dict[str, float]:
+def _manual_group_class_weight(config: SurfaceAIConfig) -> dict[str, float]:
     """Веса только для меток ``group_target_labels(group_target_mode)`` (без лишних ключей для sklearn)."""
     labels = group_target_labels(config.group_target_mode)
     by_label = {
@@ -1334,7 +1508,7 @@ def _manual_group_class_weight(config: SurfaceAIConfig) -> Dict[str, float]:
         "unpaved_hard": float(config.group_class_weight_unpaved_soft),
         "rough_or_unpaved": float(config.group_class_weight_unpaved_soft),
     }
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     for lab in labels:
         if lab in by_label:
             out[lab] = by_label[lab]
@@ -1349,7 +1523,7 @@ def _build_pipeline(
     config: SurfaceAIConfig,
     *,
     sklearn_n_jobs: int = -1,
-    fit_frame: Optional[pd.DataFrame] = None,
+    fit_frame: pd.DataFrame | None = None,
 ) -> Pipeline:
     if fit_frame is not None and len(fit_frame):
         X_schema, cat_cols, num_cols = _features_for_model(fit_frame, feature_set, config=config)
@@ -1384,11 +1558,13 @@ def _build_pipeline(
 
 
 class HighwayHeuristicClassifier(BaseEstimator, ClassifierMixin):
-    def __init__(self, train_label_classes: Sequence[str], frequent_surfaces: Sequence[str]) -> None:
+    def __init__(
+        self, train_label_classes: Sequence[str], frequent_surfaces: Sequence[str]
+    ) -> None:
         self.classes_ = np.array(sorted(set(train_label_classes)))
         self.frequent_surfaces_ = set(frequent_surfaces)
 
-    def fit(self, X: pd.DataFrame, y: Sequence[str]) -> "HighwayHeuristicClassifier":
+    def fit(self, X: pd.DataFrame, y: Sequence[str]) -> HighwayHeuristicClassifier:
         self.classes_ = np.array(sorted(set(y)))
         return self
 
@@ -1422,7 +1598,7 @@ class GroupHighwayHeuristicClassifier(BaseEstimator, ClassifierMixin):
         self.group_mode = group_mode
         self.classes_ = np.array(group_target_labels(group_mode))
 
-    def fit(self, X: pd.DataFrame, y: Sequence[str]) -> "GroupHighwayHeuristicClassifier":
+    def fit(self, X: pd.DataFrame, y: Sequence[str]) -> GroupHighwayHeuristicClassifier:
         self.classes_ = np.array(sorted(set(str(v) for v in y)))
         return self
 
@@ -1461,7 +1637,11 @@ def _candidate_feature_set(candidate: str) -> str:
         return "combined"
     if key in {"combined_rf_without_spatial_prior", "combined_rf_balanced_without_spatial_prior"}:
         return "combined_without_spatial_prior"
-    if key in {"combined_rf_with_neighbors", "combined_with_neighbors", "combined_rf_neighbor_features"}:
+    if key in {
+        "combined_rf_with_neighbors",
+        "combined_with_neighbors",
+        "combined_rf_neighbor_features",
+    }:
         return "combined_with_neighbors"
     if key in {
         "combined_rf_class_weight_manual",
@@ -1475,7 +1655,7 @@ def _candidate_feature_set(candidate: str) -> str:
     return "none"
 
 
-def _candidate_display(candidate: str) -> Tuple[str, str]:
+def _candidate_display(candidate: str) -> tuple[str, str]:
     mapping = {
         "always_majority": ("Always majority", "none"),
         "highway_heuristic": ("Highway heuristic", "highway only"),
@@ -1484,24 +1664,63 @@ def _candidate_display(candidate: str) -> Tuple[str, str]:
         "combined_rf": ("Combined RF", "OSM + geometry + satellite"),
         "combined_rf_balanced": ("Combined balanced RF", "OSM + geometry + satellite"),
         "combined_balanced_random_forest": ("Combined balanced RF", "OSM + geometry + satellite"),
-        "combined_hist_gradient_boosting": ("Combined HistGradientBoosting", "OSM + geometry + satellite"),
-        "combined_logistic_regression": ("Combined logistic regression", "OSM + geometry + satellite"),
-        "combined_rf_without_spatial_prior": ("Combined RF without spatial prior", "OSM + geometry + satellite - spatial prior"),
-        "combined_rf_balanced_without_spatial_prior": ("Combined balanced RF without spatial prior", "OSM + geometry + satellite - spatial prior"),
-        "combined_rf_with_neighbors": ("Combined RF + neighbor features", "OSM + geometry + satellite + neighbors"),
-        "combined_rf_neighbor_features": ("Combined RF + neighbor features", "OSM + geometry + satellite + neighbors"),
+        "combined_hist_gradient_boosting": (
+            "Combined HistGradientBoosting",
+            "OSM + geometry + satellite",
+        ),
+        "combined_logistic_regression": (
+            "Combined logistic regression",
+            "OSM + geometry + satellite",
+        ),
+        "combined_rf_without_spatial_prior": (
+            "Combined RF without spatial prior",
+            "OSM + geometry + satellite - spatial prior",
+        ),
+        "combined_rf_balanced_without_spatial_prior": (
+            "Combined balanced RF without spatial prior",
+            "OSM + geometry + satellite - spatial prior",
+        ),
+        "combined_rf_with_neighbors": (
+            "Combined RF + neighbor features",
+            "OSM + geometry + satellite + neighbors",
+        ),
+        "combined_rf_neighbor_features": (
+            "Combined RF + neighbor features",
+            "OSM + geometry + satellite + neighbors",
+        ),
         "group_direct_always_majority": ("Group direct always majority", "none"),
         "group_direct_highway_heuristic": ("Group direct highway heuristic", "highway only"),
         "group_direct_osm_only_rf": ("Group direct OSM-only RF", "OSM tags"),
         "group_direct_satellite_only_rf": ("Group direct satellite-only RF", "satellite stats"),
         "group_direct_combined_rf": ("Group direct Combined RF", "OSM + geometry + satellite"),
-        "group_direct_combined_rf_balanced": ("Group direct Combined balanced RF", "OSM + geometry + satellite"),
-        "group_direct_combined_rf_calibrated": ("Group direct Combined calibrated RF", "OSM + geometry + satellite"),
-        "group_direct_combined_rf_without_spatial_prior": ("Group direct Combined RF without spatial prior", "OSM + geometry + satellite - spatial prior"),
-        "group_direct_combined_rf_balanced_without_spatial_prior": ("Group direct Combined balanced RF without spatial prior", "OSM + geometry + satellite - spatial prior"),
-        "group_direct_combined_rf_neighbor_features": ("Group direct RF + neighbor features", "OSM + geometry + satellite + neighbors"),
-        "group_direct_combined_rf_with_neighbors": ("Group direct RF + neighbor features", "OSM + geometry + satellite + neighbors"),
-        "group_direct_combined_rf_class_weight_manual": ("Group direct RF manual rough weights", "OSM + geometry + satellite"),
+        "group_direct_combined_rf_balanced": (
+            "Group direct Combined balanced RF",
+            "OSM + geometry + satellite",
+        ),
+        "group_direct_combined_rf_calibrated": (
+            "Group direct Combined calibrated RF",
+            "OSM + geometry + satellite",
+        ),
+        "group_direct_combined_rf_without_spatial_prior": (
+            "Group direct Combined RF without spatial prior",
+            "OSM + geometry + satellite - spatial prior",
+        ),
+        "group_direct_combined_rf_balanced_without_spatial_prior": (
+            "Group direct Combined balanced RF without spatial prior",
+            "OSM + geometry + satellite - spatial prior",
+        ),
+        "group_direct_combined_rf_neighbor_features": (
+            "Group direct RF + neighbor features",
+            "OSM + geometry + satellite + neighbors",
+        ),
+        "group_direct_combined_rf_with_neighbors": (
+            "Group direct RF + neighbor features",
+            "OSM + geometry + satellite + neighbors",
+        ),
+        "group_direct_combined_rf_class_weight_manual": (
+            "Group direct RF manual rough weights",
+            "OSM + geometry + satellite",
+        ),
         "group_direct_combined_rf_paved_rough_weighted": (
             "Group direct RF manual weights (paved_rough emphasis)",
             "OSM + geometry + satellite; same RF weights as class_weight_manual until real oversampling exists",
@@ -1510,7 +1729,10 @@ def _candidate_display(candidate: str) -> Tuple[str, str]:
             "Group direct RF paved_rough oversampled",
             "OSM + geometry + satellite; implemented as manual class weights",
         ),
-        "group_direct_combined_rf_threshold_tuned": ("Group direct RF + post-hoc group thresholds", "OSM + geometry + satellite"),
+        "group_direct_combined_rf_threshold_tuned": (
+            "Group direct RF + post-hoc group thresholds",
+            "OSM + geometry + satellite",
+        ),
     }
     return mapping.get(candidate, (candidate, _candidate_feature_set(candidate)))
 
@@ -1521,7 +1743,7 @@ def _metrics_for_predictions(
     *,
     labels: Sequence[str],
     target: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     labels = list(labels)
     report = classification_report(
         y_true,
@@ -1533,9 +1755,17 @@ def _metrics_for_predictions(
     true_groups = pd.Series(y_true).map(train_label_to_group)
     pred_groups = pd.Series(y_pred).map(train_label_to_group)
     bad_mask = true_groups.isin({"unpaved_hard", "unpaved_soft"})
-    recall_bad = float((pred_groups[bad_mask].isin({"unpaved_hard", "unpaved_soft"})).mean()) if bad_mask.any() else 0.0
+    recall_bad = (
+        float((pred_groups[bad_mask].isin({"unpaved_hard", "unpaved_soft"})).mean())
+        if bad_mask.any()
+        else 0.0
+    )
     unpaved_soft_mask = true_groups == "unpaved_soft"
-    recall_unpaved_soft = float((pred_groups[unpaved_soft_mask] == "unpaved_soft").mean()) if unpaved_soft_mask.any() else 0.0
+    recall_unpaved_soft = (
+        float((pred_groups[unpaved_soft_mask] == "unpaved_soft").mean())
+        if unpaved_soft_mask.any()
+        else 0.0
+    )
     return {
         "target": target,
         "accuracy": float(accuracy_score(y_true, y_pred)),
@@ -1553,7 +1783,7 @@ def _metrics_for_predictions(
     }
 
 
-def _group_metrics_for_predictions(y_true: Sequence[str], y_pred: Sequence[str]) -> Dict[str, Any]:
+def _group_metrics_for_predictions(y_true: Sequence[str], y_pred: Sequence[str]) -> dict[str, Any]:
     ytg = pd.Series(y_true).map(train_label_to_group).tolist()
     ypg = pd.Series(y_pred).map(train_label_to_group).tolist()
     labels = list(SURFACE_GROUPS)
@@ -1592,9 +1822,9 @@ def _group_metrics_for_predictions(y_true: Sequence[str], y_pred: Sequence[str])
 def dangerous_upgrade_metrics(
     true_groups: Sequence[str],
     raw_pred_groups: Sequence[str],
-    effective_pred_groups: Optional[Sequence[str]] = None,
-    lengths_m: Optional[Sequence[float]] = None,
-) -> Dict[str, Any]:
+    effective_pred_groups: Sequence[str] | None = None,
+    lengths_m: Sequence[float] | None = None,
+) -> dict[str, Any]:
     true = pd.Series(list(true_groups), dtype=object).fillna("unknown").astype(str)
     raw = pd.Series(list(raw_pred_groups), dtype=object).fillna("unknown").astype(str)
     effective = (
@@ -1602,10 +1832,14 @@ def dangerous_upgrade_metrics(
         if effective_pred_groups is not None
         else raw
     )
-    lengths = pd.Series(list(lengths_m), dtype=float) if lengths_m is not None else pd.Series(np.ones(len(true)), dtype=float)
+    lengths = (
+        pd.Series(list(lengths_m), dtype=float)
+        if lengths_m is not None
+        else pd.Series(np.ones(len(true)), dtype=float)
+    )
     non_good = true.isin({"paved_rough", "unpaved_hard", "unpaved_soft", "rough_or_unpaved"})
 
-    def block(pred: pd.Series, suffix: str) -> Dict[str, Any]:
+    def block(pred: pd.Series, suffix: str) -> dict[str, Any]:
         mask = pd.Series([is_dangerous_upgrade(t, p) for t, p in zip(true, pred)])
         by_class = {g: int(mask[true == g].sum()) for g in sorted(true[non_good].unique())}
         rate_by = {
@@ -1616,11 +1850,15 @@ def dangerous_upgrade_metrics(
         return {
             f"dangerous_upgrade_count_{suffix}": int(mask.sum()),
             f"dangerous_upgrade_rate_{suffix}_all": float(mask.mean()) if len(mask) else 0.0,
-            f"dangerous_upgrade_rate_{suffix}_among_non_good": float(mask[non_good].mean()) if non_good.any() else 0.0,
+            f"dangerous_upgrade_rate_{suffix}_among_non_good": float(mask[non_good].mean())
+            if non_good.any()
+            else 0.0,
             f"dangerous_upgrade_count_by_true_class_{suffix}": by_class,
             f"dangerous_upgrade_rate_by_true_class_{suffix}": rate_by,
             f"dangerous_upgrade_length_m_{suffix}": float(lengths[mask].sum()),
-            f"dangerous_upgrade_length_share_{suffix}": float(lengths[mask].sum() / max(1e-9, lengths.sum())),
+            f"dangerous_upgrade_length_share_{suffix}": float(
+                lengths[mask].sum() / max(1e-9, lengths.sum())
+            ),
             f"dangerous_upgrade_weighted_score_{suffix}": float((sev[mask]).sum()),
         }
 
@@ -1636,38 +1874,39 @@ def dangerous_upgrade_metrics(
     return out
 
 
-def macro_f1_safe(metrics: Dict[str, Any], config: SurfaceAIConfig) -> float:
+def macro_f1_safe(metrics: dict[str, Any], config: SurfaceAIConfig) -> float:
     return float(metrics.get("macro_f1", 0.0)) - float(config.dangerous_error_penalty) * float(
         metrics.get("dangerous_upgrade_rate_effective", 0.0)
     )
 
 
-def macro_f1_safe_rough_aware(metrics: Dict[str, Any], config: SurfaceAIConfig) -> float:
+def macro_f1_safe_rough_aware(metrics: dict[str, Any], config: SurfaceAIConfig) -> float:
     return (
         float(metrics.get("macro_f1", 0.0))
         + float(config.unpaved_soft_recall_weight) * float(metrics.get("recall_unpaved_soft", 0.0))
         + float(config.paved_rough_recall_weight) * float(metrics.get("recall_paved_rough", 0.0))
-        - float(config.dangerous_error_penalty) * float(metrics.get("dangerous_upgrade_rate_effective", 0.0))
+        - float(config.dangerous_error_penalty)
+        * float(metrics.get("dangerous_upgrade_rate_effective", 0.0))
     )
 
 
 def train_evaluate_models(
     dataset: pd.DataFrame,
     config: SurfaceAIConfig,
-    label_meta: Dict[str, Any],
+    label_meta: dict[str, Any],
     *,
     progress: ProgressFactory = no_progress,
-) -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
+) -> tuple[dict[str, Any], pd.DataFrame, pd.DataFrame]:
     train = dataset[dataset["surface_ai_split"] == "train"].copy()
     test = dataset[dataset["surface_ai_split"] == "test"].copy()
     y_train = train["surface_train_label"].astype(str)
     y_test = test["surface_train_label"].astype(str)
     labels = sorted(set(y_train) | set(y_test))
     frequent = label_meta.get("frequent_surface_classes", [])
-    models: Dict[str, Any] = {}
-    rows: List[Dict[str, Any]] = []
-    group_rows: List[Dict[str, Any]] = []
-    test_predictions: Dict[str, List[str]] = {}
+    models: dict[str, Any] = {}
+    rows: list[dict[str, Any]] = []
+    group_rows: list[dict[str, Any]] = []
+    test_predictions: dict[str, list[str]] = {}
 
     candidates = list(dict.fromkeys(config.model_candidates))
     for candidate in progress(candidates, "[5/8] Train/evaluate models", total=len(candidates)):
@@ -1744,12 +1983,14 @@ def train_evaluate_models(
 
 
 def select_best_model(
-    models: Dict[str, Any],
+    models: dict[str, Any],
     baseline_table: pd.DataFrame,
     config: SurfaceAIConfig,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     concrete = baseline_table[baseline_table["target"] == "concrete surface"].copy()
-    eligible = concrete[concrete["recall_bad_surface"] >= float(config.min_bad_surface_recall)].copy()
+    eligible = concrete[
+        concrete["recall_bad_surface"] >= float(config.min_bad_surface_recall)
+    ].copy()
     safety_applied = True
     if eligible.empty:
         eligible = concrete
@@ -1771,7 +2012,9 @@ def select_best_model(
     }
 
 
-def _effective_group_for_metrics(pred_group: str, confidence: float, margin: float, config: SurfaceAIConfig) -> str:
+def _effective_group_for_metrics(
+    pred_group: str, confidence: float, margin: float, config: SurfaceAIConfig
+) -> str:
     if margin < float(config.min_margin):
         return "unknown"
     if confidence < float(config.min_confidence):
@@ -1798,13 +2041,17 @@ def _fit_candidate_model(
     calibration: pd.DataFrame,
     config: SurfaceAIConfig,
     labels: Sequence[str],
-    label_meta: Dict[str, Any],
+    label_meta: dict[str, Any],
     *,
     sklearn_n_jobs: int = -1,
-) -> Tuple[Any, pd.DataFrame]:
+) -> tuple[Any, pd.DataFrame]:
     train_fit = pd.concat([train, calibration], axis=0) if not calibration.empty else train
-    y_train = train["surface_group_direct_label" if target == "group_direct" else "surface_train_label"].astype(str)
-    y_train_fit = train_fit["surface_group_direct_label" if target == "group_direct" else "surface_train_label"].astype(str)
+    y_train = train[
+        "surface_group_direct_label" if target == "group_direct" else "surface_train_label"
+    ].astype(str)
+    y_train_fit = train_fit[
+        "surface_group_direct_label" if target == "group_direct" else "surface_train_label"
+    ].astype(str)
     kind = _task_candidate_kind(candidate)
     if kind == "always_majority":
         model: Any = DummyClassifier(strategy="most_frequent")
@@ -1815,12 +2062,19 @@ def _fit_candidate_model(
         if target == "group_direct":
             model = GroupHighwayHeuristicClassifier(config.group_target_mode)
         else:
-            model = HighwayHeuristicClassifier(labels, label_meta.get("frequent_surface_classes", []))
+            model = HighwayHeuristicClassifier(
+                labels, label_meta.get("frequent_surface_classes", [])
+            )
         X_train_fit, _, _ = _features_for_model(train_fit, "osm", config=config)
         model.fit(X_train_fit, y_train_fit)
         return model, X_train_fit
 
-    calibrate = "calibrated" in candidate and config.calibration_enabled and config.calibration_method != "none" and not calibration.empty
+    calibrate = (
+        "calibrated" in candidate
+        and config.calibration_enabled
+        and config.calibration_method != "none"
+        and not calibration.empty
+    )
     base = _build_pipeline(
         candidate.replace("_calibrated", ""),
         feature_set,
@@ -1832,7 +2086,9 @@ def _fit_candidate_model(
         X_train, _, _ = _features_for_model(train, feature_set, config=config)
         base.fit(X_train, y_train)
         X_cal, _, _ = _features_for_model(calibration, feature_set, config=config)
-        y_cal = calibration["surface_group_direct_label" if target == "group_direct" else "surface_train_label"].astype(str)
+        y_cal = calibration[
+            "surface_group_direct_label" if target == "group_direct" else "surface_train_label"
+        ].astype(str)
         if y_cal.nunique() >= 2 and len(y_cal) >= int(config.calibration_min_class_count):
             try:
                 calibrated = CalibratedClassifierCV(
@@ -1850,12 +2106,14 @@ def _fit_candidate_model(
     return base, X_train_fit
 
 
-def _proba_top_fields(proba: pd.DataFrame) -> Tuple[List[str], List[float], List[str], List[float], List[float]]:
-    labels: List[str] = []
-    conf: List[float] = []
-    labels2: List[str] = []
-    conf2: List[float] = []
-    margins: List[float] = []
+def _proba_top_fields(
+    proba: pd.DataFrame,
+) -> tuple[list[str], list[float], list[str], list[float], list[float]]:
+    labels: list[str] = []
+    conf: list[float] = []
+    labels2: list[str] = []
+    conf2: list[float] = []
+    margins: list[float] = []
     for _, row in proba.iterrows():
         ordered = row.sort_values(ascending=False)
         top1 = str(ordered.index[0]) if len(ordered) else "unknown"
@@ -1875,16 +2133,16 @@ def _tuned_group_top_fields(
     config: SurfaceAIConfig,
     *,
     candidate: str,
-) -> Tuple[List[str], List[float], List[str], List[float], List[float]]:
+) -> tuple[list[str], list[float], list[str], list[float], list[float]]:
     pred, conf, top2, top2_conf, margin = _proba_top_fields(proba)
     # Иначе все group-direct кандидаты получают один post-processing — сравнение моделей искажается.
     if "threshold_tuned" not in candidate or not config.group_threshold_tuning:
         return pred, conf, top2, top2_conf, margin
-    tuned: List[str] = []
-    tuned_conf: List[float] = []
-    tuned_top2: List[str] = []
-    tuned_top2_conf: List[float] = []
-    tuned_margin: List[float] = []
+    tuned: list[str] = []
+    tuned_conf: list[float] = []
+    tuned_top2: list[str] = []
+    tuned_top2_conf: list[float] = []
+    tuned_margin: list[float] = []
     for idx, row in proba.iterrows():
         ordered = row.sort_values(ascending=False)
         chosen = str(ordered.index[0]) if len(ordered) else "unknown"
@@ -1917,7 +2175,7 @@ def evaluate_task_model(
     test: pd.DataFrame,
     labels: Sequence[str],
     config: SurfaceAIConfig,
-) -> Tuple[Dict[str, Any], pd.DataFrame]:
+) -> tuple[dict[str, Any], pd.DataFrame]:
     if _task_candidate_kind(candidate) == "always_majority":
         X_test = pd.DataFrame({"constant": np.ones(len(test))}, index=test.index)
     else:
@@ -1958,13 +2216,16 @@ def evaluate_task_model(
         )
     )
     rough_effective_mask = [
-        t == "paved_rough" and p == "paved_good"
-        for t, p in zip(true_groups, effective_groups)
+        t == "paved_rough" and p == "paved_good" for t, p in zip(true_groups, effective_groups)
     ]
     lengths = pd.to_numeric(test["length_m"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     rough_true_count = sum(1 for t in true_groups if t == "paved_rough")
-    metrics["rough_upgrade_rate_effective"] = float(sum(rough_effective_mask) / rough_true_count) if rough_true_count else 0.0
-    metrics["rough_upgrade_length_m_effective"] = float(lengths[np.asarray(rough_effective_mask, dtype=bool)].sum()) if len(lengths) else 0.0
+    metrics["rough_upgrade_rate_effective"] = (
+        float(sum(rough_effective_mask) / rough_true_count) if rough_true_count else 0.0
+    )
+    metrics["rough_upgrade_length_m_effective"] = (
+        float(lengths[np.asarray(rough_effective_mask, dtype=bool)].sum()) if len(lengths) else 0.0
+    )
     metrics["macro_f1_safe"] = macro_f1_safe(metrics, config)
     metrics["macro_f1_safe_rough_aware"] = macro_f1_safe_rough_aware(metrics, config)
     metrics["confusion_matrix_labels"] = report_labels if target != "group_direct" else list(labels)
@@ -1987,24 +2248,23 @@ def evaluate_task_model(
 def train_evaluate_task_models(
     dataset: pd.DataFrame,
     config: SurfaceAIConfig,
-    label_meta: Dict[str, Any],
+    label_meta: dict[str, Any],
     *,
     target: str,
     candidates: Sequence[str],
     progress: ProgressFactory = no_progress,
-) -> Tuple[Dict[str, Any], pd.DataFrame]:
+) -> tuple[dict[str, Any], pd.DataFrame]:
     train = dataset[dataset["surface_ai_split"] == "train"].copy()
     calibration = dataset[dataset["surface_ai_split"] == "calibration"].copy()
     test = dataset[dataset["surface_ai_split"] == "test"].copy()
     target_col = "surface_group_direct_label" if target == "group_direct" else "surface_train_label"
     labels = sorted(set(train[target_col].astype(str)) | set(test[target_col].astype(str)))
-    models: Dict[str, Any] = {}
-    rows: List[Dict[str, Any]] = []
+    models: dict[str, Any] = {}
+    rows: list[dict[str, Any]] = []
     cand_list = list(dict.fromkeys(candidates))
     workers = 1
-    if (
-        bool(config.auto_parallel)
-        and len(cand_list) >= int(config.model_outer_parallel_min_candidates)
+    if bool(config.auto_parallel) and len(cand_list) >= int(
+        config.model_outer_parallel_min_candidates
     ):
         from bike_router.tools._parallel_utils import auto_worker_count
 
@@ -2014,10 +2274,10 @@ def train_evaluate_task_models(
         )
     use_outer_mp = workers > 1
     if use_outer_mp:
-        from concurrent.futures import ProcessPoolExecutor
         import shutil
         import tempfile
         import time as _time
+        from concurrent.futures import ProcessPoolExecutor
 
         from .surface_ai_mp import train_surface_ai_candidate_worker
 
@@ -2078,7 +2338,9 @@ def train_evaluate_task_models(
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
     else:
-        for candidate in progress(cand_list, f"[5/8] Train/evaluate {target}", total=len(cand_list)):
+        for candidate in progress(
+            cand_list, f"[5/8] Train/evaluate {target}", total=len(cand_list)
+        ):
             display, features_label = _candidate_display(candidate)
             feature_set = _candidate_feature_set(candidate)
             model, _ = _fit_candidate_model(
@@ -2118,17 +2380,29 @@ def train_evaluate_task_models(
                     "recall_paved_rough": metrics.get("recall_paved_rough", np.nan),
                     "precision_paved_rough": metrics.get("precision_paved_rough", np.nan),
                     "f1_paved_rough": metrics.get("f1_paved_rough", np.nan),
-                    "paved_rough_to_paved_good_count": metrics.get("paved_rough_to_paved_good_count", 0),
-                    "paved_rough_to_paved_good_rate": metrics.get("paved_rough_to_paved_good_rate", 0.0),
-                    "rough_upgrade_rate_effective": metrics.get("rough_upgrade_rate_effective", 0.0),
-                    "rough_upgrade_length_m_effective": metrics.get("rough_upgrade_length_m_effective", 0.0),
+                    "paved_rough_to_paved_good_count": metrics.get(
+                        "paved_rough_to_paved_good_count", 0
+                    ),
+                    "paved_rough_to_paved_good_rate": metrics.get(
+                        "paved_rough_to_paved_good_rate", 0.0
+                    ),
+                    "rough_upgrade_rate_effective": metrics.get(
+                        "rough_upgrade_rate_effective", 0.0
+                    ),
+                    "rough_upgrade_length_m_effective": metrics.get(
+                        "rough_upgrade_length_m_effective", 0.0
+                    ),
                     "recall_asphalt": metrics.get("recall_asphalt", np.nan),
                     "recall_concrete": metrics.get("recall_concrete", np.nan),
                     "recall_paving_stones": metrics.get("recall_paving_stones", np.nan),
                     "dangerous_upgrade_rate_raw": metrics.get("dangerous_upgrade_rate_raw", 0.0),
-                    "dangerous_upgrade_rate_effective": metrics.get("dangerous_upgrade_rate_effective", 0.0),
+                    "dangerous_upgrade_rate_effective": metrics.get(
+                        "dangerous_upgrade_rate_effective", 0.0
+                    ),
                     "dangerous_upgrade_count_raw": metrics.get("dangerous_upgrade_count_raw", 0),
-                    "dangerous_upgrade_count_effective": metrics.get("dangerous_upgrade_count_effective", 0),
+                    "dangerous_upgrade_count_effective": metrics.get(
+                        "dangerous_upgrade_count_effective", 0
+                    ),
                     "dangerous_upgrade_length_m_effective": metrics.get(
                         "dangerous_upgrade_length_m_effective", 0.0
                     ),
@@ -2146,11 +2420,17 @@ def train_evaluate_task_models(
     return models, table
 
 
-def select_model_for_target(models: Dict[str, Any], table: pd.DataFrame, config: SurfaceAIConfig, *, target: str) -> Dict[str, Any]:
+def select_model_for_target(
+    models: dict[str, Any], table: pd.DataFrame, config: SurfaceAIConfig, *, target: str
+) -> dict[str, Any]:
     if table.empty:
         raise ValueError(f"No models evaluated for {target}")
     if target == "group_direct":
-        metric = config.group_selection_metric if config.group_selection_metric in table.columns else "macro_f1_safe_rough_aware"
+        metric = (
+            config.group_selection_metric
+            if config.group_selection_metric in table.columns
+            else "macro_f1_safe_rough_aware"
+        )
         ranked = table.copy()
         selected_by = metric
         if metric == "macro_f1_safe_rough_aware":
@@ -2196,12 +2476,16 @@ def select_model_for_target(models: Dict[str, Any], table: pd.DataFrame, config:
         "warnings": [
             "WARNING: no group_direct model satisfies paved_rough recall threshold. paved_rough should not be trusted for routing yet."
         ]
-        if target == "group_direct" and float(table.get("recall_paved_rough", pd.Series([0.0])).max()) < float(config.min_paved_rough_recall)
+        if target == "group_direct"
+        and float(table.get("recall_paved_rough", pd.Series([0.0])).max())
+        < float(config.min_paved_rough_recall)
         else [],
     }
 
 
-def reliability_table_from_proba(y_true: Sequence[str], proba: pd.DataFrame, *, n_bins: int = 10) -> Tuple[pd.DataFrame, Dict[str, float]]:
+def reliability_table_from_proba(
+    y_true: Sequence[str], proba: pd.DataFrame, *, n_bins: int = 10
+) -> tuple[pd.DataFrame, dict[str, float]]:
     pred = proba.idxmax(axis=1).astype(str)
     conf = proba.max(axis=1).astype(float)
     correct = (pd.Series(list(y_true), index=proba.index).astype(str) == pred).astype(float)
@@ -2239,8 +2523,12 @@ def reliability_table_from_proba(y_true: Sequence[str], proba: pd.DataFrame, *, 
         "ece_top_label": float(ece),
         "mce_top_label": float(mce),
         "brier_top_label": brier,
-        "mean_confidence_correct": float(conf[correct == 1].mean()) if (correct == 1).any() else 0.0,
-        "mean_confidence_incorrect": float(conf[correct == 0].mean()) if (correct == 0).any() else 0.0,
+        "mean_confidence_correct": float(conf[correct == 1].mean())
+        if (correct == 1).any()
+        else 0.0,
+        "mean_confidence_incorrect": float(conf[correct == 0].mean())
+        if (correct == 0).any()
+        else 0.0,
     }
     return pd.DataFrame(rows), metrics
 
@@ -2263,13 +2551,13 @@ def plot_calibration_curve(reliability: pd.DataFrame, path: Path, *, title: str)
 
 def calibration_artifacts_for_selected(
     dataset: pd.DataFrame,
-    selected: Dict[str, Any],
-    models: Dict[str, Any],
+    selected: dict[str, Any],
+    models: dict[str, Any],
     artifacts: SurfaceAIArtifacts,
     config: SurfaceAIConfig,
     *,
     target: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     key = selected["model_key"]
     entry = models[key]
     test = dataset[dataset["surface_ai_split"] == "test"].copy()
@@ -2287,22 +2575,26 @@ def calibration_artifacts_for_selected(
     table, metrics = reliability_table_from_proba(test[target_col].astype(str).tolist(), proba)
     if target == "group_direct":
         table.to_csv(artifacts.reliability_table_group_direct_csv, index=False, encoding="utf-8")
-        plot_calibration_curve(table, artifacts.calibration_curve_group_direct_png, title="Group direct calibration")
+        plot_calibration_curve(
+            table, artifacts.calibration_curve_group_direct_png, title="Group direct calibration"
+        )
     else:
         table.to_csv(artifacts.reliability_table_concrete_csv, index=False, encoding="utf-8")
-        plot_calibration_curve(table, artifacts.calibration_curve_concrete_png, title="Concrete compact calibration")
+        plot_calibration_curve(
+            table, artifacts.calibration_curve_concrete_png, title="Concrete compact calibration"
+        )
     return metrics
 
 
 def evaluate_selected_on_split(
     dataset: pd.DataFrame,
-    selected: Dict[str, Any],
-    models: Dict[str, Any],
+    selected: dict[str, Any],
+    models: dict[str, Any],
     config: SurfaceAIConfig,
     *,
     target: str,
     split_name: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     subset = dataset[dataset["surface_ai_split"] == split_name].copy()
     if subset.empty:
         return {"split": split_name, "target": target, "edge_count": 0}
@@ -2325,8 +2617,8 @@ def evaluate_selected_on_split(
 
 def apply_posthoc_calibration_to_selected(
     dataset: pd.DataFrame,
-    selected: Dict[str, Any],
-    models: Dict[str, Any],
+    selected: dict[str, Any],
+    models: dict[str, Any],
     config: SurfaceAIConfig,
     *,
     target: str,
@@ -2339,7 +2631,10 @@ def apply_posthoc_calibration_to_selected(
         selected["calibrated"] = False
         return False
     entry = models[key]
-    if isinstance(entry.get("model"), CalibratedClassifierCV) or entry.get("calibrated_model") is not None:
+    if (
+        isinstance(entry.get("model"), CalibratedClassifierCV)
+        or entry.get("calibrated_model") is not None
+    ):
         selected["calibrated"] = True
         selected["calibration_method"] = config.calibration_method
         return True
@@ -2401,7 +2696,9 @@ def _predict_model_proba(model: Any, X: pd.DataFrame, classes: Sequence[str]) ->
     return out
 
 
-def _has_features(row: pd.Series, feature_set: str, *, config: Optional[SurfaceAIConfig] = None) -> bool:
+def _has_features(
+    row: pd.Series, feature_set: str, *, config: SurfaceAIConfig | None = None
+) -> bool:
     _, cat_cols, num_cols = _features_for_model(pd.DataFrame(), feature_set, config=config)
     for col in cat_cols:
         if _norm_feature(row.get(col)):
@@ -2422,7 +2719,7 @@ def apply_safety_policy(
     margin: float,
     has_features: bool,
     config: SurfaceAIConfig,
-) -> Tuple[str, str, str]:
+) -> tuple[str, str, str]:
     pred_surface = train_label_to_surface(pred_label)
     pred_group = train_label_to_group(pred_label)
     if is_surface_known and true_surface != "unknown":
@@ -2448,7 +2745,7 @@ def apply_safety_policy(
 
 def _predict_entry_proba_for_all(
     dataset: pd.DataFrame,
-    entry: Dict[str, Any],
+    entry: dict[str, Any],
     model_key: str,
     config: SurfaceAIConfig,
     *,
@@ -2462,7 +2759,11 @@ def _predict_entry_proba_for_all(
             entry["feature_set"] if entry["feature_set"] != "none" else "osm",
             config=config,
         )
-    model = entry.get("calibrated_model") if calibrated and entry.get("calibrated_model") is not None else entry["model"]
+    model = (
+        entry.get("calibrated_model")
+        if calibrated and entry.get("calibrated_model") is not None
+        else entry["model"]
+    )
     return _predict_model_proba(model, X, entry["labels"])
 
 
@@ -2476,8 +2777,8 @@ def confidence_bucket(conf: float, config: SurfaceAIConfig) -> str:
 
 def predict_all_edges(
     dataset: pd.DataFrame,
-    concrete_models: Dict[str, Any],
-    group_models: Dict[str, Any],
+    concrete_models: dict[str, Any],
+    group_models: dict[str, Any],
     config: SurfaceAIConfig,
     *,
     progress: ProgressFactory = no_progress,
@@ -2490,17 +2791,29 @@ def predict_all_edges(
     group_entry = group_models[group_key]
 
     for _ in progress(range(1), "[6/8] Predict surfaces/groups", total=1):
-        concrete_proba_raw = _predict_entry_proba_for_all(dataset, concrete_entry, concrete_key, config)
+        concrete_proba_raw = _predict_entry_proba_for_all(
+            dataset, concrete_entry, concrete_key, config
+        )
         concrete_proba = _predict_entry_proba_for_all(
             dataset, concrete_entry, concrete_key, config, calibrated=True
         )
         group_proba_raw = _predict_entry_proba_for_all(dataset, group_entry, group_key, config)
-        group_proba = _predict_entry_proba_for_all(dataset, group_entry, group_key, config, calibrated=True)
+        group_proba = _predict_entry_proba_for_all(
+            dataset, group_entry, group_key, config, calibrated=True
+        )
 
-    concrete_pred_raw, concrete_conf_raw, _, _, concrete_margin_raw = _proba_top_fields(concrete_proba_raw)
-    concrete_pred, concrete_conf, concrete_top2, concrete_top2_conf, concrete_margin = _proba_top_fields(concrete_proba)
-    group_pred_raw, group_conf_raw, _, _, group_margin_raw = _tuned_group_top_fields(group_proba_raw, config, candidate=group_key)
-    group_pred, group_conf, group_top2, group_top2_conf, group_margin = _tuned_group_top_fields(group_proba, config, candidate=group_key)
+    concrete_pred_raw, concrete_conf_raw, _, _, concrete_margin_raw = _proba_top_fields(
+        concrete_proba_raw
+    )
+    concrete_pred, concrete_conf, concrete_top2, concrete_top2_conf, concrete_margin = (
+        _proba_top_fields(concrete_proba)
+    )
+    group_pred_raw, group_conf_raw, _, _, group_margin_raw = _tuned_group_top_fields(
+        group_proba_raw, config, candidate=group_key
+    )
+    group_pred, group_conf, group_top2, group_top2_conf, group_margin = _tuned_group_top_fields(
+        group_proba, config, candidate=group_key
+    )
 
     out = dataset.copy()
     out["surface_pred_label"] = concrete_pred
@@ -2508,7 +2821,9 @@ def predict_all_edges(
     out["surface_pred_concrete_compact"] = [train_label_to_surface(x) for x in concrete_pred]
     out["surface_pred_concrete"] = out["surface_pred_concrete_compact"]
     out["surface_pred"] = out["surface_pred_concrete_compact"]
-    out["surface_pred_group_derived_from_concrete"] = [train_label_to_group(x) for x in concrete_pred]
+    out["surface_pred_group_derived_from_concrete"] = [
+        train_label_to_group(x) for x in concrete_pred
+    ]
     out["surface_pred_group_direct"] = group_pred
     out["surface_pred_group_direct_raw"] = group_pred_raw
     out["surface_pred_group"] = out["surface_pred_group_direct"]
@@ -2526,7 +2841,9 @@ def predict_all_edges(
     out["surface_pred_group_direct_margin_raw"] = group_margin_raw
     out["surface_pred_group_direct_margin_calibrated"] = group_margin
 
-    for surface in sorted(set(concrete_proba.columns) | set(REQUIRED_PROBA_SURFACES) | set(CONCRETE_COMPACT_LABELS)):
+    for surface in sorted(
+        set(concrete_proba.columns) | set(REQUIRED_PROBA_SURFACES) | set(CONCRETE_COMPACT_LABELS)
+    ):
         col = proba_column_for_surface(train_label_to_surface(surface))
         if col not in out.columns:
             out[col] = 0.0
@@ -2537,10 +2854,10 @@ def predict_all_edges(
     if "proba_unknown" not in out.columns:
         out["proba_unknown"] = 0.0
 
-    raw_eff: List[str] = []
-    cal_eff: List[str] = []
-    sources: List[str] = []
-    concrete_effective: List[str] = []
+    raw_eff: list[str] = []
+    cal_eff: list[str] = []
+    sources: list[str] = []
+    concrete_effective: list[str] = []
     for idx, row in out.iterrows():
         known = bool(row.get("is_surface_known"))
         true_group = normalize_group_target(row.get("surface_true_group"), config.group_target_mode)
@@ -2567,7 +2884,13 @@ def predict_all_edges(
         raw_eff.append(raw_pred_group if not known else true_group)
         cal_eff.append(eff_group)
         sources.append(source)
-        concrete_effective.append(str(row.get("surface_true_concrete") if known else row.get("surface_pred_concrete_compact")))
+        concrete_effective.append(
+            str(
+                row.get("surface_true_concrete")
+                if known
+                else row.get("surface_pred_concrete_compact")
+            )
+        )
     out["surface_source"] = sources
     out["surface_effective_for_routing"] = concrete_effective
     out["surface_effective_group_for_routing_raw"] = raw_eff
@@ -2575,24 +2898,33 @@ def predict_all_edges(
     out["surface_effective_group_for_routing"] = cal_eff
     true_direct = out["surface_group_direct_label"].astype(str)
     out["dangerous_upgrade_raw"] = [
-        is_dangerous_upgrade(t, p) for t, p in zip(true_direct, out["surface_effective_group_for_routing_raw"].astype(str))
+        is_dangerous_upgrade(t, p)
+        for t, p in zip(true_direct, out["surface_effective_group_for_routing_raw"].astype(str))
     ]
     out["dangerous_upgrade_effective"] = [
-        is_dangerous_upgrade(t, p) for t, p in zip(true_direct, out["surface_effective_group_for_routing_calibrated"].astype(str))
+        is_dangerous_upgrade(t, p)
+        for t, p in zip(
+            true_direct, out["surface_effective_group_for_routing_calibrated"].astype(str)
+        )
     ]
     out["dangerous_upgrade_severity"] = [
         DANGEROUS_UPGRADE_SEVERITY.get(str(t), 0.0) if bool(flag) else 0.0
         for t, flag in zip(true_direct, out["dangerous_upgrade_effective"])
     ]
-    out["confidence_bucket_raw"] = [confidence_bucket(float(x), config) for x in out["surface_pred_group_direct_confidence_raw"]]
-    out["confidence_bucket_calibrated"] = [confidence_bucket(float(x), config) for x in out["surface_pred_group_direct_confidence_calibrated"]]
+    out["confidence_bucket_raw"] = [
+        confidence_bucket(float(x), config) for x in out["surface_pred_group_direct_confidence_raw"]
+    ]
+    out["confidence_bucket_calibrated"] = [
+        confidence_bucket(float(x), config)
+        for x in out["surface_pred_group_direct_confidence_calibrated"]
+    ]
     out["tile_id_samples"] = ""
     out["tile_green_mask_available"] = False
     out["edge_green_cache_available"] = False
     return out
 
 
-def dataset_summary(dataset: pd.DataFrame) -> Dict[str, Any]:
+def dataset_summary(dataset: pd.DataFrame) -> dict[str, Any]:
     total = int(len(dataset))
     known = int(dataset["is_surface_known"].sum()) if total else 0
     return {
@@ -2600,23 +2932,37 @@ def dataset_summary(dataset: pd.DataFrame) -> Dict[str, Any]:
         "known_surface_edges": known,
         "unknown_surface_edges": total - known,
         "unknown_share": float((total - known) / total) if total else 0.0,
-        "train_edges_total": int(dataset.get("inside_train_area", pd.Series(False, index=dataset.index)).astype(bool).sum()),
+        "train_edges_total": int(
+            dataset.get("inside_train_area", pd.Series(False, index=dataset.index))
+            .astype(bool)
+            .sum()
+        ),
         "train_edges_with_tile_features": int(
             (
                 dataset.get("inside_train_area", pd.Series(False, index=dataset.index)).astype(bool)
-                & dataset.get("has_tile_features", pd.Series(False, index=dataset.index)).astype(bool)
+                & dataset.get("has_tile_features", pd.Series(False, index=dataset.index)).astype(
+                    bool
+                )
             ).sum()
         ),
-        "train_known_surface_edges": int(dataset.get("is_train_candidate", pd.Series(False, index=dataset.index)).astype(bool).sum()),
+        "train_known_surface_edges": int(
+            dataset.get("is_train_candidate", pd.Series(False, index=dataset.index))
+            .astype(bool)
+            .sum()
+        ),
         "train_known_surface_edges_with_tile_features": int(
             (
                 dataset.get("inside_train_area", pd.Series(False, index=dataset.index)).astype(bool)
                 & dataset["is_surface_known"].astype(bool)
-                & dataset.get("has_tile_features", pd.Series(False, index=dataset.index)).astype(bool)
+                & dataset.get("has_tile_features", pd.Series(False, index=dataset.index)).astype(
+                    bool
+                )
             ).sum()
         ),
         "train_known_surface_edges_osm_fallback": int(
-            dataset.get("is_train_candidate_osm_fallback", pd.Series(False, index=dataset.index)).astype(bool).sum()
+            dataset.get("is_train_candidate_osm_fallback", pd.Series(False, index=dataset.index))
+            .astype(bool)
+            .sum()
         ),
         "train_unknown_surface_edges": int(
             (
@@ -2624,20 +2970,34 @@ def dataset_summary(dataset: pd.DataFrame) -> Dict[str, Any]:
                 & ~dataset["is_surface_known"].astype(bool)
             ).sum()
         ),
-        "predict_edges_inside_polygon": int(dataset.get("inside_predict_area", pd.Series(False, index=dataset.index)).astype(bool).sum()),
-        "predict_unknown_surface_edges_inside_polygon": int(
-            dataset.get("is_prediction_candidate", pd.Series(False, index=dataset.index)).astype(bool).sum()
+        "predict_edges_inside_polygon": int(
+            dataset.get("inside_predict_area", pd.Series(False, index=dataset.index))
+            .astype(bool)
+            .sum()
         ),
-        "surface_norm_distribution": dataset["surface_true_concrete"].value_counts(dropna=False).to_dict(),
+        "predict_unknown_surface_edges_inside_polygon": int(
+            dataset.get("is_prediction_candidate", pd.Series(False, index=dataset.index))
+            .astype(bool)
+            .sum()
+        ),
+        "surface_norm_distribution": dataset["surface_true_concrete"]
+        .value_counts(dropna=False)
+        .to_dict(),
         "surface_train_label_distribution": dataset.loc[
             dataset["is_surface_known"], "surface_train_label"
-        ].value_counts(dropna=False).to_dict(),
-        "surface_group_distribution": dataset["surface_true_group"].value_counts(dropna=False).to_dict(),
+        ]
+        .value_counts(dropna=False)
+        .to_dict(),
+        "surface_group_distribution": dataset["surface_true_group"]
+        .value_counts(dropna=False)
+        .to_dict(),
         "highway_distribution": dataset["highway"].value_counts(dropna=False).head(50).to_dict(),
     }
 
 
-def experiment_output_dir(settings: Settings, config: SurfaceAIConfig, output_dir: Optional[Path]) -> Path:
+def experiment_output_dir(
+    settings: Settings, config: SurfaceAIConfig, output_dir: Path | None
+) -> Path:
     if output_dir is not None:
         out = Path(output_dir)
     else:
@@ -2674,18 +3034,24 @@ def artifact_paths(output_dir: Path) -> SurfaceAIArtifacts:
         confusion_matrix_concrete_png=output_dir / "surface_ai_confusion_matrix_concrete.png",
         confusion_matrix_group_png=output_dir / "surface_ai_confusion_matrix_group.png",
         feature_importance_png=output_dir / "16_surface_ai_feature_importance.png",
-        confusion_matrix_concrete_compact_png=output_dir / "14_surface_ai_confusion_matrix_concrete_compact.png",
-        confusion_matrix_concrete_legacy_png=output_dir / "surface_ai_confusion_matrix_concrete_legacy.png",
-        confusion_matrix_group_direct_png=output_dir / "15_surface_ai_confusion_matrix_group_direct.png",
+        confusion_matrix_concrete_compact_png=output_dir
+        / "14_surface_ai_confusion_matrix_concrete_compact.png",
+        confusion_matrix_concrete_legacy_png=output_dir
+        / "surface_ai_confusion_matrix_concrete_legacy.png",
+        confusion_matrix_group_direct_png=output_dir
+        / "15_surface_ai_confusion_matrix_group_direct.png",
         group_direct_model_joblib=output_dir / "surface_ai_group_direct_model.joblib",
         group_direct_model_card_json=output_dir / "surface_ai_group_direct_model_card.json",
         group_direct_metrics_json=output_dir / "surface_ai_group_direct_metrics.json",
         calibration_curve_concrete_png=output_dir / "surface_ai_calibration_curve_concrete.png",
-        calibration_curve_group_direct_png=output_dir / "17_surface_ai_calibration_curve_group_direct.png",
+        calibration_curve_group_direct_png=output_dir
+        / "17_surface_ai_calibration_curve_group_direct.png",
         reliability_table_concrete_csv=output_dir / "surface_ai_reliability_table_concrete.csv",
-        reliability_table_group_direct_csv=output_dir / "07_surface_ai_reliability_table_group_direct.csv",
+        reliability_table_group_direct_csv=output_dir
+        / "07_surface_ai_reliability_table_group_direct.csv",
         dangerous_errors_map_raw_png=output_dir / "surface_ai_dangerous_errors_map_raw.png",
-        dangerous_errors_map_effective_png=output_dir / "surface_ai_dangerous_errors_map_effective.png",
+        dangerous_errors_map_effective_png=output_dir
+        / "surface_ai_dangerous_errors_map_effective.png",
         dangerous_errors_csv=output_dir / "surface_ai_dangerous_errors.csv",
         spatial_prior_ablation_txt=output_dir / "surface_ai_spatial_prior_ablation.txt",
         tile_usage_csv=output_dir / "04_surface_ai_tile_usage.csv",
@@ -2698,16 +3064,23 @@ def artifact_paths(output_dir: Path) -> SurfaceAIArtifacts:
         predict_edges_geojson=output_dir / "surface_ai_predict_edges.geojson",
         dataset_all_tile_edges_csv=output_dir / "surface_ai_dataset_all_tile_edges.csv",
         predictions_inside_polygon_csv=output_dir / "03_surface_ai_predictions_inside_polygon.csv",
-        predictions_inside_polygon_geojson=output_dir / "surface_ai_predictions_inside_polygon.geojson",
+        predictions_inside_polygon_geojson=output_dir
+        / "surface_ai_predictions_inside_polygon.geojson",
         tile_usage_map_train_png=output_dir / "surface_ai_tile_usage_map_train.png",
         tile_usage_map_predict_png=output_dir / "surface_ai_tile_usage_map_predict.png",
         train_vs_predict_report_txt=output_dir / "surface_ai_train_vs_predict_report.txt",
-        dangerous_errors_global_test_csv=output_dir / "05_surface_ai_dangerous_errors_global_test.csv",
-        dangerous_errors_predict_holdout_csv=output_dir / "06_surface_ai_dangerous_errors_predict_holdout.csv",
-        dangerous_errors_global_test_raw_png=output_dir / "surface_ai_dangerous_errors_global_test_raw.png",
-        dangerous_errors_global_test_effective_png=output_dir / "18_surface_ai_dangerous_errors_global_test_effective.png",
-        dangerous_errors_predict_holdout_raw_png=output_dir / "surface_ai_dangerous_errors_predict_holdout_raw.png",
-        dangerous_errors_predict_holdout_effective_png=output_dir / "19_surface_ai_dangerous_errors_predict_holdout_effective.png",
+        dangerous_errors_global_test_csv=output_dir
+        / "05_surface_ai_dangerous_errors_global_test.csv",
+        dangerous_errors_predict_holdout_csv=output_dir
+        / "06_surface_ai_dangerous_errors_predict_holdout.csv",
+        dangerous_errors_global_test_raw_png=output_dir
+        / "surface_ai_dangerous_errors_global_test_raw.png",
+        dangerous_errors_global_test_effective_png=output_dir
+        / "18_surface_ai_dangerous_errors_global_test_effective.png",
+        dangerous_errors_predict_holdout_raw_png=output_dir
+        / "surface_ai_dangerous_errors_predict_holdout_raw.png",
+        dangerous_errors_predict_holdout_effective_png=output_dir
+        / "19_surface_ai_dangerous_errors_predict_holdout_effective.png",
         unknown_risk_map_png=output_dir / "11_surface_ai_unknown_risk_map.png",
         run_summary_csv=output_dir / "08_surface_ai_run_summary.csv",
         runtime_predictions_csv=output_dir / "runtime_predictions.csv",
@@ -2719,20 +3092,23 @@ def write_runtime_router_predictions_from_experiment(
     predict_edges: gpd.GeoDataFrame,
     *,
     settings: Settings,
-    group_selected: Dict[str, Any],
+    group_selected: dict[str, Any],
     artifacts: SurfaceAIArtifacts,
     precache_polygon: Any,
 ) -> None:
     """Пишет CSV в формате ``SurfacePredictionStore`` (каталог эксперимента + cache по Settings)."""
-    from datetime import timezone
 
     from .surface_prediction_store import (
         SurfacePredictionStore,
         _first_osm_scalar,
-        _norm_group as _runtime_norm_group,
-        _rounded_geometry_hash as _runtime_geom_hash,
         compute_runtime_routing_graph_hash,
         write_runtime_predictions_csv,
+    )
+    from .surface_prediction_store import (
+        _norm_group as _runtime_norm_group,
+    )
+    from .surface_prediction_store import (
+        _rounded_geometry_hash as _runtime_geom_hash,
     )
     from .surface_resolve import ml_group_to_profile_surface
 
@@ -2767,10 +3143,10 @@ def write_runtime_router_predictions_from_experiment(
         area_fp = ""
 
     graph_hash = compute_runtime_routing_graph_hash(pe)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     gkey = str(group_selected.get("model_key") or "")
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for _, row in merged.iterrows():
         geom = row.get("geometry")
         if geom is not None and not bool(getattr(geom, "is_empty", False)):
@@ -2791,9 +3167,7 @@ def write_runtime_router_predictions_from_experiment(
             uvkey = str(row.get("edge_id") or "")
 
         raw_grp = str(
-            row.get("surface_pred_group")
-            or row.get("surface_pred_group_direct")
-            or "unknown"
+            row.get("surface_pred_group") or row.get("surface_pred_group_direct") or "unknown"
         )
         grp = _runtime_norm_group(raw_grp)
 
@@ -2867,7 +3241,7 @@ def save_heavy_artifacts(config: SurfaceAIConfig) -> bool:
     return bool(config.save_heavy_artifacts)
 
 
-def prediction_columns(predictions: pd.DataFrame) -> List[str]:
+def prediction_columns(predictions: pd.DataFrame) -> list[str]:
     required = [
         "edge_id",
         "u",
@@ -2952,14 +3326,20 @@ def write_predictions_csv(predictions: pd.DataFrame, path: Path) -> None:
     predictions[prediction_columns(predictions)].to_csv(path, index=False, encoding="utf-8")
 
 
-def write_predictions_geojson(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, path: Path) -> None:
+def write_predictions_geojson(
+    predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, path: Path
+) -> None:
     base = edges_gdf[["edge_id", "geometry"]].copy()
-    prediction_ids = set(predictions["edge_id"].astype(str)) if "edge_id" in predictions.columns else set()
+    prediction_ids = (
+        set(predictions["edge_id"].astype(str)) if "edge_id" in predictions.columns else set()
+    )
     if predictions.empty:
         base = base.iloc[0:0]
     elif prediction_ids:
         base = base[base["edge_id"].astype(str).isin(prediction_ids)]
-    gdf = base.merge(predictions.drop(columns=["geometry"], errors="ignore"), on="edge_id", how="left")
+    gdf = base.merge(
+        predictions.drop(columns=["geometry"], errors="ignore"), on="edge_id", how="left"
+    )
     gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs="EPSG:4326")
     path.parent.mkdir(parents=True, exist_ok=True)
     gdf.to_file(path, driver="GeoJSON")
@@ -2980,7 +3360,7 @@ def write_baseline_tables(baseline_table: pd.DataFrame, artifacts: SurfaceAIArti
     plot_baseline_table_png(baseline_table, artifacts.baseline_png)
 
 
-def _flat_dict_frame(data: Dict[str, Any]) -> pd.DataFrame:
+def _flat_dict_frame(data: dict[str, Any]) -> pd.DataFrame:
     rows = []
     for key, value in (data or {}).items():
         if isinstance(value, (dict, list, tuple)):
@@ -2993,36 +3373,54 @@ def write_results_workbook(
     artifacts: SurfaceAIArtifacts,
     *,
     baseline_table: pd.DataFrame,
-    summary: Dict[str, Any],
-    area_meta: Dict[str, Any],
-    tile_coverage: Dict[str, Any],
-    selected: Dict[str, Any],
-    group_selected: Dict[str, Any],
-    holdout_metrics: Dict[str, Any],
-    calibration_metrics: Dict[str, Any],
-    dangerous_metrics: Dict[str, Any],
-    predictions_inside: Optional[pd.DataFrame] = None,
-    dangerous_global: Optional[pd.DataFrame] = None,
-    dangerous_holdout: Optional[pd.DataFrame] = None,
-    run_config: Optional[Dict[str, Any]] = None,
-    artifact_manifest: Optional[pd.DataFrame] = None,
+    summary: dict[str, Any],
+    area_meta: dict[str, Any],
+    tile_coverage: dict[str, Any],
+    selected: dict[str, Any],
+    group_selected: dict[str, Any],
+    holdout_metrics: dict[str, Any],
+    calibration_metrics: dict[str, Any],
+    dangerous_metrics: dict[str, Any],
+    predictions_inside: pd.DataFrame | None = None,
+    dangerous_global: pd.DataFrame | None = None,
+    dangerous_holdout: pd.DataFrame | None = None,
+    run_config: dict[str, Any] | None = None,
+    artifact_manifest: pd.DataFrame | None = None,
 ) -> None:
     with pd.ExcelWriter(artifacts.baseline_xlsx, engine="openpyxl") as writer:
         _flat_dict_frame(summary).to_excel(writer, sheet_name="summary", index=False)
         baseline_table.to_excel(writer, sheet_name="baseline", index=False)
-        _flat_dict_frame({"selected_model": selected}).to_excel(writer, sheet_name="selected_model", index=False)
-        _flat_dict_frame({"group_direct": group_selected}).to_excel(writer, sheet_name="group_direct", index=False)
-        _flat_dict_frame({"concrete_compact": selected}).to_excel(writer, sheet_name="concrete_compact", index=False)
-        if predictions_inside is not None:
-            predictions_inside.head(5000).to_excel(writer, sheet_name="predict_inside_polygon", index=False)
-        _flat_dict_frame(tile_coverage).to_excel(writer, sheet_name="tile_usage_summary", index=False)
-        danger_summary = dict(dangerous_metrics)
-        danger_summary["global_test_rows"] = int(len(dangerous_global)) if dangerous_global is not None else 0
-        danger_summary["predict_holdout_rows"] = int(len(dangerous_holdout)) if dangerous_holdout is not None else 0
-        _flat_dict_frame(danger_summary).to_excel(writer, sheet_name="dangerous_errors_summary", index=False)
-        _flat_dict_frame(calibration_metrics.get("group_direct", calibration_metrics) if isinstance(calibration_metrics, dict) else {}).to_excel(
-            writer, sheet_name="calibration_group_direct", index=False
+        _flat_dict_frame({"selected_model": selected}).to_excel(
+            writer, sheet_name="selected_model", index=False
         )
+        _flat_dict_frame({"group_direct": group_selected}).to_excel(
+            writer, sheet_name="group_direct", index=False
+        )
+        _flat_dict_frame({"concrete_compact": selected}).to_excel(
+            writer, sheet_name="concrete_compact", index=False
+        )
+        if predictions_inside is not None:
+            predictions_inside.head(5000).to_excel(
+                writer, sheet_name="predict_inside_polygon", index=False
+            )
+        _flat_dict_frame(tile_coverage).to_excel(
+            writer, sheet_name="tile_usage_summary", index=False
+        )
+        danger_summary = dict(dangerous_metrics)
+        danger_summary["global_test_rows"] = (
+            int(len(dangerous_global)) if dangerous_global is not None else 0
+        )
+        danger_summary["predict_holdout_rows"] = (
+            int(len(dangerous_holdout)) if dangerous_holdout is not None else 0
+        )
+        _flat_dict_frame(danger_summary).to_excel(
+            writer, sheet_name="dangerous_errors_summary", index=False
+        )
+        _flat_dict_frame(
+            calibration_metrics.get("group_direct", calibration_metrics)
+            if isinstance(calibration_metrics, dict)
+            else {}
+        ).to_excel(writer, sheet_name="calibration_group_direct", index=False)
         _flat_dict_frame(holdout_metrics).to_excel(writer, sheet_name="holdout_checks", index=False)
         _flat_dict_frame(run_config or {}).to_excel(writer, sheet_name="run_config", index=False)
         if artifact_manifest is not None:
@@ -3114,7 +3512,9 @@ def artifact_manifest(output_dir: Path) -> pd.DataFrame:
                 "filename": path.name,
                 "type": path.suffix.lower().lstrip("."),
                 "description": "Surface AI experiment artifact",
-                "created": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+                "created": datetime.fromtimestamp(path.stat().st_mtime).isoformat(
+                    timespec="seconds"
+                ),
                 "rows_if_table": "",
             }
         )
@@ -3123,12 +3523,28 @@ def artifact_manifest(output_dir: Path) -> pd.DataFrame:
 
 def expected_compact_manifest(artifacts: SurfaceAIArtifacts) -> pd.DataFrame:
     files = [
-        (artifacts.baseline_xlsx, "xlsx", "Main workbook with summary, metrics, configuration, and manifest"),
+        (
+            artifacts.baseline_xlsx,
+            "xlsx",
+            "Main workbook with summary, metrics, configuration, and manifest",
+        ),
         (artifacts.baseline_csv, "csv", "Model baseline table"),
-        (artifacts.predictions_inside_polygon_csv, "csv", "Unknown surface predictions inside predict polygon"),
+        (
+            artifacts.predictions_inside_polygon_csv,
+            "csv",
+            "Unknown surface predictions inside predict polygon",
+        ),
         (artifacts.tile_usage_csv, "csv", "Tile usage by train/predict areas"),
-        (artifacts.dangerous_errors_global_test_csv, "csv", "Dangerous errors on global known test split"),
-        (artifacts.dangerous_errors_predict_holdout_csv, "csv", "Dangerous errors on predict-polygon holdout split"),
+        (
+            artifacts.dangerous_errors_global_test_csv,
+            "csv",
+            "Dangerous errors on global known test split",
+        ),
+        (
+            artifacts.dangerous_errors_predict_holdout_csv,
+            "csv",
+            "Dangerous errors on predict-polygon holdout split",
+        ),
         (artifacts.reliability_table_group_direct_csv, "csv", "Group-direct reliability table"),
         (artifacts.run_summary_csv, "csv", "One-row run and safety summary"),
         (artifacts.baseline_png, "png", "Baseline model table image"),
@@ -3136,12 +3552,24 @@ def expected_compact_manifest(artifacts: SurfaceAIArtifacts) -> pd.DataFrame:
         (artifacts.unknown_risk_map_png, "png", "Unknown prediction risk map"),
         (artifacts.confidence_map_png, "png", "Prediction confidence map"),
         (artifacts.tile_usage_map_png, "png", "Tile usage map"),
-        (artifacts.confusion_matrix_concrete_compact_png, "png", "Concrete compact confusion matrix"),
+        (
+            artifacts.confusion_matrix_concrete_compact_png,
+            "png",
+            "Concrete compact confusion matrix",
+        ),
         (artifacts.confusion_matrix_group_direct_png, "png", "Group-direct confusion matrix"),
         (artifacts.feature_importance_png, "png", "Feature importance"),
         (artifacts.calibration_curve_group_direct_png, "png", "Group-direct calibration curve"),
-        (artifacts.dangerous_errors_global_test_effective_png, "png", "Effective dangerous upgrades on global test"),
-        (artifacts.dangerous_errors_predict_holdout_effective_png, "png", "Effective dangerous upgrades on predict holdout"),
+        (
+            artifacts.dangerous_errors_global_test_effective_png,
+            "png",
+            "Effective dangerous upgrades on global test",
+        ),
+        (
+            artifacts.dangerous_errors_predict_holdout_effective_png,
+            "png",
+            "Effective dangerous upgrades on predict holdout",
+        ),
         (artifacts.errors_map_png, "png", "Known test error map"),
     ]
     return pd.DataFrame(
@@ -3174,12 +3602,14 @@ def polygon_hash(polygon: Any) -> str:
     return _short_hash(getattr(polygon, "wkt", str(polygon)))
 
 
-def graph_fingerprint(edges: gpd.GeoDataFrame) -> Dict[str, Any]:
+def graph_fingerprint(edges: gpd.GeoDataFrame) -> dict[str, Any]:
     if edges is None or edges.empty:
         return {"edges_count": 0, "nodes_count": 0, "graph_hash": "empty"}
     u = edges.get("u", pd.Series([], dtype=object)).astype(str)
     v = edges.get("v", pd.Series([], dtype=object)).astype(str)
-    payload = "|".join(sorted(edges.get("edge_id", pd.Series([], dtype=object)).astype(str).head(10000).tolist()))
+    payload = "|".join(
+        sorted(edges.get("edge_id", pd.Series([], dtype=object)).astype(str).head(10000).tolist())
+    )
     return {
         "edges_count": int(len(edges)),
         "nodes_count": int(len(set(u) | set(v))),
@@ -3189,14 +3619,15 @@ def graph_fingerprint(edges: gpd.GeoDataFrame) -> Dict[str, Any]:
 
 def safety_decision_summary(
     config: SurfaceAIConfig,
-    group_selected: Dict[str, Any],
-    calibration_metrics: Dict[str, Any],
-    warnings: Dict[str, bool],
-) -> Dict[str, Any]:
+    group_selected: dict[str, Any],
+    calibration_metrics: dict[str, Any],
+    warnings: dict[str, bool],
+) -> dict[str, Any]:
     metrics = group_selected.get("metrics", {})
     ece = float((calibration_metrics or {}).get("ece_top_label", 1.0))
     experimental = (
-        float(metrics.get("dangerous_upgrade_rate_effective", 1.0)) <= float(config.max_dangerous_upgrade_rate_effective)
+        float(metrics.get("dangerous_upgrade_rate_effective", 1.0))
+        <= float(config.max_dangerous_upgrade_rate_effective)
         and float(metrics.get("recall_bad_surface", 0.0)) >= float(config.min_bad_surface_recall)
         and ece <= float(config.max_calibration_ece)
     )
@@ -3220,34 +3651,43 @@ def safety_decision_summary(
 
 def build_warning_flags(
     config: SurfaceAIConfig,
-    selected: Dict[str, Any],
-    group_selected: Dict[str, Any],
-    holdout_metrics: Dict[str, Any],
+    selected: dict[str, Any],
+    group_selected: dict[str, Any],
+    holdout_metrics: dict[str, Any],
     dangerous_global_rows: int,
     dangerous_global_expected: int,
     output_file_count: int,
-) -> Dict[str, bool]:
+) -> dict[str, bool]:
     global_macro = float(group_selected.get("metrics", {}).get("macro_f1", 0.0))
     holdout_macro = float((holdout_metrics.get("group_direct") or {}).get("macro_f1", 0.0))
     return {
-        "warning_paved_rough_low_recall": float(group_selected.get("metrics", {}).get("recall_paved_rough", 0.0)) < float(config.min_paved_rough_recall),
-        "warning_dangerous_map_empty_but_metrics_nonzero": int(dangerous_global_expected) > 0 and int(dangerous_global_rows) == 0,
+        "warning_paved_rough_low_recall": float(
+            group_selected.get("metrics", {}).get("recall_paved_rough", 0.0)
+        )
+        < float(config.min_paved_rough_recall),
+        "warning_dangerous_map_empty_but_metrics_nonzero": int(dangerous_global_expected) > 0
+        and int(dangerous_global_rows) == 0,
         "warning_predict_holdout_suspiciously_high": (holdout_macro - global_macro) > 0.20,
-        "warning_neighbor_features_need_leakage_check": bool(config.use_neighbor_features and not config.run_holdout_leakage_checks),
+        "warning_neighbor_features_need_leakage_check": bool(
+            config.use_neighbor_features and not config.run_holdout_leakage_checks
+        ),
         "warning_safety_threshold_disabled": any(
-            v is None for v in [
+            v is None
+            for v in [
                 config.min_bad_surface_recall,
                 config.max_dangerous_upgrade_rate_effective,
                 config.max_calibration_ece,
                 config.min_paved_rough_recall,
             ]
         ),
-        "warning_compact_output_limit_exceeded": is_compact_output(config) and int(output_file_count) > int(config.max_output_files),
-        "warning_train_graph_not_saved": is_compact_output(config) and not save_heavy_artifacts(config),
+        "warning_compact_output_limit_exceeded": is_compact_output(config)
+        and int(output_file_count) > int(config.max_output_files),
+        "warning_train_graph_not_saved": is_compact_output(config)
+        and not save_heavy_artifacts(config),
     }
 
 
-def write_run_summary_csv(path: Path, summary: Dict[str, Any]) -> None:
+def write_run_summary_csv(path: Path, summary: dict[str, Any]) -> None:
     pd.DataFrame([_json_safe(summary)]).to_csv(path, index=False, encoding="utf-8")
 
 
@@ -3256,9 +3696,9 @@ def _plot_lines_by_column(
     predictions: pd.DataFrame,
     *,
     value_col: str,
-    color_map: Dict[str, str],
+    color_map: dict[str, str],
     path: Path,
-    only_mask: Optional[pd.Series] = None,
+    only_mask: pd.Series | None = None,
     title: str = "",
 ) -> None:
     plt = _import_pyplot()
@@ -3291,7 +3731,12 @@ def _plot_lines_by_column(
     plt.close(fig)
 
 
-def plot_surface_maps(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, artifacts: SurfaceAIArtifacts, config: SurfaceAIConfig) -> None:
+def plot_surface_maps(
+    predictions: pd.DataFrame,
+    edges_gdf: gpd.GeoDataFrame,
+    artifacts: SurfaceAIArtifacts,
+    config: SurfaceAIConfig,
+) -> None:
     _plot_lines_by_column(
         edges_gdf,
         predictions,
@@ -3305,7 +3750,9 @@ def plot_surface_maps(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, ar
     plot_errors_map(predictions, edges_gdf, artifacts.errors_map_png)
 
 
-def plot_confidence_map(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, path: Path, config: SurfaceAIConfig) -> None:
+def plot_confidence_map(
+    predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, path: Path, config: SurfaceAIConfig
+) -> None:
     plt = _import_pyplot()
     gdf = edges_gdf[["edge_id", "geometry"]].merge(
         predictions[["edge_id", "is_surface_known", "surface_source", "surface_pred_confidence"]],
@@ -3348,7 +3795,9 @@ def plot_confidence_map(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, 
     plt.close(fig)
 
 
-def plot_unknown_risk_map(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, path: Path, config: SurfaceAIConfig) -> None:
+def plot_unknown_risk_map(
+    predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, path: Path, config: SurfaceAIConfig
+) -> None:
     pred_cols = [
         "edge_id",
         "is_surface_known",
@@ -3397,7 +3846,14 @@ def plot_unknown_risk_map(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame
         subset.plot(ax=ax, color=color, linewidth=1.4, alpha=0.9, label=key)
         plotted = True
     if not plotted:
-        ax.text(0.5, 0.5, "No unknown prediction risk flags", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            "No unknown prediction risk flags",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
     else:
         ax.legend(loc="lower left", fontsize=8)
     fig.tight_layout(pad=0)
@@ -3406,9 +3862,9 @@ def plot_unknown_risk_map(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame
 
 
 def plot_errors_map(predictions: pd.DataFrame, edges_gdf: gpd.GeoDataFrame, path: Path) -> None:
-    err_mask = (
-        (predictions["surface_ai_split"] == "test")
-        & (predictions["surface_group_direct_label"].astype(str) != predictions["surface_pred_group_direct"].astype(str))
+    err_mask = (predictions["surface_ai_split"] == "test") & (
+        predictions["surface_group_direct_label"].astype(str)
+        != predictions["surface_pred_group_direct"].astype(str)
     )
     plt = _import_pyplot()
     gdf = edges_gdf[["edge_id", "geometry"]].merge(
@@ -3448,15 +3904,29 @@ def plot_dangerous_errors_map(
     plt = _import_pyplot()
     fig, ax = plt.subplots(figsize=(12, 12))
     ax.set_axis_off()
-    colors = {"paved_rough": "#fdae61", "unpaved_soft": "#d73027", "unpaved_hard": "#7f0000", "rough_or_unpaved": "#d73027"}
+    colors = {
+        "paved_rough": "#fdae61",
+        "unpaved_soft": "#d73027",
+        "unpaved_hard": "#7f0000",
+        "rough_or_unpaved": "#d73027",
+    }
     if gdf.empty:
-        ax.text(0.5, 0.5, f"No dangerous upgrades ({mode})", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            f"No dangerous upgrades ({mode})",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
     else:
         for group, color in colors.items():
             subset = gdf[gdf["surface_group_direct_label"] == group]
             if subset.empty:
                 continue
-            subset.plot(ax=ax, color=color, linewidth=2.0, alpha=0.9, label=f"{group} -> paved_good")
+            subset.plot(
+                ax=ax, color=color, linewidth=2.0, alpha=0.9, label=f"{group} -> paved_good"
+            )
         total_len = float(pd.to_numeric(gdf["length_m"], errors="coerce").sum())
         ax.text(
             0.01,
@@ -3474,9 +3944,9 @@ def plot_dangerous_errors_map(
 
 
 def write_dangerous_errors_csv(predictions: pd.DataFrame, path: Path) -> None:
-    mask = (
-        (predictions["surface_ai_split"] == "test")
-        & (predictions["dangerous_upgrade_raw"].astype(bool) | predictions["dangerous_upgrade_effective"].astype(bool))
+    mask = (predictions["surface_ai_split"] == "test") & (
+        predictions["dangerous_upgrade_raw"].astype(bool)
+        | predictions["dangerous_upgrade_effective"].astype(bool)
     )
     cols = [
         "edge_id",
@@ -3495,10 +3965,14 @@ def write_dangerous_errors_csv(predictions: pd.DataFrame, path: Path) -> None:
         "surface_pred_group_direct_confidence_calibrated",
         "geometry_wkt",
     ]
-    predictions.loc[mask, [c for c in cols if c in predictions.columns]].to_csv(path, index=False, encoding="utf-8")
+    predictions.loc[mask, [c for c in cols if c in predictions.columns]].to_csv(
+        path, index=False, encoding="utf-8"
+    )
 
 
-def dangerous_errors_for_split(predictions: pd.DataFrame, split_name: str, config: SurfaceAIConfig) -> pd.DataFrame:
+def dangerous_errors_for_split(
+    predictions: pd.DataFrame, split_name: str, config: SurfaceAIConfig
+) -> pd.DataFrame:
     split = predictions[
         (predictions["surface_ai_split"].astype(str) == split_name)
         & predictions["is_surface_known"].astype(bool)
@@ -3526,10 +4000,16 @@ def dangerous_errors_for_split(predictions: pd.DataFrame, split_name: str, confi
             ]
         )
     true_group = split["surface_group_direct_label"].astype(str)
-    raw_group = split.get("surface_pred_group_direct_raw", split.get("surface_pred_group_direct")).astype(str)
+    raw_group = split.get(
+        "surface_pred_group_direct_raw", split.get("surface_pred_group_direct")
+    ).astype(str)
     pred_group = split.get("surface_pred_group_direct", raw_group).astype(str)
-    conf = pd.to_numeric(split.get("surface_pred_group_direct_confidence_calibrated"), errors="coerce").fillna(0.0)
-    margin = pd.to_numeric(split.get("surface_pred_group_direct_margin_calibrated"), errors="coerce").fillna(0.0)
+    conf = pd.to_numeric(
+        split.get("surface_pred_group_direct_confidence_calibrated"), errors="coerce"
+    ).fillna(0.0)
+    margin = pd.to_numeric(
+        split.get("surface_pred_group_direct_margin_calibrated"), errors="coerce"
+    ).fillna(0.0)
     effective_group = pd.Series(
         [
             _effective_group_for_metrics(p, c, m, config)
@@ -3572,7 +4052,9 @@ def dangerous_errors_for_split(predictions: pd.DataFrame, split_name: str, confi
     return rows[rows["dangerous_upgrade_raw"] | rows["dangerous_upgrade_effective"]].copy()
 
 
-def write_dangerous_errors_split_csv(predictions: pd.DataFrame, path: Path, *, split_name: str, config: SurfaceAIConfig) -> pd.DataFrame:
+def write_dangerous_errors_split_csv(
+    predictions: pd.DataFrame, path: Path, *, split_name: str, config: SurfaceAIConfig
+) -> pd.DataFrame:
     df = dangerous_errors_for_split(predictions, split_name, config)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8")
@@ -3589,7 +4071,9 @@ def plot_dangerous_errors_split_map(
     expected_count: int = 0,
 ) -> None:
     flag_col = "dangerous_upgrade_raw" if mode == "raw" else "dangerous_upgrade_effective"
-    rows = dangerous_df[dangerous_df.get(flag_col, pd.Series(False, index=dangerous_df.index)).astype(bool)].copy()
+    rows = dangerous_df[
+        dangerous_df.get(flag_col, pd.Series(False, index=dangerous_df.index)).astype(bool)
+    ].copy()
     if int(expected_count) > 0 and rows.empty:
         raise RuntimeError(
             f"Dangerous error map mismatch: metrics count > 0 but map source has 0 rows for {split_name}/{mode}."
@@ -3599,15 +4083,29 @@ def plot_dangerous_errors_split_map(
     fig, ax = plt.subplots(figsize=(12, 12))
     ax.set_axis_off()
     ax.set_title(f"Dangerous upgrades on {split_name.replace('_', ' ')}, {mode} predictions")
-    colors = {"paved_rough": "#fdae61", "unpaved_soft": "#d73027", "unpaved_hard": "#7f0000", "rough_or_unpaved": "#d73027"}
+    colors = {
+        "paved_rough": "#fdae61",
+        "unpaved_soft": "#d73027",
+        "unpaved_hard": "#7f0000",
+        "rough_or_unpaved": "#d73027",
+    }
     if gdf.empty:
-        ax.text(0.5, 0.5, f"No dangerous upgrades on {split_name}", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            f"No dangerous upgrades on {split_name}",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
     else:
         for group, color in colors.items():
             subset = gdf[gdf["true_group"] == group]
             if subset.empty:
                 continue
-            subset.plot(ax=ax, color=color, linewidth=2.0, alpha=0.9, label=f"{group} -> paved_good")
+            subset.plot(
+                ax=ax, color=color, linewidth=2.0, alpha=0.9, label=f"{group} -> paved_good"
+            )
         total_len = float(pd.to_numeric(gdf["length_m"], errors="coerce").sum())
         ax.text(
             0.01,
@@ -3624,7 +4122,7 @@ def plot_dangerous_errors_split_map(
     plt.close(fig)
 
 
-def _tile_to_lat_lon(x: int, y: int, z: int) -> Tuple[float, float]:
+def _tile_to_lat_lon(x: int, y: int, z: int) -> tuple[float, float]:
     n = 2**z
     lon = x / n * 360.0 - 180.0
     lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * y / n)))
@@ -3653,7 +4151,9 @@ def scan_cached_tiles(
 ) -> gpd.GeoDataFrame:
     tiles_dir = Path(tiles_dir)
     rows = []
-    pat = re.compile(rf"^{re.escape(tms_server)}_{int(z)}_(\d+)_(\d+)\.(jpg|jpeg|png|webp)$", re.IGNORECASE)
+    pat = re.compile(
+        rf"^{re.escape(tms_server)}_{int(z)}_(\d+)_(\d+)\.(jpg|jpeg|png|webp)$", re.IGNORECASE
+    )
     for path in tiles_dir.glob(f"{tms_server}_{int(z)}_*_*.*"):
         m = pat.match(path.name)
         if not m:
@@ -3679,7 +4179,9 @@ def scan_cached_tiles(
     else:
         gdf["footprint_area_m2"] = []
     if precache_polygon is not None:
-        gdf["inside_precache_polygon"] = gdf.geometry.intersects(precache_polygon) if not gdf.empty else []
+        gdf["inside_precache_polygon"] = (
+            gdf.geometry.intersects(precache_polygon) if not gdf.empty else []
+        )
     elif "inside_precache_polygon" not in gdf.columns:
         gdf["inside_precache_polygon"] = False if not gdf.empty else []
     return gdf
@@ -3721,13 +4223,13 @@ def _load_edges_from_osmnx_polygon(
     config: SurfaceAIConfig,
     *,
     source: str,
-) -> Tuple[gpd.GeoDataFrame, Dict[str, Any]]:
+) -> tuple[gpd.GeoDataFrame, dict[str, Any]]:
     ox.settings.cache_folder = settings.osmnx_cache_dir
     ox.settings.use_cache = True
     for tag in OSM_TAG_COLUMNS + ("smoothness",):
         if tag not in ox.settings.useful_tags_way:
             ox.settings.useful_tags_way += [tag]
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "simplify": bool(config.osmnx_simplify),
         "retain_all": bool(config.osmnx_retain_all),
         "truncate_by_edge": bool(config.osmnx_truncate_by_edge),
@@ -3758,9 +4260,9 @@ def load_edges_for_surface_ai_polygon(
     *,
     priority: Sequence[str],
     scope: str,
-) -> Tuple[gpd.GeoDataFrame, Dict[str, Any]]:
+) -> tuple[gpd.GeoDataFrame, dict[str, Any]]:
     """Load edges for one Surface AI area using a scoped source priority."""
-    meta: Dict[str, Any] = {
+    meta: dict[str, Any] = {
         "precache_polygon_bounds_lonlat": tuple(float(x) for x in polygon.bounds),
         "graph_source": None,
         "graph_path": None,
@@ -3777,7 +4279,9 @@ def load_edges_for_surface_ai_polygon(
                     polygon,
                     settings,
                     config,
-                    source="tile_coverage_graph" if scope == "train" else "tile_coverage_graph_predict",
+                    source="tile_coverage_graph"
+                    if scope == "train"
+                    else "tile_coverage_graph_predict",
                 )
                 meta.update(osm_meta)
                 return edges, meta
@@ -3786,7 +4290,10 @@ def load_edges_for_surface_ai_polygon(
                 continue
         if source == "area_precache":
             loaded = False
-            for label, path in (("graph_base", graph_base_path(settings)), ("graph_green", graph_green_path(settings))):
+            for label, path in (
+                ("graph_base", graph_base_path(settings)),
+                ("graph_green", graph_green_path(settings)),
+            ):
                 if not path.exists():
                     meta["graph_fallback_reasons"].append(f"area_precache_{label}_missing")
                     continue
@@ -3817,10 +4324,14 @@ def load_edges_for_surface_ai_polygon(
                 continue
         meta["graph_fallback_reasons"].append(f"unknown_graph_source:{source}")
 
-    raise ValueError(f"No usable Surface AI graph source for {scope}: {priorities}; reasons={meta['graph_fallback_reasons']}")
+    raise ValueError(
+        f"No usable Surface AI graph source for {scope}: {priorities}; reasons={meta['graph_fallback_reasons']}"
+    )
 
 
-def load_edges_for_surface_ai_area(settings: Settings, config: SurfaceAIConfig) -> Tuple[gpd.GeoDataFrame, Dict[str, Any]]:
+def load_edges_for_surface_ai_area(
+    settings: Settings, config: SurfaceAIConfig
+) -> tuple[gpd.GeoDataFrame, dict[str, Any]]:
     if not settings.has_precache_area_polygon:
         raise ValueError("PRECACHE_AREA_POLYGON_WKT is empty or not a polygon")
     return load_edges_for_surface_ai_polygon(
@@ -3836,11 +4347,15 @@ def build_train_predict_polygons(
     settings: Settings,
     config: SurfaceAIConfig,
     tiles_gdf: gpd.GeoDataFrame,
-) -> Tuple[Any, Any, Any, Dict[str, Any]]:
+) -> tuple[Any, Any, Any, dict[str, Any]]:
     precache_polygon = parse_precache_polygon(settings)
     tile_coverage_polygon = tile_coverage_polygon_from_tiles(tiles_gdf, precache_polygon)
-    train_polygon = _area_polygon_from_mode(config.train_area_mode, tile_coverage_polygon, precache_polygon)
-    predict_polygon = _area_polygon_from_mode(config.predict_area_mode, tile_coverage_polygon, precache_polygon)
+    train_polygon = _area_polygon_from_mode(
+        config.train_area_mode, tile_coverage_polygon, precache_polygon
+    )
+    predict_polygon = _area_polygon_from_mode(
+        config.predict_area_mode, tile_coverage_polygon, precache_polygon
+    )
     meta = {
         "train_area_mode": config.train_area_mode,
         "predict_area_mode": config.predict_area_mode,
@@ -3855,7 +4370,11 @@ def build_train_predict_polygons(
 def _edge_inside_polygon_flags(edges_gdf: gpd.GeoDataFrame, polygon: Any) -> pd.Series:
     if edges_gdf.empty:
         return pd.Series([], dtype=bool)
-    gdf = edges_gdf.to_crs("EPSG:4326") if edges_gdf.crs else edges_gdf.set_crs("EPSG:4326", allow_override=True)
+    gdf = (
+        edges_gdf.to_crs("EPSG:4326")
+        if edges_gdf.crs
+        else edges_gdf.set_crs("EPSG:4326", allow_override=True)
+    )
     return gdf.geometry.intersects(polygon)
 
 
@@ -3875,8 +4394,14 @@ def combine_train_predict_edges(
     predict["surface_ai_edge_source"] = "predict_graph"
     combined = pd.concat([train, predict], axis=0, ignore_index=True)
     if "edge_id" in combined.columns:
-        combined["_prefer_predict"] = (combined["surface_ai_edge_source"] == "predict_graph").astype(int)
-        combined = combined.sort_values("_prefer_predict").drop_duplicates("edge_id", keep="last").drop(columns="_prefer_predict")
+        combined["_prefer_predict"] = (
+            combined["surface_ai_edge_source"] == "predict_graph"
+        ).astype(int)
+        combined = (
+            combined.sort_values("_prefer_predict")
+            .drop_duplicates("edge_id", keep="last")
+            .drop(columns="_prefer_predict")
+        )
     return gpd.GeoDataFrame(combined, geometry="geometry", crs="EPSG:4326")
 
 
@@ -3895,8 +4420,11 @@ def _geometry_wkt_for_edges_cache(geom: Any) -> str:
 def _precache_graphml_stat_fingerprint(settings: Settings) -> str:
     if not settings.has_precache_area_polygon:
         return "no_precache_polygon"
-    parts: List[str] = []
-    for label, path in (("graph_base", graph_base_path(settings)), ("graph_green", graph_green_path(settings))):
+    parts: list[str] = []
+    for label, path in (
+        ("graph_base", graph_base_path(settings)),
+        ("graph_green", graph_green_path(settings)),
+    ):
         if path.is_file():
             st = path.stat()
             parts.append(f"{label}:{path.resolve()}:{st.st_size}:{st.st_mtime_ns}")
@@ -3923,7 +4451,7 @@ def surface_ai_edges_cache_payload(
     tiles_dir: Path,
     tms_server: str,
     tile_zoom: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     precache = parse_precache_polygon(settings) if settings.has_precache_area_polygon else None
     area_id = ""
     if settings.has_precache_area_polygon:
@@ -3939,7 +4467,9 @@ def surface_ai_edges_cache_payload(
         "train_poly_wkt": _geometry_wkt_for_edges_cache(train_polygon),
         "predict_poly_wkt": _geometry_wkt_for_edges_cache(predict_polygon),
         "tile_coverage_wkt": _geometry_wkt_for_edges_cache(tile_coverage_polygon),
-        "precache_poly_wkt": _geometry_wkt_for_edges_cache(precache) if precache is not None else "",
+        "precache_poly_wkt": _geometry_wkt_for_edges_cache(precache)
+        if precache is not None
+        else "",
         "train_area_mode": str(config.train_area_mode),
         "predict_area_mode": str(config.predict_area_mode),
         "train_graph_source_priority": list(config.train_graph_source_priority),
@@ -3990,13 +4520,13 @@ def _surface_ai_edges_cache_resolved_dir(raw: str) -> Path:
     return p if p.is_absolute() else (Path.cwd() / p)
 
 
-def surface_ai_edges_cache_read_roots(settings: Settings, config: SurfaceAIConfig) -> List[Path]:
+def surface_ai_edges_cache_read_roots(settings: Settings, config: SurfaceAIConfig) -> list[Path]:
     """Каталоги только для **чтения** ``{fingerprint}/train_edges.parquet`` (без записи в area_precache и т.д.).
 
     Порядок: явный ``edges_cache_dir`` → ``cache/area_precache/<arena_id>/surface_ai_edges``
     (тот же ``arena_id``, что у ``area_green_edges/<arena_id>/``) → ``<base_dir>/experiments/.surface_ai_edges_cache``.
     """
-    roots: List[Path] = []
+    roots: list[Path] = []
     raw = (config.edges_cache_dir or "").strip()
     if raw:
         roots.append(_surface_ai_edges_cache_resolved_dir(raw))
@@ -4032,7 +4562,7 @@ def _surface_ai_edges_cache_path_under_data_cache(settings: Settings, target: Pa
 def _try_load_surface_ai_edges_cache(
     cache_roots: Sequence[Path],
     fp: str,
-) -> Optional[Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, Dict[str, Any], Path]]:
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, dict[str, Any], Path] | None:
     for cache_root in cache_roots:
         d = cache_root / fp
         meta_path = d / "meta.json"
@@ -4044,7 +4574,10 @@ def _try_load_surface_ai_edges_cache(
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if str(meta.get("fingerprint") or "") != fp or meta.get("schema") != _SURFACE_AI_EDGES_CACHE_SCHEMA:
+        if (
+            str(meta.get("fingerprint") or "") != fp
+            or meta.get("schema") != _SURFACE_AI_EDGES_CACHE_SCHEMA
+        ):
             continue
         try:
             train_edges = gpd.read_parquet(train_pq)
@@ -4053,11 +4586,15 @@ def _try_load_surface_ai_edges_cache(
             continue
         if not isinstance(train_edges, gpd.GeoDataFrame):
             train_edges = gpd.GeoDataFrame(
-                train_edges, geometry="geometry", crs=getattr(train_edges, "crs", None) or "EPSG:4326"
+                train_edges,
+                geometry="geometry",
+                crs=getattr(train_edges, "crs", None) or "EPSG:4326",
             )
         if not isinstance(predict_edges, gpd.GeoDataFrame):
             predict_edges = gpd.GeoDataFrame(
-                predict_edges, geometry="geometry", crs=getattr(predict_edges, "crs", None) or "EPSG:4326"
+                predict_edges,
+                geometry="geometry",
+                crs=getattr(predict_edges, "crs", None) or "EPSG:4326",
             )
         run_meta = meta.get("run_meta") if isinstance(meta.get("run_meta"), dict) else {}
         return train_edges, predict_edges, run_meta, d
@@ -4072,7 +4609,7 @@ def _write_surface_ai_edges_cache(
     train_edges: gpd.GeoDataFrame,
     predict_edges: gpd.GeoDataFrame,
     *,
-    run_meta: Dict[str, Any],
+    run_meta: dict[str, Any],
 ) -> None:
     if not config.edges_cache_write:
         return
@@ -4118,10 +4655,7 @@ def mark_dataset_area_flags(dataset: pd.DataFrame, config: SurfaceAIConfig) -> p
         df["has_tile_features"] = (sampled > 0) & (missing < 1.0)
     else:
         df["has_tile_features"] = True
-    known_inside_train = (
-        df["inside_train_area"].astype(bool)
-        & df["is_surface_known"].astype(bool)
-    )
+    known_inside_train = df["inside_train_area"].astype(bool) & df["is_surface_known"].astype(bool)
     strict_train_candidate = (
         df["inside_train_area"].astype(bool)
         & df["has_tile_features"].astype(bool)
@@ -4129,7 +4663,9 @@ def mark_dataset_area_flags(dataset: pd.DataFrame, config: SurfaceAIConfig) -> p
     )
     df["train_candidate_fallback_reason"] = ""
     df["is_train_candidate_osm_fallback"] = False
-    if int(strict_train_candidate.sum()) == 0 and int(known_inside_train.sum()) >= int(config.min_known_edges):
+    if int(strict_train_candidate.sum()) == 0 and int(known_inside_train.sum()) >= int(
+        config.min_known_edges
+    ):
         _log_surface_ai.warning(
             "Surface AI: no known train candidates with tile features; "
             "falling back to OSM/geometry features for %d known train-area edges",
@@ -4138,10 +4674,16 @@ def mark_dataset_area_flags(dataset: pd.DataFrame, config: SurfaceAIConfig) -> p
         df["is_train_candidate"] = known_inside_train
         fallback_rows = known_inside_train & ~df["has_tile_features"].astype(bool)
         df.loc[fallback_rows, "is_train_candidate_osm_fallback"] = True
-        df.loc[fallback_rows, "train_candidate_fallback_reason"] = "no_tile_features_osm_geometry_fallback"
+        df.loc[fallback_rows, "train_candidate_fallback_reason"] = (
+            "no_tile_features_osm_geometry_fallback"
+        )
     else:
         df["is_train_candidate"] = strict_train_candidate
-    predict_area_mask = df["inside_predict_area"].astype(bool) if config.predict_only_inside_polygon else pd.Series(True, index=df.index)
+    predict_area_mask = (
+        df["inside_predict_area"].astype(bool)
+        if config.predict_only_inside_polygon
+        else pd.Series(True, index=df.index)
+    )
     strict_prediction_candidate = (
         predict_area_mask
         & df["has_tile_features"].astype(bool)
@@ -4166,7 +4708,9 @@ def mark_dataset_area_flags(dataset: pd.DataFrame, config: SurfaceAIConfig) -> p
         )
     else:
         df["is_prediction_candidate"] = strict_prediction_candidate
-    df["surface_true"] = df["surface_true_concrete"].where(df["is_surface_known"].astype(bool), None)
+    df["surface_true"] = df["surface_true_concrete"].where(
+        df["is_surface_known"].astype(bool), None
+    )
     return df
 
 
@@ -4176,17 +4720,19 @@ def write_tile_usage_report(
     polygon: Any,
     artifacts: SurfaceAIArtifacts,
     *,
-    predict_edges_gdf: Optional[gpd.GeoDataFrame] = None,
+    predict_edges_gdf: gpd.GeoDataFrame | None = None,
     train_polygon: Any = None,
     predict_polygon: Any = None,
-    config: Optional[SurfaceAIConfig] = None,
-    total_cached_tiles: Optional[int] = None,
-) -> Dict[str, Any]:
+    config: SurfaceAIConfig | None = None,
+    total_cached_tiles: int | None = None,
+) -> dict[str, Any]:
     train_edges_gdf = edges_gdf
     predict_edges_gdf = predict_edges_gdf if predict_edges_gdf is not None else edges_gdf
     train_polygon = train_polygon if train_polygon is not None else polygon
     predict_polygon = predict_polygon if predict_polygon is not None else polygon
-    total_cached_tiles = int(total_cached_tiles if total_cached_tiles is not None else len(tiles_gdf))
+    total_cached_tiles = int(
+        total_cached_tiles if total_cached_tiles is not None else len(tiles_gdf)
+    )
 
     if tiles_gdf.empty:
         pd.DataFrame(
@@ -4233,10 +4779,15 @@ def write_tile_usage_report(
             gdf = gdf.set_crs("EPSG:4326", allow_override=True)
         else:
             gdf = gdf.to_crs("EPSG:4326")
-        mode = str((config.tile_edge_match_mode if config else "samples_and_buffer") or "samples_and_buffer")
+        mode = str(
+            (config.tile_edge_match_mode if config else "samples_and_buffer")
+            or "samples_and_buffer"
+        )
         if "buffer" in mode:
             projected = gdf.to_crs(_utm_crs_for(gdf))
-            buffered = projected.geometry.buffer(float(config.edge_tile_buffer_m if config else 10.0))
+            buffered = projected.geometry.buffer(
+                float(config.edge_tile_buffer_m if config else 10.0)
+            )
             return gpd.GeoSeries(buffered, crs=projected.crs).to_crs("EPSG:4326").unary_union
         return unary_union(list(gdf.geometry.values))
 
@@ -4245,11 +4796,17 @@ def write_tile_usage_report(
     tiles["inside_predict_area"] = tiles.geometry.intersects(predict_polygon)
     train_union = usage_union(train_edges_gdf)
     predict_union = usage_union(predict_edges_gdf)
-    tiles["intersects_train_edge"] = tiles.geometry.intersects(train_union) if train_union is not None else False
-    tiles["intersects_predict_edge"] = tiles.geometry.intersects(predict_union) if predict_union is not None else False
+    tiles["intersects_train_edge"] = (
+        tiles.geometry.intersects(train_union) if train_union is not None else False
+    )
+    tiles["intersects_predict_edge"] = (
+        tiles.geometry.intersects(predict_union) if predict_union is not None else False
+    )
     tiles["sampled_by_train_edge"] = tiles["intersects_train_edge"]
     tiles["sampled_by_predict_edge"] = tiles["intersects_predict_edge"]
-    tiles["sampled_edge_count"] = tiles["sampled_by_train_edge"].astype(int) + tiles["sampled_by_predict_edge"].astype(int)
+    tiles["sampled_edge_count"] = tiles["sampled_by_train_edge"].astype(int) + tiles[
+        "sampled_by_predict_edge"
+    ].astype(int)
     tiles["sampled_pixel_count"] = 0
     tiles["used_in_features"] = tiles["sampled_by_train_edge"] | tiles["sampled_by_predict_edge"]
 
@@ -4293,14 +4850,18 @@ def write_tile_usage_report(
             "tiles_inside_precache_polygon": predict_inside,
             "tiles_intersect_graph_edges": int(tiles["intersects_train_edge"].sum()),
             "tiles_sampled_by_edges": train_used,
-            "tile_usage_share_inside_polygon": float(predict_used / predict_inside) if predict_inside else 0.0,
+            "tile_usage_share_inside_polygon": float(predict_used / predict_inside)
+            if predict_inside
+            else 0.0,
             "unused_tiles_inside_polygon": int(max(0, predict_inside - predict_used)),
         }
     )
     return out
 
 
-def write_spatial_prior_ablation(artifacts: SurfaceAIArtifacts, baseline_table: pd.DataFrame) -> Dict[str, Any]:
+def write_spatial_prior_ablation(
+    artifacts: SurfaceAIArtifacts, baseline_table: pd.DataFrame
+) -> dict[str, Any]:
     concrete = baseline_table[baseline_table["target"].astype(str).str.contains("concrete")].copy()
     keys = [
         "combined_rf",
@@ -4331,10 +4892,17 @@ def write_spatial_prior_ablation(artifacts: SurfaceAIArtifacts, baseline_table: 
         "If quality drops strongly, the model is locally tied to this study area.",
     ]
     artifacts.spatial_prior_ablation_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    out: Dict[str, Any] = {"enabled": True}
+    out: dict[str, Any] = {"enabled": True}
     by_key = concrete.set_index("model_key") if not concrete.empty else pd.DataFrame()
-    if not by_key.empty and "combined_rf" in by_key.index and "combined_rf_without_spatial_prior" in by_key.index:
-        out["macro_f1_delta_without_spatial_prior"] = float(by_key.loc["combined_rf_without_spatial_prior", "macro_f1"] - by_key.loc["combined_rf", "macro_f1"])
+    if (
+        not by_key.empty
+        and "combined_rf" in by_key.index
+        and "combined_rf_without_spatial_prior" in by_key.index
+    ):
+        out["macro_f1_delta_without_spatial_prior"] = float(
+            by_key.loc["combined_rf_without_spatial_prior", "macro_f1"]
+            - by_key.loc["combined_rf", "macro_f1"]
+        )
         out["dangerous_upgrade_delta_without_spatial_prior"] = float(
             by_key.loc["combined_rf_without_spatial_prior", "dangerous_upgrade_rate_effective"]
             - by_key.loc["combined_rf", "dangerous_upgrade_rate_effective"]
@@ -4361,7 +4929,11 @@ def plot_tile_usage_map(tiles_gdf: gpd.GeoDataFrame, path: Path, *, zone: str = 
             inside_col = "inside_predict_area"
             used_col = "sampled_by_predict_edge"
         else:
-            inside_col = "inside_precache_polygon" if "inside_precache_polygon" in tiles.columns else "inside_predict_area"
+            inside_col = (
+                "inside_precache_polygon"
+                if "inside_precache_polygon" in tiles.columns
+                else "inside_predict_area"
+            )
             used_col = "used_in_features"
         if inside_col not in tiles.columns:
             tiles[inside_col] = False
@@ -4382,10 +4954,12 @@ def plot_tile_usage_map(tiles_gdf: gpd.GeoDataFrame, path: Path, *, zone: str = 
     plt.close(fig)
 
 
-def plot_confusion_matrix(metrics: Dict[str, Any], path: Path, *, title: str) -> None:
+def plot_confusion_matrix(metrics: dict[str, Any], path: Path, *, title: str) -> None:
     plt = _import_pyplot()
     labels = list(metrics.get("confusion_matrix_labels") or [])
-    cm = np.asarray(metrics.get("confusion_matrix") or np.zeros((len(labels), len(labels))), dtype=float)
+    cm = np.asarray(
+        metrics.get("confusion_matrix") or np.zeros((len(labels), len(labels))), dtype=float
+    )
     fig_w = max(7.0, 0.55 * max(1, len(labels)))
     fig, ax = plt.subplots(figsize=(fig_w, fig_w))
     im = ax.imshow(cm, cmap="Blues")
@@ -4445,15 +5019,15 @@ def plot_feature_importance(feature_importance: pd.DataFrame, path: Path) -> Non
 def write_model_card(
     artifacts: SurfaceAIArtifacts,
     *,
-    selected: Dict[str, Any],
-    group_selected: Optional[Dict[str, Any]] = None,
+    selected: dict[str, Any],
+    group_selected: dict[str, Any] | None = None,
     config: SurfaceAIConfig,
     dataset: pd.DataFrame,
-    dangerous_metrics: Optional[Dict[str, Any]] = None,
-    tile_coverage: Optional[Dict[str, Any]] = None,
-    calibration_metrics: Optional[Dict[str, Any]] = None,
-    spatial_ablation: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    dangerous_metrics: dict[str, Any] | None = None,
+    tile_coverage: dict[str, Any] | None = None,
+    calibration_metrics: dict[str, Any] | None = None,
+    spatial_ablation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     known = dataset[dataset["is_surface_known"]]
     train = dataset[dataset["surface_ai_split"] == "train"]
     test = dataset[dataset["surface_ai_split"] == "test"]
@@ -4479,10 +5053,14 @@ def write_model_card(
         "calibration_method": selected.get("calibration_method", config.calibration_method),
         "ece_top_label_before": None,
         "ece_top_label_after": (calibration_metrics or {}).get("ece_top_label"),
-        "spatial_prior_ablation": spatial_ablation or {"enabled": bool(config.run_spatial_prior_ablation)},
+        "spatial_prior_ablation": spatial_ablation
+        or {"enabled": bool(config.run_spatial_prior_ablation)},
         "dangerous_error_metrics": dangerous_metrics or {},
         "tile_coverage": tile_coverage or {},
-        "neighbor_features": {"enabled": bool(config.use_neighbor_features), "hops": int(config.neighbor_hops)},
+        "neighbor_features": {
+            "enabled": bool(config.use_neighbor_features),
+            "hops": int(config.neighbor_hops),
+        },
         "limitations": [
             "class imbalance",
             "rare surfaces are hard to learn",
@@ -4491,8 +5069,10 @@ def write_model_card(
         "safe_to_use_for_routing": bool(
             (dangerous_metrics or {}).get("dangerous_upgrade_rate_effective", 1.0)
             <= float(config.max_dangerous_upgrade_rate_effective)
-            and selected["metrics"].get("recall_bad_surface", 0.0) >= float(config.min_bad_surface_recall)
-            and (calibration_metrics or {}).get("ece_top_label", 1.0) <= float(config.max_calibration_ece)
+            and selected["metrics"].get("recall_bad_surface", 0.0)
+            >= float(config.min_bad_surface_recall)
+            and (calibration_metrics or {}).get("ece_top_label", 1.0)
+            <= float(config.max_calibration_ece)
             and bool(selected.get("calibrated", False))
         ),
     }
@@ -4504,11 +5084,11 @@ def write_model_card(
 def write_group_direct_model_card(
     artifacts: SurfaceAIArtifacts,
     *,
-    selected: Dict[str, Any],
+    selected: dict[str, Any],
     config: SurfaceAIConfig,
     dataset: pd.DataFrame,
-    calibration_metrics: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    calibration_metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     train = dataset[dataset["surface_ai_split"] == "train"]
     test = dataset[dataset["surface_ai_split"] == "test"]
     metrics = selected["metrics"]
@@ -4516,7 +5096,12 @@ def write_group_direct_model_card(
         "model_name": f"surface_ai_{selected['model_key']}",
         "target": "group_direct",
         "group_target_mode": config.group_target_mode,
-        "classes": sorted(dataset.loc[dataset["is_surface_known"], "surface_group_direct_label"].astype(str).unique().tolist()),
+        "classes": sorted(
+            dataset.loc[dataset["is_surface_known"], "surface_group_direct_label"]
+            .astype(str)
+            .unique()
+            .tolist()
+        ),
         "features": models_feature_set_from_key(selected["model_key"]),
         "training_edges": int(len(train)),
         "test_edges": int(len(test)),
@@ -4535,7 +5120,7 @@ def write_group_direct_model_card(
     return card
 
 
-def models_feature_set_from_key(model_key: str) -> List[str]:
+def models_feature_set_from_key(model_key: str) -> list[str]:
     fs = _candidate_feature_set(model_key)
     if fs == "osm":
         return ["osm"]
@@ -4551,16 +5136,16 @@ def models_feature_set_from_key(model_key: str) -> List[str]:
 def write_report(
     artifacts: SurfaceAIArtifacts,
     *,
-    summary: Dict[str, Any],
-    label_meta: Dict[str, Any],
-    selected: Dict[str, Any],
-    group_selected: Optional[Dict[str, Any]] = None,
+    summary: dict[str, Any],
+    label_meta: dict[str, Any],
+    selected: dict[str, Any],
+    group_selected: dict[str, Any] | None = None,
     baseline_table: pd.DataFrame,
     config: SurfaceAIConfig,
-    run_meta: Dict[str, Any],
-    tile_coverage: Optional[Dict[str, Any]] = None,
-    area_meta: Optional[Dict[str, Any]] = None,
-    holdout_metrics: Optional[Dict[str, Any]] = None,
+    run_meta: dict[str, Any],
+    tile_coverage: dict[str, Any] | None = None,
+    area_meta: dict[str, Any] | None = None,
+    holdout_metrics: dict[str, Any] | None = None,
 ) -> None:
     top = baseline_table[baseline_table["target"].astype(str).str.contains("concrete")].sort_values(
         ["macro_f1", "balanced_accuracy"],
@@ -4660,19 +5245,19 @@ def write_report(
 def write_metrics_json(
     artifacts: SurfaceAIArtifacts,
     *,
-    selected: Dict[str, Any],
-    group_selected: Optional[Dict[str, Any]] = None,
-    models: Dict[str, Any],
-    group_models: Optional[Dict[str, Any]] = None,
+    selected: dict[str, Any],
+    group_selected: dict[str, Any] | None = None,
+    models: dict[str, Any],
+    group_models: dict[str, Any] | None = None,
     baseline_table: pd.DataFrame,
-    summary: Dict[str, Any],
-    label_meta: Dict[str, Any],
+    summary: dict[str, Any],
+    label_meta: dict[str, Any],
     config: SurfaceAIConfig,
-    run_meta: Dict[str, Any],
-    tile_coverage: Optional[Dict[str, Any]] = None,
-    calibration_metrics: Optional[Dict[str, Any]] = None,
-    area_meta: Optional[Dict[str, Any]] = None,
-    holdout_metrics: Optional[Dict[str, Any]] = None,
+    run_meta: dict[str, Any],
+    tile_coverage: dict[str, Any] | None = None,
+    calibration_metrics: dict[str, Any] | None = None,
+    area_meta: dict[str, Any] | None = None,
+    holdout_metrics: dict[str, Any] | None = None,
 ) -> None:
     payload = {
         "selected_model": selected,
@@ -4713,11 +5298,11 @@ def write_metrics_json(
 def write_model_joblib(
     artifacts: SurfaceAIArtifacts,
     *,
-    selected: Dict[str, Any],
-    models: Dict[str, Any],
+    selected: dict[str, Any],
+    models: dict[str, Any],
     feature_importance: pd.DataFrame,
     config: SurfaceAIConfig,
-    label_meta: Dict[str, Any],
+    label_meta: dict[str, Any],
 ) -> None:
     key = selected["model_key"]
     bundle = {
@@ -4739,8 +5324,8 @@ def write_model_joblib(
 def write_group_direct_joblib(
     artifacts: SurfaceAIArtifacts,
     *,
-    selected: Dict[str, Any],
-    models: Dict[str, Any],
+    selected: dict[str, Any],
+    models: dict[str, Any],
     config: SurfaceAIConfig,
 ) -> None:
     key = selected["model_key"]
@@ -4760,16 +5345,16 @@ def write_group_direct_joblib(
 
 def run_surface_ai_experiment(
     *,
-    settings: Optional[Settings] = None,
-    config: Optional[SurfaceAIConfig] = None,
-    max_edges: Optional[int] = None,
-    output_dir: Optional[Path] = None,
+    settings: Settings | None = None,
+    config: SurfaceAIConfig | None = None,
+    max_edges: int | None = None,
+    output_dir: Path | None = None,
     progress: ProgressFactory = progress_iter,
 ) -> SurfaceAIArtifacts:
     settings = settings or Settings()
     config = config or SurfaceAIConfig.from_env()
     artifacts = artifact_paths(experiment_output_dir(settings, config, output_dir))
-    run_meta: Dict[str, Any] = {
+    run_meta: dict[str, Any] = {
         "tiles_dir": config.tiles_dir or str(Path(settings.cache_dir) / "tiles"),
         "tile_zoom": int(config.tile_zoom or settings.satellite_zoom),
         "tms_server": config.tms_server or settings.tms_server,
@@ -4785,10 +5370,12 @@ def run_surface_ai_experiment(
             int(run_meta["tile_zoom"]),
             precache_polygon=precache_polygon,
         )
-        train_polygon, predict_polygon, tile_coverage_polygon, area_meta = build_train_predict_polygons(
-            settings,
-            config,
-            tiles_gdf,
+        train_polygon, predict_polygon, tile_coverage_polygon, area_meta = (
+            build_train_predict_polygons(
+                settings,
+                config,
+                tiles_gdf,
+            )
         )
         area_meta.update(
             {
@@ -4798,8 +5385,14 @@ def run_surface_ai_experiment(
         )
         if save_heavy_artifacts(config):
             _write_polygon_geojson(artifacts.train_polygon_geojson, train_polygon, "train_polygon")
-            _write_polygon_geojson(artifacts.predict_polygon_geojson, predict_polygon, "predict_polygon")
-            _write_polygon_geojson(artifacts.tile_coverage_polygon_geojson, tile_coverage_polygon, "tile_coverage_polygon")
+            _write_polygon_geojson(
+                artifacts.predict_polygon_geojson, predict_polygon, "predict_polygon"
+            )
+            _write_polygon_geojson(
+                artifacts.tile_coverage_polygon_geojson,
+                tile_coverage_polygon,
+                "tile_coverage_polygon",
+            )
 
     edges_cache_fp = surface_ai_edges_cache_fingerprint(
         settings=settings,
@@ -4814,8 +5407,8 @@ def run_surface_ai_experiment(
     )
     edges_cache_read_roots = surface_ai_edges_cache_read_roots(settings, config)
     edges_cache_write_root = surface_ai_edges_cache_write_root(settings, config)
-    train_edges: Optional[gpd.GeoDataFrame] = None
-    predict_edges: Optional[gpd.GeoDataFrame] = None
+    train_edges: gpd.GeoDataFrame | None = None
+    predict_edges: gpd.GeoDataFrame | None = None
     if config.reuse_edges_cache:
         loaded = _try_load_surface_ai_edges_cache(edges_cache_read_roots, edges_cache_fp)
         if loaded is not None:
@@ -4865,7 +5458,9 @@ def run_surface_ai_experiment(
             )
             run_meta["predict_graph_source"] = predict_meta.get("graph_source")
             run_meta["predict_graph_path"] = predict_meta.get("graph_path")
-            run_meta["predict_graph_fallback_reasons"] = predict_meta.get("graph_fallback_reasons", [])
+            run_meta["predict_graph_fallback_reasons"] = predict_meta.get(
+                "graph_fallback_reasons", []
+            )
 
         for _ in progress(range(1), "[5/10] Filter predict graph", total=1):
             predict_edges = filter_edges_to_polygon(predict_raw, predict_polygon)
@@ -4925,7 +5520,9 @@ def run_surface_ai_experiment(
         candidates=config.model_candidates,
         progress=progress,
     )
-    concrete_selected = select_model_for_target(concrete_models, concrete_table, config, target="concrete_compact")
+    concrete_selected = select_model_for_target(
+        concrete_models, concrete_table, config, target="concrete_compact"
+    )
     concrete_models["_selected"] = concrete_selected
     group_models, group_table = train_evaluate_task_models(
         dataset,
@@ -4935,7 +5532,9 @@ def run_surface_ai_experiment(
         candidates=config.group_model_candidates,
         progress=progress,
     )
-    group_selected = select_model_for_target(group_models, group_table, config, target="group_direct")
+    group_selected = select_model_for_target(
+        group_models, group_table, config, target="group_direct"
+    )
     group_models["_selected"] = group_selected
     apply_posthoc_calibration_to_selected(
         dataset,
@@ -4971,8 +5570,14 @@ def run_surface_ai_experiment(
     }
     baseline_table = pd.concat([concrete_table, group_table], axis=0, ignore_index=True)
 
-    predictions = predict_all_edges(dataset, concrete_models, group_models, config, progress=progress)
-    predictions_inside = predictions[predictions.get("is_prediction_candidate", pd.Series(False, index=predictions.index)).astype(bool)].copy()
+    predictions = predict_all_edges(
+        dataset, concrete_models, group_models, config, progress=progress
+    )
+    predictions_inside = predictions[
+        predictions.get(
+            "is_prediction_candidate", pd.Series(False, index=predictions.index)
+        ).astype(bool)
+    ].copy()
     summary["predictions_produced_inside_polygon"] = int(len(predictions_inside))
     if save_heavy_artifacts(config):
         write_predictions_csv(predictions, artifacts.predictions_csv)
@@ -4980,7 +5585,9 @@ def run_surface_ai_experiment(
         write_predictions_geojson(predictions, edges, artifacts.predictions_geojson)
     write_predictions_csv(predictions_inside, artifacts.predictions_inside_polygon_csv)
     if save_heavy_artifacts(config):
-        write_predictions_geojson(predictions_inside, predict_edges, artifacts.predictions_inside_polygon_geojson)
+        write_predictions_geojson(
+            predictions_inside, predict_edges, artifacts.predictions_inside_polygon_geojson
+        )
     write_runtime_router_predictions_from_experiment(
         predictions_inside,
         predict_edges,
@@ -5009,10 +5616,18 @@ def run_surface_ai_experiment(
     dangerous_overall = dict(group_selected.get("metrics", {}))
     dangerous_flat = {
         "dangerous_upgrade_rate_raw": dangerous_overall.get("dangerous_upgrade_rate_raw", 0.0),
-        "dangerous_upgrade_rate_effective": dangerous_overall.get("dangerous_upgrade_rate_effective", 0.0),
-        "dangerous_upgrade_length_m_effective": dangerous_overall.get("dangerous_upgrade_length_m_effective", 0.0),
+        "dangerous_upgrade_rate_effective": dangerous_overall.get(
+            "dangerous_upgrade_rate_effective", 0.0
+        ),
+        "dangerous_upgrade_length_m_effective": dangerous_overall.get(
+            "dangerous_upgrade_length_m_effective", 0.0
+        ),
     }
-    spatial_ablation = write_spatial_prior_ablation(artifacts, baseline_table) if save_heavy_artifacts(config) else {"enabled": bool(config.run_spatial_prior_ablation)}
+    spatial_ablation = (
+        write_spatial_prior_ablation(artifacts, baseline_table)
+        if save_heavy_artifacts(config)
+        else {"enabled": bool(config.run_spatial_prior_ablation)}
+    )
     concrete_calibration = (
         calibration_artifacts_for_selected(
             dataset,
@@ -5033,13 +5648,19 @@ def run_surface_ai_experiment(
         config,
         target="group_direct",
     )
-    feature_importance = feature_importance_df(concrete_models[concrete_selected["model_key"]]["model"])
+    feature_importance = feature_importance_df(
+        concrete_models[concrete_selected["model_key"]]["model"]
+    )
     neighbor_importance = feature_importance[
         feature_importance["feature"].astype(str).str.contains("neighbor_", regex=False)
     ].copy()
     if neighbor_importance.empty:
         neighbor_importance = feature_importance.head(30).copy()
-    predictions_predict_area = predictions[predictions.get("inside_predict_area", pd.Series(False, index=predictions.index)).astype(bool)].copy()
+    predictions_predict_area = predictions[
+        predictions.get("inside_predict_area", pd.Series(False, index=predictions.index)).astype(
+            bool
+        )
+    ].copy()
     dangerous_global = write_dangerous_errors_split_csv(
         predictions,
         artifacts.dangerous_errors_global_test_csv,
@@ -5087,7 +5708,9 @@ def run_surface_ai_experiment(
         elif step == 3:
             plot_feature_importance(feature_importance, artifacts.feature_importance_png)
             if save_heavy_artifacts(config):
-                plot_feature_importance(neighbor_importance, artifacts.neighbor_feature_importance_png)
+                plot_feature_importance(
+                    neighbor_importance, artifacts.neighbor_feature_importance_png
+                )
         elif step == 4:
             plot_dangerous_errors_split_map(
                 dangerous_global,
@@ -5103,7 +5726,11 @@ def run_surface_ai_experiment(
                 artifacts.dangerous_errors_predict_holdout_effective_png,
                 split_name="predict_holdout",
                 mode="effective",
-                expected_count=int((holdout_metrics.get("group_direct") or {}).get("dangerous_upgrade_count_effective", 0)),
+                expected_count=int(
+                    (holdout_metrics.get("group_direct") or {}).get(
+                        "dangerous_upgrade_count_effective", 0
+                    )
+                ),
             )
             if save_heavy_artifacts(config):
                 plot_dangerous_errors_split_map(
@@ -5120,7 +5747,11 @@ def run_surface_ai_experiment(
                     artifacts.dangerous_errors_predict_holdout_raw_png,
                     split_name="predict_holdout",
                     mode="raw",
-                    expected_count=int((holdout_metrics.get("group_direct") or {}).get("dangerous_upgrade_count_raw", 0)),
+                    expected_count=int(
+                        (holdout_metrics.get("group_direct") or {}).get(
+                            "dangerous_upgrade_count_raw", 0
+                        )
+                    ),
                 )
                 write_dangerous_errors_csv(predictions, artifacts.dangerous_errors_csv)
         else:
@@ -5157,7 +5788,9 @@ def run_surface_ai_experiment(
             "env_settings": asdict(config),
             "graph_fingerprint": graph_fp,
             "neighbor_features_leakage_guard": True,
-            "holdout_labels_masked_for_neighbor_features": bool(config.mask_holdout_labels_for_neighbors),
+            "holdout_labels_masked_for_neighbor_features": bool(
+                config.mask_holdout_labels_for_neighbors
+            ),
             "holdout_neighbor_test_labels_used": False,
         }
         initial_file_count = len([p for p in artifacts.output_dir.iterdir() if p.is_file()])
@@ -5166,8 +5799,12 @@ def run_surface_ai_experiment(
             concrete_selected,
             group_selected,
             holdout_metrics,
-            dangerous_global_rows=int(dangerous_global["dangerous_upgrade_effective"].sum()) if not dangerous_global.empty else 0,
-            dangerous_global_expected=int(dangerous_overall.get("dangerous_upgrade_count_effective", 0)),
+            dangerous_global_rows=int(dangerous_global["dangerous_upgrade_effective"].sum())
+            if not dangerous_global.empty
+            else 0,
+            dangerous_global_expected=int(
+                dangerous_overall.get("dangerous_upgrade_count_effective", 0)
+            ),
             output_file_count=initial_file_count,
         )
         safety = safety_decision_summary(config, group_selected, group_calibration, warnings)
@@ -5198,7 +5835,10 @@ def run_surface_ai_experiment(
                 config=config,
                 run_meta=run_meta,
                 tile_coverage=tile_coverage,
-                calibration_metrics={"concrete": concrete_calibration, "group_direct": group_calibration},
+                calibration_metrics={
+                    "concrete": concrete_calibration,
+                    "group_direct": group_calibration,
+                },
                 area_meta=area_meta,
                 holdout_metrics=holdout_metrics,
             )
@@ -5258,13 +5898,20 @@ def run_surface_ai_experiment(
             selected=concrete_selected,
             group_selected=group_selected,
             holdout_metrics=holdout_metrics,
-            calibration_metrics={"concrete": concrete_calibration, "group_direct": group_calibration},
+            calibration_metrics={
+                "concrete": concrete_calibration,
+                "group_direct": group_calibration,
+            },
             dangerous_metrics=dangerous_flat,
-            predictions_inside=predictions_inside[prediction_columns(predictions_inside)].head(5000),
+            predictions_inside=predictions_inside[prediction_columns(predictions_inside)].head(
+                5000
+            ),
             dangerous_global=dangerous_global,
             dangerous_holdout=dangerous_holdout,
             run_config=run_config,
-            artifact_manifest=expected_compact_manifest(artifacts) if is_compact_output(config) else artifact_manifest(artifacts.output_dir),
+            artifact_manifest=expected_compact_manifest(artifacts)
+            if is_compact_output(config)
+            else artifact_manifest(artifacts.output_dir),
         )
 
     return artifacts

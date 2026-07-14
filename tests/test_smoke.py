@@ -44,10 +44,7 @@ class SmokeTests(unittest.TestCase):
     def test_settings_area_polygon_wkt_flag(self) -> None:
         from bike_router.config import Settings
 
-        samara = (
-            "POLYGON ((50.08 53.18, 50.22 53.18, 50.22 53.26, "
-            "50.08 53.26, 50.08 53.18))"
-        )
+        samara = "POLYGON ((50.08 53.18, 50.22 53.18, 50.22 53.26, 50.08 53.26, 50.08 53.18))"
         with patch.dict(os.environ, {"AREA_POLYGON_WKT": samara}):
             s = Settings()
             self.assertTrue(s.has_area_polygon)
@@ -103,12 +100,8 @@ class SmokeTests(unittest.TestCase):
         c = corridor_bbox_cache_key(50.0800001, 53.18, 50.22, 53.26, s)
         self.assertEqual(a, c)
 
-        stub = corridor_bbox_cache_key(
-            50.08, 53.18, 50.22, 53.26, s, skip_satellite_green=True
-        )
-        full = corridor_bbox_cache_key(
-            50.08, 53.18, 50.22, 53.26, s, skip_satellite_green=False
-        )
+        stub = corridor_bbox_cache_key(50.08, 53.18, 50.22, 53.26, s, skip_satellite_green=True)
+        full = corridor_bbox_cache_key(50.08, 53.18, 50.22, 53.26, s, skip_satellite_green=False)
         self.assertEqual(stub, full)
 
     def test_corridor_bbox_cache_key_grid_merges_nearby(self) -> None:

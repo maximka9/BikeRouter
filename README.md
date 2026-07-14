@@ -180,7 +180,14 @@ deploy/
 
 ```bash
 python -m pip install -r requirements.txt
-copy .env.example .env
+cp .env.example .env
+python -m bike_router
+```
+
+PowerShell:
+
+```powershell
+Copy-Item .env.example .env
 python -m bike_router
 ```
 

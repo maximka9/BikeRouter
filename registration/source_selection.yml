@@ -1,6 +1,7 @@
-include:
+program_include:
   - bike_router
-include_files:
+archive_include:
+  - bike_router
   - README.md
   - CHANGELOG.md
   - AUTHORS.md
@@ -36,6 +37,36 @@ archive_suffixes:
   - .sh
   - .example
 exclude:
+  - bike_router/frontend/vendor
+  - bike_router/tools/*experiment*.py
+  - bike_router/tools/route_batch_experiment.py
+  - bike_router/tools/route_variants_experiment.py
+  - bike_router/tools/weather_scenarios_experiment.py
+  - bike_router/tools/heat_stress_experiment.py
+  - bike_router/tools/heat_weather_experiment.py
+  - bike_router/tools/surface_runtime_route_experiment.py
+  - bike_router/tools/_batch_experiment_mp.py
+  - bike_router/tools/_experiment_common.py
+  - bike_router/tools/_heat_mp_worker.py
+  - bike_router/tools/_run_variants_weather_batch.py
+  - tests
+  - docs
+  - data
+  - cache
+  - experiment_outputs
+  - registration/private
+  - registration/out
+  - .git
+  - .github
+  - __pycache__
+  - .pytest_cache
+  - .mypy_cache
+  - .ruff_cache
+  - .venv
+  - venv
+  - dist
+  - build
+archive_extra_exclude:
   - bike_router/frontend/vendor
   - tests
   - docs

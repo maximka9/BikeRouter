@@ -1,5 +1,5 @@
-# Зафиксированные версии для воспроизводимой установки (Python 3.10+).
-# Установка: pip install -r bike_router/requirements.txt
+# Зафиксированные версии для воспроизводимой установки (Python 3.11+).
+# Установка: python -m pip install -r requirements.txt
 #
 # Windows: если зависает import osmnx / pyogrio (GDAL) — см. README «Windows: import osmnx»;
 # надёжно: conda-forge или переустановка pyogrio, без дублирующего GDAL в PATH.

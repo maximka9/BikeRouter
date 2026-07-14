@@ -1,11 +1,10 @@
 """
 Точка входа для локального запуска веб-сервера.
 
-    cd NIR
     python -m bike_router
 
-По умолчанию слушает ``0.0.0.0:8000`` — удобно открыть сайт с телефона в той же Wi‑Fi
-(в браузере ``http://<IPv4_ПК>:8000``). Только этот компьютер: ``BIKE_ROUTER_HOST=127.0.0.1``.
+По умолчанию слушает ``127.0.0.1:8000``. Для доступа из сети задайте
+``BIKE_ROUTER_HOST=0.0.0.0`` явно.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ def main() -> None:
     configure_root_logging()
     import uvicorn
 
-    host = os.getenv("BIKE_ROUTER_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    host = os.getenv("BIKE_ROUTER_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.getenv("BIKE_ROUTER_PORT", "8000").strip() or "8000")
 
     uvicorn.run(

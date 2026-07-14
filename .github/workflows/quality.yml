@@ -1,0 +1,58 @@
+name: Quality checks
+
+on:
+  push:
+    branches:
+      - main
+      - registration-prep
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest ruff mypy reportlab pyyaml
+
+      - name: Ruff format
+        run: python -m ruff format --check .
+
+      - name: Ruff lint
+        run: python -m ruff check .
+
+      - name: Targeted mypy
+        run: python -m mypy bike_router/api.py bike_router/models.py bike_router/config.py registration/scripts
+
+      - name: Pytest
+        run: python -m pytest -q
+
+      - name: Registration abstract
+        run: |
+          python -m registration.scripts.calculate_program_size
+          python -m registration.scripts.check_abstract
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

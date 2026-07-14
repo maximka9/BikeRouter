@@ -13,7 +13,6 @@ dev = [
     "ruff",
     "mypy",
     "reportlab",
-    "gitleaks",
 ]
 
 [tool.pytest.ini_options]

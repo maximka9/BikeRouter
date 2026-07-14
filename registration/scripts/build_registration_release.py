@@ -57,6 +57,18 @@ def _write_checksums(files: list[Path], archive: Path | None = None) -> Path:
     rows = []
     for item in files:
         rows.append(f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {relative_path(item)}")
+    private_docs = [
+        OUT_DIR / "01_abstract.txt",
+        OUT_DIR / "02_deposit.pdf",
+        OUT_DIR / "02_deposit_backup.pdf",
+        OUT_DIR / "03_program_size.json",
+        OUT_DIR / "04_source_manifest.csv",
+    ]
+    for item in private_docs:
+        if item.is_file():
+            rows.append(
+                f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.relative_to(ROOT).as_posix()}"
+            )
     if archive is not None:
         rows.append(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}")
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
